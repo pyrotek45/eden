@@ -219,6 +219,91 @@ pub fn load_wav(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
     Ok((mono, sample_rate))
 }
 
+/// Load an OGG/Vorbis file and return mono f32 samples + sample rate.
+pub fn load_ogg(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
+    use lewton::inside_ogg::OggStreamReader;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("OGG open error: {}", e))?;
+    let mut reader = OggStreamReader::new(file)
+        .map_err(|e| format!("OGG decode error: {}", e))?;
+    let sample_rate = reader.ident_hdr.audio_sample_rate;
+    let channels = reader.ident_hdr.audio_channels as usize;
+
+    let mut interleaved: Vec<f32> = Vec::new();
+    while let Some(pck) = reader.read_dec_packet_itl()
+        .map_err(|e| format!("OGG packet error: {}", e))?
+    {
+        // lewton returns i16 interleaved samples; normalise to f32
+        interleaved.extend(pck.iter().map(|&s| s as f32 / 32768.0));
+    }
+
+    // Mix down to mono
+    let mono: Vec<f32> = if channels > 1 {
+        interleaved
+            .chunks(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect()
+    } else {
+        interleaved
+    };
+
+    Ok((mono, sample_rate))
+}
+
+/// Load any supported audio file (WAV or OGG/Vorbis) by extension.
+/// Returns mono f32 samples + sample rate.
+pub fn load_audio(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("ogg") => load_ogg(path),
+        _           => load_wav(path),
+    }
+}
+
+/// Load any supported audio file and return interleaved f32 samples, channel count,
+/// and sample rate. Used for stereo waveform display.
+pub fn load_audio_interleaved(path: &std::path::Path) -> Result<(Vec<f32>, usize, u32), String> {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("ogg") => {
+            use lewton::inside_ogg::OggStreamReader;
+            let file = std::fs::File::open(path)
+                .map_err(|e| format!("OGG open error: {}", e))?;
+            let mut reader = OggStreamReader::new(file)
+                .map_err(|e| format!("OGG decode error: {}", e))?;
+            let sample_rate = reader.ident_hdr.audio_sample_rate;
+            let channels = reader.ident_hdr.audio_channels as usize;
+            let mut interleaved: Vec<f32> = Vec::new();
+            while let Some(pck) = reader.read_dec_packet_itl()
+                .map_err(|e| format!("OGG packet error: {}", e))?
+            {
+                interleaved.extend(pck.iter().map(|&s| s as f32 / 32768.0));
+            }
+            Ok((interleaved, channels, sample_rate))
+        }
+        _ => {
+            let reader = hound::WavReader::open(path)
+                .map_err(|e| format!("WAV open error: {}", e))?;
+            let spec = reader.spec();
+            let channels = spec.channels as usize;
+            let sample_rate = spec.sample_rate;
+            let samples: Vec<f32> = match spec.sample_format {
+                hound::SampleFormat::Int => {
+                    let max_val = (1u32 << (spec.bits_per_sample - 1)) as f32;
+                    reader
+                        .into_samples::<i32>()
+                        .filter_map(|s| s.ok())
+                        .map(|s| s as f32 / max_val)
+                        .collect()
+                }
+                hound::SampleFormat::Float => reader
+                    .into_samples::<f32>()
+                    .filter_map(|s| s.ok())
+                    .collect(),
+            };
+            Ok((samples, channels, sample_rate))
+        }
+    }
+}
+
 // ── MIDI pitch → frequency ────────────────────────────────────────────
 
 fn midi_to_freq(pitch: u8) -> f64 {
@@ -292,6 +377,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         let mut track_effects: Vec<Vec<(String, Box<dyn EffectModule>)>> = Vec::new();
         // Persistent master rack effect instances (applied to the stereo mix).
         let mut master_effects: Vec<(String, Box<dyn EffectModule>)> = Vec::new();
+
+        // When transport stops, effects with tails (reverb, delay) keep
+        // draining for up to this many samples so their tail rings out
+        // instead of being abruptly cut.
+        let mut tail_frames_remaining: usize = 0;
+        let mut was_playing = false;
 
         // Per-track arp state: (step_index, last_step_beat, held_pitches)
         let mut track_arp_state: Vec<(usize, f64, Vec<u8>)> = Vec::new();
@@ -451,9 +542,24 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
                 }
 
+                // Detect transport stop transition → start draining effect tails
+                if was_playing && !snap.playing {
+                    // Allow up to 6 seconds of tail drain (reverb, delay, etc.)
+                    tail_frames_remaining = (sample_rate * 6.0) as usize;
+                    // Release all non-preview voices so synths enter their
+                    // release phase instead of sustaining forever.
+                    for voice in voices.iter_mut() {
+                        if voice.preview_samples_remaining.is_none() && !voice.released {
+                            voice.released = true;
+                        }
+                    }
+                }
+                was_playing = snap.playing;
+
                 if !snap.playing {
                     // Transport not playing — silence the transport output
-                    // but still process sample preview and note preview voices
+                    // but still process sample preview, note preview voices,
+                    // and drain any remaining effect tails.
                     let frames = data.len() / channels;
                     let mut frame_samples = vec![0.0_f32; frames];
 
@@ -515,6 +621,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
 
                     // Process each voice sample-by-sample
+                    let mut preview_rms_accum = vec![0.0_f32; num_tracks];
+                    let mut preview_rms_pre_accum = vec![0.0_f32; num_tracks];
                     for fi in 0..frames {
                         // Auto-release countdown for preview voices
                         for voice in voices.iter_mut() {
@@ -551,12 +659,22 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         // Normalize + run effect chain per track (same as main path)
                         for ti in 0..num_tracks {
                             if per_track_sample[ti] == (0.0, 0.0) && per_track_voices[ti] == 0 {
-                                continue;
+                                let has_tail = ti < track_effects.len()
+                                    && track_effects[ti].iter().any(|(_, fx)| fx.has_tail());
+                                if !has_tail {
+                                    continue;
+                                }
                             }
                             if per_track_voices[ti] > 0 {
                                 let norm = (per_track_voices[ti] as f64).sqrt();
                                 per_track_sample[ti].0 /= norm;
                                 per_track_sample[ti].1 /= norm;
+                            }
+                            // Accumulate pre-effect RMS for meters
+                            let pre_mono =
+                                ((per_track_sample[ti].0 + per_track_sample[ti].1) * 0.5) as f32;
+                            if ti < preview_rms_pre_accum.len() {
+                                preview_rms_pre_accum[ti] += pre_mono * pre_mono;
                             }
                             if ti < track_effects.len() {
                                 let track = &snap.tracks[ti];
@@ -571,6 +689,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                         per_track_sample[ti] = (ol, or2);
                                     }
                                 }
+                            }
+                            // Accumulate post-effect RMS for meters
+                            let post_mono =
+                                ((per_track_sample[ti].0 + per_track_sample[ti].1) * 0.5) as f32;
+                            if ti < preview_rms_accum.len() {
+                                preview_rms_accum[ti] += post_mono * post_mono;
                             }
                         }
                         // Mix all tracks to mono for preview output
@@ -587,6 +711,23 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
                     // Remove dead voices
                     voices.retain(|v| !voice_is_done(v));
+
+                    // Count down tail drain timer
+                    if tail_frames_remaining > 0 {
+                        tail_frames_remaining = tail_frames_remaining.saturating_sub(frames);
+                        if tail_frames_remaining == 0 {
+                            // Tail drain complete — reset all effects so stale
+                            // reverb/delay state doesn't bleed into next playback.
+                            for track_fx in track_effects.iter_mut() {
+                                for (_, fx) in track_fx.iter_mut() {
+                                    fx.reset();
+                                }
+                            }
+                            for (_, fx) in master_effects.iter_mut() {
+                                fx.reset();
+                            }
+                        }
+                    }
 
                     // Expand to channels + write back
                     for (fi, frame) in data.chunks_mut(channels).enumerate() {
@@ -608,11 +749,38 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         if src_idx >= s.preview_samples.len() && s.preview_playing {
                             s.preview_playing = false;
                         }
-                        // Decay track meters to zero when transport is stopped
-                        for v in s.track_rms.iter_mut() {
-                            *v *= 0.85;
-                            if *v < 0.0005 {
-                                *v = 0.0;
+                        // Update track meters with preview voice levels so FX vis
+                        // meters respond during keyboard input (not just playback).
+                        let n = num_tracks;
+                        if s.track_rms.len() != n {
+                            s.track_rms.resize(n, 0.0);
+                        }
+                        if s.track_rms_pre_effect.len() != n {
+                            s.track_rms_pre_effect.resize(n, 0.0);
+                        }
+                        if frames > 0 {
+                            for (i, v) in s.track_rms.iter_mut().enumerate() {
+                                let rms = if i < preview_rms_accum.len() {
+                                    (preview_rms_accum[i] / frames as f32).sqrt()
+                                } else {
+                                    0.0
+                                };
+                                *v = *v * 0.85 + rms * 0.15;
+                            }
+                            for (i, v) in s.track_rms_pre_effect.iter_mut().enumerate() {
+                                let rms = if i < preview_rms_pre_accum.len() {
+                                    (preview_rms_pre_accum[i] / frames as f32).sqrt()
+                                } else {
+                                    0.0
+                                };
+                                *v = *v * 0.85 + rms * 0.15;
+                            }
+                        } else {
+                            for v in s.track_rms.iter_mut() {
+                                *v *= 0.85;
+                                if *v < 0.0005 {
+                                    *v = 0.0;
+                                }
                             }
                         }
                         // Update oscilloscope even when stopped
@@ -1141,7 +1309,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             continue;
                         }
                         if per_track_sample[ti] == (0.0, 0.0) && per_track_voices[ti] == 0 {
-                            continue;
+                            let has_tail = ti < track_effects.len()
+                                && track_effects[ti].iter().any(|(_, fx)| fx.has_tail());
+                            if !has_tail {
+                                continue;
+                            }
                         }
                         // Normalize voices before effects
                         if per_track_voices[ti] > 0 {

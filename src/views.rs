@@ -710,7 +710,9 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             state.options_open = !state.options_open;
         }
 
-        // Save
+        // Save (left-click = quick save, right-click = save as)
+        let save_btn_x = slots[2].0;
+        let save_btn_w = slots[2].1;
         let __auto_id_9 = inp.next_id();
         let save_clicked = button(
             canvas,
@@ -718,14 +720,14 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &state.theme,
             &ButtonParams {
                 id: __auto_id_9,
-                x: slots[2].0,
+                x: save_btn_x,
                 y: btn_y,
-                width: slots[2].1,
+                width: save_btn_w,
                 height: btn_h,
                 label: "Save".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
-                hint: Some("Save project (Ctrl+S)".into()),
+                hint: Some("Save (Ctrl+S) | Right-click: Save As".into()),
                 ..Default::default()
             },
         );
@@ -734,6 +736,20 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
                 Ok(()) => println!("[save] Project saved"),
                 Err(e) => eprintln!("[save] Error: {}", e),
             }
+        }
+        // Right-click Save → open Save As popup
+        if inp.mouse_in_rect(save_btn_x, btn_y, save_btn_w, btn_h)
+            && inp.right_mouse_pressed
+            && !inp.consumed
+        {
+            let default_name = if let Some(ref p) = state.last_save_path {
+                p.clone()
+            } else {
+                format!("{}.eden.json", state.project.name)
+            };
+            state.save_as_name_buffer = default_name;
+            state.save_as_popup_open = true;
+            inp.consumed = true;
         }
 
         // Export
@@ -1152,7 +1168,7 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
             input.consume();
         }
 
-        if ruler_area && input.mouse_pressed && !near_end {
+        if ruler_area && input.mouse_pressed && !near_end && input.drag_widget == WidgetId::None {
             if near_start {
                 state.loop_drag_orig = Some((loop_start, loop_end));
                 input.drag_widget = WidgetId::LoopStart;
@@ -1176,7 +1192,12 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
             }
             input.consume();
         }
-        if ruler_area && input.mouse_pressed && near_end && !near_start {
+        if ruler_area
+            && input.mouse_pressed
+            && near_end
+            && !near_start
+            && input.drag_widget == WidgetId::None
+        {
             state.loop_drag_orig = Some((loop_start, loop_end));
             input.drag_widget = WidgetId::LoopEnd;
             input.active_widget = WidgetId::LoopEnd;
@@ -1212,7 +1233,7 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
     } else {
         // Allow drawing new loop region when disabled
         let ruler_area = input.mouse_in_rect(header_w, y, w - header_w, h);
-        if ruler_area && input.mouse_pressed {
+        if ruler_area && input.mouse_pressed && input.drag_widget == WidgetId::None {
             state.loop_drag_orig = Some((
                 state.project.transport.loop_region.start,
                 state.project.transport.loop_region.end,
@@ -2390,7 +2411,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
             let clip_y = y + 2;
             let clip_h = (track_height - 4).max(4);
-            let header_h = 20; // clip title bar height (clickable select/drag zone)
+            let header_h = 20; // clip title bar height (thicker for easier grabbing)
 
             let clip_hover = input.mouse_in_rect(cx, clip_y, cw.max(4), clip_h)
                 && input.mouse_y < top + state.track_area_height()
@@ -2447,6 +2468,38 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             let hdr_b = type_base[2].saturating_sub(15);
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(hdr_r, hdr_g, hdr_b, 220));
             let _ = canvas.fill_rect(Rect::new(cx, clip_y, cw.max(4) as u32, header_h as u32));
+
+            // ── Clone-zone indicator: subtle >> marks on right side of header ──
+            // Show always so users can discover the zone, brighter when hovered.
+            if cw > 30 {
+                let header_hover_zone = clip_hit_test(input, cx, clip_y, cw, clip_h, header_h);
+                let in_header_zone =
+                    header_hover_zone == ClipHitZone::Header && topmost_hovered_ci == Some(ci);
+                let arrow_alpha = if in_header_zone { 220u8 } else { 80u8 };
+                let arrow_col = sdl2::pixels::Color::RGBA(255, 255, 255, arrow_alpha);
+                canvas.set_draw_color(arrow_col);
+                // Draw two small ">>" chevrons near right of header
+                let ax = cx + cw - 16;
+                let ay = clip_y + header_h / 2 - 2;
+                // First chevron ">"
+                let _ = canvas.draw_line(
+                    sdl2::rect::Point::new(ax, ay),
+                    sdl2::rect::Point::new(ax + 3, ay + 2),
+                );
+                let _ = canvas.draw_line(
+                    sdl2::rect::Point::new(ax + 3, ay + 2),
+                    sdl2::rect::Point::new(ax, ay + 4),
+                );
+                // Second chevron ">"
+                let _ = canvas.draw_line(
+                    sdl2::rect::Point::new(ax + 5, ay),
+                    sdl2::rect::Point::new(ax + 8, ay + 2),
+                );
+                let _ = canvas.draw_line(
+                    sdl2::rect::Point::new(ax + 8, ay + 2),
+                    sdl2::rect::Point::new(ax + 5, ay + 4),
+                );
+            }
 
             // ── Clip type badge (tiny colored block on left) ──
             let badge_color = match &state.project.tracks[track_idx].clips[ci] {
@@ -2761,11 +2814,8 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     ClipHitZone::LeftHandle => {
                         input.active_widget = WidgetId::ClipLeftHandle(track_id, ci);
                         input.drag_widget = WidgetId::ClipLeftHandle(track_id, ci);
-                        // drag_start_value  = original clip end beat (fixed anchor)
-                        // drag_start_value2 = original clip start (for undo)
                         input.drag_start_value = clip_start + clip_len;
                         input.drag_start_value2 = clip_start;
-                        // Store original audio offset for left-edge audio clip resize
                         if let crate::models::Clip::Audio(ref ac) =
                             state.project.tracks[track_idx].clips[ci]
                         {
@@ -2773,7 +2823,6 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         } else {
                             state.drag_audio_offset_orig = 0.0;
                         }
-                        // Snapshot original starts for all selected clips (for multi-resize)
                         state.drag_original_positions.clear();
                         for &(t_id, c_idx) in &state.selected_clips {
                             if let Some(tr) = state.project.tracks.iter().find(|t| t.id == t_id) {
@@ -2788,11 +2837,8 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     ClipHitZone::RightHandle => {
                         input.active_widget = WidgetId::ClipRightHandle(track_id, ci);
                         input.drag_widget = WidgetId::ClipRightHandle(track_id, ci);
-                        // drag_start_value  = original clip length
-                        // drag_start_value2 = original clip start (unchanged, for undo)
                         input.drag_start_value = clip_len;
                         input.drag_start_value2 = clip_start;
-                        // Store original audio offset for right-edge extend-past-end
                         if let crate::models::Clip::Audio(ref ac) =
                             state.project.tracks[track_idx].clips[ci]
                         {
@@ -2800,7 +2846,6 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         } else {
                             state.drag_audio_offset_orig = 0.0;
                         }
-                        // Snapshot original lengths for all selected clips (for multi-resize)
                         state.drag_original_positions.clear();
                         for &(t_id, c_idx) in &state.selected_clips {
                             if let Some(tr) = state.project.tracks.iter().find(|t| t.id == t_id) {
@@ -2813,27 +2858,21 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         }
                     }
                     ClipHitZone::Header => {
-                        // Header = select + move drag zone (the only clickable part of the clip)
+                        // Header is the ONLY zone that selects/drags a clip.
                         if input.shift() {
-                            // Shift+click header: toggle in multi-select
+                            // Shift+click header: toggle clip in multi-select
                             if state.selected_clips.contains(&(track_id, ci)) {
                                 state.selected_clips.remove(&(track_id, ci));
+                                // Clear selected_clip so is_selected becomes false
+                                if state.selected_clip == Some((track_id, ci)) {
+                                    state.selected_clip = None;
+                                }
                             } else {
                                 state.selected_clips.insert((track_id, ci));
+                                state.selected_clip = Some((track_id, ci));
                             }
-                            state.selected_clip = Some((track_id, ci));
-                            input.consumed = true;
-                        } else if input.ctrl() || input.alt() {
-                            // Ctrl+click header = add to selection only, no drag
-                            if state.selected_clips.contains(&(track_id, ci)) {
-                                state.selected_clips.remove(&(track_id, ci));
-                            } else {
-                                state.selected_clips.insert((track_id, ci));
-                            }
-                            state.selected_clip = Some((track_id, ci));
-                            input.consumed = true;
                         } else {
-                            // Plain click: select this clip (deselect others if not already selected)
+                            // Select the clip if not already selected
                             if !state.selected_clips.contains(&(track_id, ci)) {
                                 state.selected_clips.clear();
                                 state.selected_clips.insert((track_id, ci));
@@ -2844,69 +2883,67 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             state.selected_tracks.insert(track_id);
 
                             if input.click_type == Some(crate::input::ClickType::Double) {
-                                // Double-click header → open editor for this clip
-                                state.bottom_panel_tab = BottomPanelTab::PianoRoll;
-                                if !state.bottom_panel_open {
-                                    state.bottom_panel_open = true;
-                                    state.bottom_panel_height = 320;
-                                }
-                                // Center piano roll on note density for MIDI clips
-                                if let crate::models::Clip::Midi(m) = &state
-                                    .project
-                                    .tracks
-                                    .iter()
-                                    .find(|t| t.id == track_id)
-                                    .and_then(|t| t.clips.get(ci))
-                                    .cloned()
-                                    .unwrap_or(crate::models::Clip::Midi(crate::models::MidiClip {
-                                        name: String::new(),
-                                        color: [0; 4],
-                                        start_time: 0.0,
-                                        length: 1.0,
-                                        notes: vec![],
-                                    }))
-                                {
-                                    state.piano_roll_scroll_x = 0.0;
-                                    if !m.notes.is_empty() {
-                                        let avg_pitch: f64 =
-                                            m.notes.iter().map(|n| n.pitch as f64).sum::<f64>()
-                                                / m.notes.len() as f64;
-                                        const NOTE_H: i32 = 12;
-                                        let row_y = (127.0 - avg_pitch) as i32 * NOTE_H;
-                                        let panel_h = state.bottom_panel_effective_h();
-                                        let visible_h = (panel_h - 20 - 68 - 10).max(40);
-                                        let center_y = row_y - visible_h / 2;
-                                        state.piano_roll_scroll_y = center_y.max(0);
-                                    }
-                                }
+                                // Double-click header = rename (handled above in text-field block)
                                 input.active_widget = WidgetId::ClipBody(track_id, ci);
+                            } else if input.ctrl() || input.alt() {
+                                // Ctrl+drag from header = clone drag
+                                state.clip_drag_is_copy = true;
+                                state.clip_drag_copy = None;
+                                input.active_widget = WidgetId::ClipBody(track_id, ci);
+                                input.drag_widget = WidgetId::ClipBody(track_id, ci);
+                                input.drag_start_value = clip_start;
                             } else {
-                                // Normal drag-move
+                                // Normal drag from header = move
                                 state.clip_drag_is_copy = false;
                                 state.clip_drag_copy = None;
                                 input.active_widget = WidgetId::ClipBody(track_id, ci);
                                 input.drag_widget = WidgetId::ClipBody(track_id, ci);
                                 input.drag_start_value = clip_start;
+                            }
 
-                                // Snapshot original positions for all selected clips
-                                state.drag_original_positions.clear();
-                                for &(tid, cidx) in &state.selected_clips {
-                                    if let Some(track) =
-                                        state.project.tracks.iter().find(|t| t.id == tid)
-                                    {
-                                        if let Some(c) = track.clips.get(cidx) {
-                                            state
-                                                .drag_original_positions
-                                                .insert((tid, cidx), c.start_time());
-                                        }
+                            // Snapshot original positions for ALL selected clips
+                            state.drag_original_positions.clear();
+                            for &(tid, cidx) in &state.selected_clips {
+                                if let Some(track) =
+                                    state.project.tracks.iter().find(|t| t.id == tid)
+                                {
+                                    if let Some(c) = track.clips.get(cidx) {
+                                        state
+                                            .drag_original_positions
+                                            .insert((tid, cidx), c.start_time());
                                     }
                                 }
                             }
                         }
                     }
                     ClipHitZone::Body | ClipHitZone::None => {
-                        // Body is pass-through — rubber-band and background clicks
-                        // work normally. Do not consume the click.
+                        // Double-click on clip body → open the clip in the editor.
+                        // Single body clicks pass through (allow rubber-band and lane clicks).
+                        if input.click_type == Some(crate::input::ClickType::Double)
+                            && topmost_hovered_ci == Some(ci)
+                            && !input.consumed
+                        {
+                            // Select this clip
+                            state.selected_clip = Some((track_id, ci));
+                            state.selected_clips.clear();
+                            state.selected_clips.insert((track_id, ci));
+                            state.selected_track = Some(track_id);
+                            state.selected_tracks.clear();
+                            state.selected_tracks.insert(track_id);
+                            // Open the appropriate editor panel tab
+                            let tab = match &state.project.tracks[track_idx].clips[ci] {
+                                crate::models::Clip::Midi(_) => BottomPanelTab::PianoRoll,
+                                crate::models::Clip::Audio(_) => BottomPanelTab::PianoRoll,
+                                crate::models::Clip::Automation(_) => BottomPanelTab::PianoRoll,
+                            };
+                            state.bottom_panel_tab = tab;
+                            if !state.bottom_panel_open {
+                                state.bottom_panel_open = true;
+                                state.bottom_panel_height = 320;
+                            }
+                            input.consume();
+                        }
+                        // Non-double-click body clicks still pass through for rubber-band etc.
                     }
                 }
             }
@@ -2997,7 +3034,12 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
             // Find the TOPMOST (last drawn = highest index) clip under the cursor
             // Delete on right-click press OR right-click drag (erase mode)
-            if input.right_mouse_pressed || (input.right_mouse_down && !input.right_mouse_pressed) {
+            // For drag-erase, require mouse movement to avoid cascade-deleting stacked clips
+            if input.right_mouse_pressed
+                || (input.right_mouse_down
+                    && !input.right_mouse_pressed
+                    && (input.mouse_dx != 0 || input.mouse_dy != 0))
+            {
                 let mut top_clip_idx: Option<usize> = None;
                 for ci in 0..clip_count {
                     let clip_start = state.project.tracks[track_idx].clips[ci].start_time();
@@ -3395,19 +3437,21 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         state.focused_panel = crate::state::FocusedPanel::Arrangement;
 
         // Click on empty background (no clip or widget hit) deselects everything
-        // unless shift is held (shift preserves existing selection for append)
+        // unless shift or ctrl is held
         if input.drag_widget == WidgetId::None
             && input.active_widget == WidgetId::None
             && !input.shift()
+            && !input.ctrl()
         {
             state.selected_clips.clear();
             state.selected_clip = None;
         }
     }
 
-    // Start rubberband on click in empty area (no clip/widget active).
-    // No Ctrl needed — rubber-band now works from anywhere in the lane.
+    // Start rubberband on Ctrl+click in lane area (no clip header was clicked).
+    // Body clicks pass through so rubber-band works from inside clips too.
     if in_lane_area
+        && input.ctrl()
         && input.mouse_pressed
         && !input.consumed
         && input.drag_widget == WidgetId::None
@@ -4994,7 +5038,7 @@ fn draw_instrument_rack(
                              // Modules maintain a comfortable minimum height and overflow/clip gracefully
                              // rather than squishing when the panel is short
     let natural_h = (h - 40 - scrollbar_h).max(60);
-    let slot_h = natural_h.max(200); // never shrink below 200px — overflow instead
+    let slot_h = natural_h.max(300); // tall enough for 4 rows of knobs (need ~266px)
     let slot_gap = 8i32;
     let scroll_offset = state.rack_scroll_x as i32;
     let mut sx = 10i32 - scroll_offset;
@@ -5412,14 +5456,17 @@ fn draw_instrument_rack(
                     input.drag_widget = WidgetId::None;
                 }
 
-                // Click (no drag motion) to cycle
-                if hover
+                // Click (no drag motion) to cycle: left click = forward, right click = backward
+                let left_cycle = hover
                     && input.mouse_released
                     && input.drag_widget == WidgetId::None
-                    && !input.consumed
-                {
+                    && !input.consumed;
+                let right_cycle = hover && input.right_mouse_released && !input.consumed;
+
+                if left_cycle || right_cycle {
                     let old_val = val;
-                    let new_idx = if input.shift() {
+                    let go_back = right_cycle || input.shift();
+                    let new_idx = if go_back {
                         if idx == 0 {
                             opts.len() - 1
                         } else {
@@ -5820,17 +5867,21 @@ fn draw_instrument_rack(
                 }
 
                 // Click (release with no drag) to cycle forward/backward
-                if sc_hover
+                // Left click = forward, right click = backward
+                let sc_left_click = sc_hover
                     && input.mouse_released
                     && !sc_dragging
                     && input.drag_widget == WidgetId::None
-                    && !input.consumed
-                {
+                    && !input.consumed;
+                let sc_right_click = sc_hover && input.right_mouse_released && !input.consumed;
+
+                if sc_left_click || sc_right_click {
                     input.consume();
                     let track_id_cur = state.project.tracks[ti].id;
                     let choices = build_sc_choices(&state.project.tracks, track_id_cur);
                     let current_idx = choices.iter().position(|c| *c == sc_track_id).unwrap_or(0);
-                    let next_idx = if input.shift() {
+                    let go_back = sc_right_click || input.shift();
+                    let next_idx = if go_back {
                         if current_idx == 0 {
                             choices.len() - 1
                         } else {
@@ -5851,6 +5902,16 @@ fn draw_instrument_rack(
                         &mut state.project,
                     );
                     state.dirty = true;
+                }
+
+                // Middle-click: open dropdown popup for quick sidechain selection
+                if sc_hover && input.middle_mouse_pressed && !input.consumed {
+                    input.consume();
+                    state.sc_popup_open = true;
+                    state.sc_popup_x = sc_btn_x;
+                    state.sc_popup_y = sc_y + sc_btn_h;
+                    state.sc_popup_track_idx = ti;
+                    state.sc_popup_slot_idx = slot_idx;
                 }
             }
         }
@@ -5877,6 +5938,9 @@ fn draw_instrument_rack(
                 .map(|p| (p.id.clone(), p.value))
                 .collect();
 
+            // ── NOTE: Track rack vis must stay in sync with master rack vis ──
+            // When updating any effect visualization here, the same change
+            // MUST be applied in draw_master_rack for the master rack.
             match plugin_ref {
                 "LP Filter" | "HP Filter" => {
                     let is_lp = plugin_ref == "LP Filter";
@@ -5938,33 +6002,55 @@ fn draw_instrument_rack(
                         .iter()
                         .find(|(k, _)| k == "threshold")
                         .map(|(_, v)| *v)
-                        .unwrap_or(0.5);
+                        .unwrap_or(-18.0);
                     let ratio = params_snap
                         .iter()
                         .find(|(k, _)| k == "ratio")
                         .map(|(_, v)| *v)
-                        .unwrap_or(0.3);
+                        .unwrap_or(4.0);
+                    let knee_db = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "knee")
+                        .map(|(_, v)| *v)
+                        .unwrap_or(6.0);
                     let accent = Theme::c(state.theme.accent);
 
+                    // Curve shows -60..0 dBFS on both axes
                     let curve_h = (vis_h * 2 / 3).max(20);
                     let w_f = vis_w as f32;
                     let h_f = curve_h as f32;
-                    let thresh_db = -40.0 + threshold * 40.0;
-                    let comp_ratio = 1.0 + ratio * 19.0;
+                    let thresh_db = threshold; // already in dBFS
+                    let comp_ratio = ratio.max(1.0);
 
-                    // Draw curve
+                    // Draw unity diagonal (faint)
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 100));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, vis_y + curve_h),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, vis_y),
+                    );
+
+                    // Draw compression curve
                     canvas.set_draw_color(sdl2::pixels::Color::RGBA(
-                        accent.r, accent.g, accent.b, 180,
+                        accent.r, accent.g, accent.b, 200,
                     ));
+                    let slope = 1.0 - 1.0 / comp_ratio;
+                    let half_knee = knee_db * 0.5;
                     let mut prev_y_px = 0i32;
                     for px in 0..vis_w as i32 {
-                        let in_db = -40.0 + (px as f32 / w_f) * 40.0;
-                        let out_db = if in_db <= thresh_db {
-                            in_db
+                        // Map pixel to dB input (-60..0)
+                        let in_db = -60.0 + (px as f32 / w_f) * 60.0;
+                        let over = in_db - thresh_db;
+                        let gr = if over <= -half_knee {
+                            0.0_f32
+                        } else if over >= half_knee {
+                            -slope * over
                         } else {
-                            thresh_db + (in_db - thresh_db) / comp_ratio
+                            let x = over + half_knee;
+                            let t = x / knee_db.max(0.01);
+                            -slope * knee_db * t * t * 0.5
                         };
-                        let y_norm = 1.0 - (out_db + 40.0) / 40.0;
+                        let out_db = in_db + gr;
+                        let y_norm = 1.0 - (out_db + 60.0) / 60.0;
                         let y_px = vis_y + (y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
                         if px > 0 {
                             let _ = canvas.draw_line(
@@ -5975,60 +6061,94 @@ fn draw_instrument_rack(
                         prev_y_px = y_px;
                     }
                     // Threshold line
-                    let thresh_x = vis_x + (threshold * w_f) as i32;
+                    let thresh_x_norm = (thresh_db + 60.0) / 60.0;
+                    let thresh_x = vis_x + (thresh_x_norm * w_f) as i32;
                     canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 80, 80, 150));
                     let _ = canvas.draw_line(
                         sdl2::rect::Point::new(thresh_x, vis_y),
                         sdl2::rect::Point::new(thresh_x, vis_y + curve_h),
                     );
-                    // Unity diagonal
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 100));
-                    let _ = canvas.draw_line(
-                        sdl2::rect::Point::new(vis_x, vis_y + curve_h),
-                        sdl2::rect::Point::new(vis_x + vis_w as i32, vis_y),
-                    );
 
-                    // GR meter on bottom third
+                    // ── Input + GR meters on bottom third ──
                     let meter_y = vis_y + curve_h + 2;
                     let meter_h = (vis_h - curve_h - 4).max(4);
-                    // Use pre-effect RMS to estimate how much gain reduction is occurring.
-                    // track_rms_pre_effect is the signal level BEFORE compression,
-                    // which accurately drives the GR display.
-                    let track_rms: f32 = state
+                    let track_rms_pre: f32 = state
                         .meters
                         .track_rms_pre_effect
                         .get(ti)
                         .copied()
                         .unwrap_or(0.0);
-                    // Estimate gain reduction from RMS vs threshold
-                    let rms_db = if track_rms > 1e-6 {
-                        20.0 * track_rms.log10()
+                    let track_rms_post: f32 =
+                        state.meters.track_rms.get(ti).copied().unwrap_or(0.0);
+
+                    let in_db_rms = if track_rms_pre > 1e-6 {
+                        20.0 * track_rms_pre.log10()
                     } else {
                         -60.0_f32
                     };
-                    let gr_db = if rms_db > thresh_db {
-                        let over = rms_db - thresh_db;
-                        -(over - over / comp_ratio)
+                    let out_db_rms = if track_rms_post > 1e-6 {
+                        20.0 * track_rms_post.log10()
                     } else {
-                        0.0_f32
+                        -60.0_f32
                     };
-                    let gr_norm = (-gr_db / 20.0_f32).clamp(0.0, 1.0);
-                    // Background track
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(30, 30, 36, 220));
+                    // Estimate GR from in vs out
+                    let gr_db_live = (out_db_rms - in_db_rms).min(0.0);
+
+                    // Draw input level bar
+                    let in_meter_w = (vis_w as i32 - 4) / 2 - 1;
+                    let in_frac = ((in_db_rms + 60.0) / 60.0).clamp(0.0, 1.0);
+                    let in_fill_w = (in_frac * in_meter_w as f32) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(25, 25, 30, 220));
                     let _ = canvas.fill_rect(Rect::new(
                         vis_x + 2,
                         meter_y,
-                        (vis_w - 4).max(1),
+                        in_meter_w as u32,
                         meter_h as u32,
                     ));
-                    // GR bar (left to right = 0 to max reduction)
-                    let gr_bar_w = ((gr_norm * (vis_w as f32 - 4.0)) as i32).max(0);
-                    if gr_bar_w > 0 {
-                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 80, 60, 220));
+                    if in_fill_w > 0 {
+                        let col = if in_frac > 0.85 {
+                            sdl2::pixels::Color::RGBA(220, 60, 60, 230)
+                        } else if in_frac > 0.6 {
+                            sdl2::pixels::Color::RGBA(200, 180, 50, 230)
+                        } else {
+                            sdl2::pixels::Color::RGBA(60, 180, 80, 230)
+                        };
+                        canvas.set_draw_color(col);
                         let _ = canvas.fill_rect(Rect::new(
                             vis_x + 2,
+                            meter_y + meter_h - 1,
+                            in_fill_w as u32,
+                            1,
+                        ));
+                    }
+                    draw_pixel_label(
+                        canvas,
+                        &state.theme,
+                        "IN",
+                        vis_x + 2,
+                        meter_y,
+                        20,
+                        sdl2::pixels::Color::RGBA(140, 200, 140, 160),
+                    );
+
+                    // Draw GR bar (fills from right, as GR increases)
+                    let gr_meter_x = vis_x + 2 + in_meter_w + 2;
+                    let gr_meter_w = vis_w as i32 - 4 - in_meter_w - 2;
+                    let gr_frac = ((-gr_db_live) / 24.0).clamp(0.0, 1.0);
+                    let gr_fill_w = (gr_frac * gr_meter_w as f32) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(25, 25, 30, 220));
+                    let _ = canvas.fill_rect(Rect::new(
+                        gr_meter_x,
+                        meter_y,
+                        gr_meter_w as u32,
+                        meter_h as u32,
+                    ));
+                    if gr_fill_w > 0 {
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 80, 60, 220));
+                        let _ = canvas.fill_rect(Rect::new(
+                            gr_meter_x,
                             meter_y,
-                            gr_bar_w as u32,
+                            gr_fill_w as u32,
                             meter_h as u32,
                         ));
                     }
@@ -6036,10 +6156,10 @@ fn draw_instrument_rack(
                         canvas,
                         &state.theme,
                         "GR",
-                        vis_x + 4,
-                        meter_y + 1,
+                        gr_meter_x + 2,
+                        meter_y,
                         20,
-                        sdl2::pixels::Color::RGBA(180, 180, 190, 160),
+                        sdl2::pixels::Color::RGBA(180, 100, 100, 160),
                     );
 
                     // Sidechain indicator
@@ -6191,60 +6311,90 @@ fn draw_instrument_rack(
                         .find(|(k, _)| k == "ceiling_db")
                         .map(|(_, v)| *v)
                         .unwrap_or(0.0);
-                    let _accent = Theme::c(state.theme.accent);
+                    let accent = Theme::c(state.theme.accent);
 
-                    // ── Input meter (left) ──
-                    let meter_w = 8i32;
-                    let meter_gap = 3i32;
+                    // ── Transfer curve (upper 2/3) ──
+                    // X axis = input dB (-60..0), Y axis = output dB (-60..ceiling)
+                    let curve_h = (vis_h as f32 * 0.65) as i32;
+                    let w_f = vis_w as f32;
+                    let h_f = curve_h as f32;
+
+                    // Reference line (unity, no processing)
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 50, 60, 120));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, vis_y + curve_h),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, vis_y),
+                    );
+
+                    // Draw the limiter transfer curve
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                        accent.r, accent.g, accent.b, 220,
+                    ));
+                    let mut prev_y_px = 0i32;
+                    for px in 0..vis_w as i32 {
+                        // Map pixel to input dB: 0..w → -60..0
+                        let in_db_c = -60.0 + (px as f32 / w_f) * 60.0;
+                        // Apply input gain
+                        let after_gain = in_db_c + gain_db;
+                        // Limiter: hard ceiling
+                        let out_db_c = after_gain.min(ceiling_db);
+                        // Map output dB to Y: -60dB = bottom, 0dB = top
+                        let y_norm = 1.0 - (out_db_c + 60.0) / 60.0;
+                        let y_px = vis_y + (y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                        if px > 0 {
+                            let _ = canvas.draw_line(
+                                sdl2::rect::Point::new(vis_x + px - 1, prev_y_px),
+                                sdl2::rect::Point::new(vis_x + px, y_px),
+                            );
+                        }
+                        prev_y_px = y_px;
+                    }
+
+                    // Ceiling horizontal reference line
+                    let ceil_y_norm = 1.0 - (ceiling_db + 60.0) / 60.0;
+                    let ceil_y = vis_y + (ceil_y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 90, 70, 160));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, ceil_y),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, ceil_y),
+                    );
+
+                    // ── Meters on bottom third (IN, OUT, GR) ──
+                    let meter_y = vis_y + curve_h + 3;
+                    let meter_h = (vis_h - curve_h - 6).max(4);
+
                     let input_rms: f32 = state
                         .meters
                         .track_rms_pre_effect
                         .get(ti)
                         .copied()
                         .unwrap_or(0.0);
-                    let output_rms: f32 = state.meters.track_rms.get(ti).copied().unwrap_or(0.0);
-
-                    // dB values
-                    let in_db = if input_rms > 1e-6 {
+                    let in_db_live = if input_rms > 1e-6 {
                         20.0 * input_rms.log10()
                     } else {
                         -60.0_f32
                     };
-                    let out_db = if output_rms > 1e-6 {
-                        20.0 * output_rms.log10()
-                    } else {
-                        -60.0_f32
+                    let gr_db = {
+                        let after = in_db_live + gain_db;
+                        if after > ceiling_db {
+                            ceiling_db - after
+                        } else {
+                            0.0_f32
+                        }
                     };
 
-                    // Estimate gain reduction
-                    let in_after_gain_db = in_db + gain_db;
-                    let gr_db = if in_after_gain_db > ceiling_db {
-                        ceiling_db - in_after_gain_db
-                    } else {
-                        0.0_f32
-                    };
-
-                    // Meter area layout
-                    let in_meter_x = vis_x + 2;
-                    let out_meter_x = vis_x + meter_w + meter_gap + 2;
-                    let gr_meter_x = out_meter_x + meter_w + meter_gap;
-                    let gr_meter_w = 12i32;
-                    let info_x = gr_meter_x + gr_meter_w + meter_gap + 2;
-                    let meter_top = vis_y + 2;
-                    let meter_h = (vis_h - 4).max(4);
-
-                    // Input meter background
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 24, 220));
+                    // Input level bar (horizontal)
+                    let in_meter_w = (vis_w as i32 - 4) / 2 - 1;
+                    let in_frac = ((in_db_live + 60.0) / 60.0).clamp(0.0, 1.0);
+                    let in_fill_w = (in_frac * in_meter_w as f32) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(25, 25, 30, 220));
                     let _ = canvas.fill_rect(Rect::new(
-                        in_meter_x,
-                        meter_top,
-                        meter_w as u32,
+                        vis_x + 2,
+                        meter_y,
+                        in_meter_w as u32,
                         meter_h as u32,
                     ));
-                    // Input meter fill (dB-scaled: -60dB..0dB → 0..1)
-                    let in_frac = ((in_db + 60.0) / 60.0).clamp(0.0, 1.0);
-                    let in_fill_h = (in_frac * meter_h as f32) as i32;
-                    if in_fill_h > 0 {
+                    if in_fill_w > 0 {
                         let col = if in_frac > 0.85 {
                             sdl2::pixels::Color::RGBA(220, 60, 60, 230)
                         } else if in_frac > 0.6 {
@@ -6254,162 +6404,77 @@ fn draw_instrument_rack(
                         };
                         canvas.set_draw_color(col);
                         let _ = canvas.fill_rect(Rect::new(
-                            in_meter_x,
-                            meter_top + meter_h - in_fill_h,
-                            meter_w as u32,
-                            in_fill_h as u32,
+                            vis_x + 2,
+                            meter_y + meter_h - 1,
+                            in_fill_w as u32,
+                            1,
                         ));
                     }
-
-                    // Output meter background
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 24, 220));
-                    let _ = canvas.fill_rect(Rect::new(
-                        out_meter_x,
-                        meter_top,
-                        meter_w as u32,
-                        meter_h as u32,
-                    ));
-                    // Output meter fill
-                    let out_frac = ((out_db + 60.0) / 60.0).clamp(0.0, 1.0);
-                    let out_fill_h = (out_frac * meter_h as f32) as i32;
-                    if out_fill_h > 0 {
-                        let col = if out_frac > 0.85 {
-                            sdl2::pixels::Color::RGBA(220, 60, 60, 230)
-                        } else if out_frac > 0.6 {
-                            sdl2::pixels::Color::RGBA(200, 180, 50, 230)
-                        } else {
-                            sdl2::pixels::Color::RGBA(60, 160, 220, 230)
-                        };
-                        canvas.set_draw_color(col);
-                        let _ = canvas.fill_rect(Rect::new(
-                            out_meter_x,
-                            meter_top + meter_h - out_fill_h,
-                            meter_w as u32,
-                            out_fill_h as u32,
-                        ));
-                    }
-
-                    // Gain reduction meter (inverted: fills from top)
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 24, 220));
-                    let _ = canvas.fill_rect(Rect::new(
-                        gr_meter_x,
-                        meter_top,
-                        gr_meter_w as u32,
-                        meter_h as u32,
-                    ));
-                    let gr_frac = ((-gr_db) / 24.0).clamp(0.0, 1.0);
-                    let gr_fill_h = (gr_frac * meter_h as f32) as i32;
-                    if gr_fill_h > 0 {
-                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 80, 60, 220));
-                        let _ = canvas.fill_rect(Rect::new(
-                            gr_meter_x,
-                            meter_top,
-                            gr_meter_w as u32,
-                            gr_fill_h as u32,
-                        ));
-                    }
-
-                    // Ceiling line across all meters
-                    let ceil_frac = ((ceiling_db + 60.0) / 60.0).clamp(0.0, 1.0);
-                    let ceil_y = meter_top + meter_h - (ceil_frac * meter_h as f32) as i32;
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 100, 80, 180));
-                    let _ = canvas.draw_line(
-                        sdl2::rect::Point::new(vis_x, ceil_y),
-                        sdl2::rect::Point::new(vis_x + vis_w as i32, ceil_y),
-                    );
-
-                    // Labels
                     draw_pixel_label(
                         canvas,
                         &state.theme,
                         "IN",
-                        in_meter_x,
-                        vis_y + vis_h - 8,
-                        14,
-                        sdl2::pixels::Color::RGBA(140, 180, 140, 180),
+                        vis_x + 2,
+                        meter_y,
+                        20,
+                        sdl2::pixels::Color::RGBA(140, 200, 140, 160),
                     );
-                    draw_pixel_label(
-                        canvas,
-                        &state.theme,
-                        "OUT",
-                        out_meter_x - 1,
-                        vis_y + vis_h - 8,
-                        18,
-                        sdl2::pixels::Color::RGBA(100, 150, 200, 180),
-                    );
+
+                    // GR bar (fills from right as GR increases)
+                    let gr_meter_x = vis_x + 2 + in_meter_w + 2;
+                    let gr_meter_w = vis_w as i32 - 4 - in_meter_w - 2;
+                    let gr_frac = ((-gr_db) / 24.0).clamp(0.0, 1.0);
+                    let gr_fill_w = (gr_frac * gr_meter_w as f32) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(25, 25, 30, 220));
+                    let _ = canvas.fill_rect(Rect::new(
+                        gr_meter_x,
+                        meter_y,
+                        gr_meter_w as u32,
+                        meter_h as u32,
+                    ));
+                    if gr_fill_w > 0 {
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 80, 60, 220));
+                        let _ = canvas.fill_rect(Rect::new(
+                            gr_meter_x,
+                            meter_y,
+                            gr_fill_w as u32,
+                            meter_h as u32,
+                        ));
+                    }
                     draw_pixel_label(
                         canvas,
                         &state.theme,
                         "GR",
-                        gr_meter_x + 1,
-                        vis_y + vis_h - 8,
-                        14,
-                        sdl2::pixels::Color::RGBA(200, 100, 80, 180),
+                        gr_meter_x + 2,
+                        meter_y,
+                        20,
+                        sdl2::pixels::Color::RGBA(180, 100, 100, 160),
                     );
 
-                    // GR dB readout
+                    // GR dB readout next to GR label
                     if gr_db < -0.1 {
-                        let gr_text = format!("{:.1}", gr_db);
+                        let gr_text = format!("{:.1}dB", gr_db);
                         draw_pixel_label(
                             canvas,
                             &state.theme,
                             &gr_text,
-                            info_x,
-                            meter_top + 2,
-                            40,
-                            sdl2::pixels::Color::RGBA(200, 100, 80, 220),
-                        );
-                        draw_pixel_label(
-                            canvas,
-                            &state.theme,
-                            "dB",
-                            info_x,
-                            meter_top + 12,
-                            14,
-                            sdl2::pixels::Color::RGBA(160, 80, 60, 160),
+                            gr_meter_x + 18,
+                            meter_y,
+                            gr_meter_w - 20,
+                            sdl2::pixels::Color::RGBA(200, 100, 80, 200),
                         );
                     }
 
-                    // Input/output dB readout
-                    let in_text = if in_db > -59.0 {
-                        format!("{:.0}", in_db)
-                    } else {
-                        "-∞".into()
-                    };
+                    // Ceiling label on curve
+                    let ceil_label = format!("C:{:.1}", ceiling_db);
                     draw_pixel_label(
                         canvas,
                         &state.theme,
-                        &in_text,
-                        info_x,
-                        meter_top + meter_h / 2 - 6,
-                        30,
-                        sdl2::pixels::Color::RGBA(140, 180, 140, 160),
-                    );
-                    let out_text = if out_db > -59.0 {
-                        format!("{:.0}", out_db)
-                    } else {
-                        "-∞".into()
-                    };
-                    draw_pixel_label(
-                        canvas,
-                        &state.theme,
-                        &out_text,
-                        info_x,
-                        meter_top + meter_h / 2 + 6,
-                        30,
-                        sdl2::pixels::Color::RGBA(100, 150, 200, 160),
-                    );
-
-                    // Ceiling readout
-                    let ceil_text = format!("{:.1}", ceiling_db);
-                    draw_pixel_label(
-                        canvas,
-                        &state.theme,
-                        &ceil_text,
-                        info_x,
-                        meter_top + meter_h - 20,
-                        30,
-                        sdl2::pixels::Color::RGBA(255, 100, 80, 150),
+                        &ceil_label,
+                        vis_x + vis_w as i32 - 36,
+                        ceil_y - 10,
+                        34,
+                        sdl2::pixels::Color::RGBA(255, 100, 80, 180),
                     );
                 }
 
@@ -6456,6 +6521,11 @@ fn draw_instrument_rack(
 
     // Show drop hint when dragging a module
     if state.module_drag.is_some() && drop_hover {
+        // Hovering over empty drop zone — clear stale replace/insert indices
+        // so the module is appended at the end, not swapped with an existing slot.
+        state.module_drag_replace_idx = None;
+        state.module_drag_insert_idx = None;
+
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(100, 200, 100, 80));
         let _ = canvas.fill_rect(Rect::new(
             drop_zone_x,
@@ -6850,6 +6920,123 @@ fn draw_instrument_rack(
         let max_scroll = ((total_content_w - w) as f32).max(0.0);
         state.rack_scroll_x = (state.rack_scroll_x - delta).clamp(0.0, max_scroll);
     }
+
+    // ── Sidechain dropdown popup (triggered by middle-click) ────────
+    if state.sc_popup_open {
+        let popup_ti = state.sc_popup_track_idx;
+        let popup_si = state.sc_popup_slot_idx;
+        let popup_x = state.sc_popup_x;
+        let popup_y = state.sc_popup_y;
+
+        // Build choices: None (Self) + all non-automation tracks except self
+        let self_id = if popup_ti < state.project.tracks.len() {
+            state.project.tracks[popup_ti].id
+        } else {
+            0
+        };
+        let cur_sc = if popup_ti < state.project.tracks.len()
+            && popup_si < state.project.tracks[popup_ti].rack.len()
+        {
+            state.project.tracks[popup_ti].rack[popup_si].sidechain_track_id
+        } else {
+            None
+        };
+
+        let mut choices: Vec<(Option<u32>, String)> = vec![(None, "Self".to_string())];
+        for t in &state.project.tracks {
+            if t.id != self_id && t.track_type != crate::models::TrackType::Automation {
+                let label = if t.name.is_empty() {
+                    format!("Track {}", t.id)
+                } else {
+                    t.name.clone()
+                };
+                choices.push((Some(t.id), label));
+            }
+        }
+
+        let item_h = 18i32;
+        let popup_w = 140i32;
+        let popup_h = choices.len() as i32 * item_h;
+
+        // Shadow
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 120));
+        let _ = canvas.fill_rect(Rect::new(
+            popup_x + 2,
+            popup_y + 2,
+            popup_w as u32,
+            popup_h as u32,
+        ));
+        // Background
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(30, 32, 42, 250));
+        let _ = canvas.fill_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+        canvas.set_draw_color(Theme::c(state.theme.accent));
+        let _ = canvas.draw_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+
+        let mut clicked_choice: Option<Option<u32>> = None;
+        for (i, (sc_val, label)) in choices.iter().enumerate() {
+            let iy = popup_y + i as i32 * item_h;
+            let item_hover = input.mouse_in_rect(popup_x, iy, popup_w, item_h);
+            let is_selected = *sc_val == cur_sc;
+
+            if item_hover {
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 75, 255));
+                let _ =
+                    canvas.fill_rect(Rect::new(popup_x, iy, popup_w as u32, item_h as u32));
+            }
+            if is_selected {
+                canvas.set_draw_color(Theme::c(state.theme.accent));
+                let _ = canvas.fill_rect(Rect::new(popup_x, iy, 3, item_h as u32));
+            }
+
+            let text_col = if is_selected {
+                Theme::c(state.theme.accent)
+            } else {
+                sdl2::pixels::Color::RGBA(210, 210, 210, 255)
+            };
+            draw_pixel_label(canvas, &state.theme, label, popup_x + 6, iy + 4, popup_w - 10, text_col);
+
+            if item_hover && input.mouse_pressed {
+                clicked_choice = Some(*sc_val);
+                input.consume();
+            }
+        }
+
+        // Apply selection
+        if let Some(new_sc) = clicked_choice {
+            if new_sc != cur_sc
+                && popup_ti < state.project.tracks.len()
+                && popup_si < state.project.tracks[popup_ti].rack.len()
+            {
+                let track_id = state.project.tracks[popup_ti].id;
+                state.commands.execute(
+                    Box::new(crate::commands::SetRackSidechain {
+                        track_id,
+                        slot_idx: popup_si,
+                        old_sc: cur_sc,
+                        new_sc,
+                    }),
+                    &mut state.project,
+                );
+                state.dirty = true;
+            }
+            state.sc_popup_open = false;
+        }
+
+        // Click outside or Escape to close
+        let over_popup = input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h);
+        if (input.mouse_pressed && !over_popup)
+            || input
+                .keys_pressed
+                .contains(&sdl2::keyboard::Keycode::Escape)
+        {
+            state.sc_popup_open = false;
+        }
+
+        // Block mouse input from passing through the popup
+        if over_popup {
+            input.consume();
+        }
+    }
 }
 
 /// Draw the master output effects rack — uses the same visual style as the track rack.
@@ -6880,7 +7067,7 @@ fn draw_master_rack(
 
     let scrollbar_h = 18i32;
     let natural_h = (h - 40 - scrollbar_h).max(60);
-    let slot_h = natural_h.max(200);
+    let slot_h = natural_h.max(300); // tall enough for 4 rows of knobs (need ~266px)
     let slot_gap = 8i32;
     let scroll_offset = state.rack_scroll_x as i32;
     let mut sx = 10i32 - scroll_offset;
@@ -7200,49 +7387,48 @@ fn draw_master_rack(
                 .map(|p| (p.id.clone(), p.value))
                 .collect();
 
+            // ── NOTE: Master rack vis must stay in sync with track rack vis ──
+            // When updating any effect visualization in draw_instrument_rack,
+            // the same change MUST be applied here for the master rack.
             match plugin_name.as_str() {
                 "LP Filter" | "HP Filter" => {
+                    // SVF-model frequency response curve (synced with track rack vis)
+                    let is_lp = plugin_name == "LP Filter";
                     let cutoff = params_snap
                         .iter()
                         .find(|(k, _)| k == "cutoff")
                         .map(|(_, v)| *v)
-                        .unwrap_or(1.0);
+                        .unwrap_or(if is_lp { 1.0 } else { 0.0 });
                     let reso = params_snap
                         .iter()
                         .find(|(k, _)| k == "resonance")
                         .map(|(_, v)| *v)
                         .unwrap_or(0.0);
-                    let is_hp = plugin_name == "HP Filter";
+
+                    let w_f = vis_w as f32;
+                    let h_f = vis_h as f32;
                     let accent = Theme::c(state.theme.accent);
                     canvas.set_draw_color(sdl2::pixels::Color::RGBA(
                         accent.r, accent.g, accent.b, 200,
                     ));
-                    let w_f = vis_w as f32;
-                    let h_f = vis_h as f32;
+
                     let mut prev_y_px = 0i32;
                     for px in 0..vis_w as i32 {
-                        let freq_norm = px as f32 / w_f;
-                        let response = if is_hp {
-                            let dist = (cutoff - freq_norm).max(0.0);
-                            let base = 1.0 - (dist * 4.0).min(1.0);
-                            let peak = if (freq_norm - cutoff).abs() < 0.1 {
-                                reso * 0.5 * (1.0 - ((freq_norm - cutoff).abs() / 0.1))
-                            } else {
-                                0.0
-                            };
-                            (base + peak).clamp(0.0, 1.2)
+                        let t = px as f32 / w_f;
+                        let freq = 20.0_f32 * (20000.0_f32 / 20.0).powf(t);
+                        let cutoff_hz = 20.0_f32 * (20000.0_f32 / 20.0_f32).powf(cutoff);
+                        let ratio = freq / cutoff_hz;
+                        let q = 0.5 + reso * 10.0;
+                        let r2 = ratio * ratio;
+                        let denom = ((1.0 - r2) * (1.0 - r2) + r2 / (q * q)).sqrt();
+                        let mag = if is_lp {
+                            (1.0 / denom).min(4.0)
                         } else {
-                            let dist = (freq_norm - cutoff).max(0.0);
-                            let base = 1.0 - (dist * 4.0).min(1.0);
-                            let peak = if (freq_norm - cutoff).abs() < 0.1 {
-                                reso * 0.5 * (1.0 - ((freq_norm - cutoff).abs() / 0.1))
-                            } else {
-                                0.0
-                            };
-                            (base + peak).clamp(0.0, 1.2)
+                            (r2 / denom).min(4.0)
                         };
-                        let y_px =
-                            vis_y + (h_f - response * h_f * 0.8).clamp(0.0, h_f - 1.0) as i32;
+                        let db = 20.0 * mag.max(0.001).log10();
+                        let y_norm = 0.5 - db / 40.0;
+                        let y_px = vis_y + (y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
                         if px > 0 {
                             let _ = canvas.draw_line(
                                 sdl2::rect::Point::new(vis_x + px - 1, prev_y_px),
@@ -7251,6 +7437,172 @@ fn draw_master_rack(
                         }
                         prev_y_px = y_px;
                     }
+                    // 0dB reference line
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 120));
+                    let ref_y = vis_y + vis_h / 2;
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, ref_y),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, ref_y),
+                    );
+                }
+
+                "Compressor" => {
+                    // Compression curve + GR/IN meters (synced with track rack vis)
+                    let threshold = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "threshold")
+                        .map(|(_, v)| *v)
+                        .unwrap_or(-18.0);
+                    let ratio = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "ratio")
+                        .map(|(_, v)| *v)
+                        .unwrap_or(4.0);
+                    let knee_db = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "knee")
+                        .map(|(_, v)| *v)
+                        .unwrap_or(6.0);
+                    let accent = Theme::c(state.theme.accent);
+
+                    // Curve shows -60..0 dBFS on both axes
+                    let curve_h = (vis_h * 2 / 3).max(20);
+                    let w_f = vis_w as f32;
+                    let h_f = curve_h as f32;
+                    let thresh_db = threshold;
+                    let comp_ratio = ratio.max(1.0);
+
+                    // Draw unity diagonal (faint)
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 100));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, vis_y + curve_h),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, vis_y),
+                    );
+
+                    // Draw compression curve
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                        accent.r, accent.g, accent.b, 200,
+                    ));
+                    let slope = 1.0 - 1.0 / comp_ratio;
+                    let half_knee = knee_db * 0.5;
+                    let mut prev_y_px = 0i32;
+                    for px in 0..vis_w as i32 {
+                        let in_db = -60.0 + (px as f32 / w_f) * 60.0;
+                        let over = in_db - thresh_db;
+                        let gr = if over <= -half_knee {
+                            0.0_f32
+                        } else if over >= half_knee {
+                            -slope * over
+                        } else {
+                            let x = over + half_knee;
+                            let t = x / knee_db.max(0.01);
+                            -slope * knee_db * t * t * 0.5
+                        };
+                        let out_db = in_db + gr;
+                        let y_norm = 1.0 - (out_db + 60.0) / 60.0;
+                        let y_px = vis_y + (y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                        if px > 0 {
+                            let _ = canvas.draw_line(
+                                sdl2::rect::Point::new(vis_x + px - 1, prev_y_px),
+                                sdl2::rect::Point::new(vis_x + px, y_px),
+                            );
+                        }
+                        prev_y_px = y_px;
+                    }
+                    // Threshold line
+                    let thresh_x_norm = (thresh_db + 60.0) / 60.0;
+                    let thresh_x = vis_x + (thresh_x_norm * w_f) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 80, 80, 150));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(thresh_x, vis_y),
+                        sdl2::rect::Point::new(thresh_x, vis_y + curve_h),
+                    );
+
+                    // ── Input + GR meters on bottom third (uses master bus meters) ──
+                    let meter_y = vis_y + curve_h + 2;
+                    let meter_h = (vis_h - curve_h - 4).max(4);
+                    let track_rms_pre: f32 = state.meters.master_rms_pre;
+                    let track_rms_post: f32 = state.meters.master_rms;
+
+                    let in_db_rms = if track_rms_pre > 1e-6 {
+                        20.0 * track_rms_pre.log10()
+                    } else {
+                        -60.0_f32
+                    };
+                    let out_db_rms = if track_rms_post > 1e-6 {
+                        20.0 * track_rms_post.log10()
+                    } else {
+                        -60.0_f32
+                    };
+                    let gr_db_live = (out_db_rms - in_db_rms).min(0.0);
+
+                    // Draw input level bar
+                    let in_meter_w = (vis_w as i32 - 4) / 2 - 1;
+                    let in_frac = ((in_db_rms + 60.0) / 60.0).clamp(0.0, 1.0);
+                    let in_fill_w = (in_frac * in_meter_w as f32) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(25, 25, 30, 220));
+                    let _ = canvas.fill_rect(Rect::new(
+                        vis_x + 2,
+                        meter_y,
+                        in_meter_w as u32,
+                        meter_h as u32,
+                    ));
+                    if in_fill_w > 0 {
+                        let col = if in_frac > 0.85 {
+                            sdl2::pixels::Color::RGBA(220, 60, 60, 230)
+                        } else if in_frac > 0.6 {
+                            sdl2::pixels::Color::RGBA(200, 180, 50, 230)
+                        } else {
+                            sdl2::pixels::Color::RGBA(60, 180, 80, 230)
+                        };
+                        canvas.set_draw_color(col);
+                        let _ = canvas.fill_rect(Rect::new(
+                            vis_x + 2,
+                            meter_y + meter_h - 1,
+                            in_fill_w as u32,
+                            1,
+                        ));
+                    }
+                    draw_pixel_label(
+                        canvas,
+                        &state.theme,
+                        "IN",
+                        vis_x + 2,
+                        meter_y,
+                        20,
+                        sdl2::pixels::Color::RGBA(140, 200, 140, 160),
+                    );
+
+                    // Draw GR bar
+                    let gr_meter_x = vis_x + 2 + in_meter_w + 2;
+                    let gr_meter_w = vis_w as i32 - 4 - in_meter_w - 2;
+                    let gr_frac = ((-gr_db_live) / 24.0).clamp(0.0, 1.0);
+                    let gr_fill_w = (gr_frac * gr_meter_w as f32) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(25, 25, 30, 220));
+                    let _ = canvas.fill_rect(Rect::new(
+                        gr_meter_x,
+                        meter_y,
+                        gr_meter_w as u32,
+                        meter_h as u32,
+                    ));
+                    if gr_fill_w > 0 {
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 80, 60, 220));
+                        let _ = canvas.fill_rect(Rect::new(
+                            gr_meter_x,
+                            meter_y,
+                            gr_fill_w as u32,
+                            meter_h as u32,
+                        ));
+                    }
+                    draw_pixel_label(
+                        canvas,
+                        &state.theme,
+                        "GR",
+                        gr_meter_x + 2,
+                        meter_y,
+                        20,
+                        sdl2::pixels::Color::RGBA(180, 100, 100, 160),
+                    );
                 }
                 "EQ" => {
                     let lo_gain = params_snap
@@ -7299,6 +7651,7 @@ fn draw_master_rack(
                     );
                 }
                 "Distortion" => {
+                    // Transfer curve (synced with track rack vis)
                     let drive = params_snap
                         .iter()
                         .find(|(k, _)| k == "drive")
@@ -7312,10 +7665,11 @@ fn draw_master_rack(
                     let h_f = vis_h as f32;
                     let mut prev_y_px = 0i32;
                     for px in 0..vis_w as i32 {
-                        let x_norm = (px as f32 / w_f) * 2.0 - 1.0;
-                        let driven = (x_norm * drive).tanh();
-                        let y_norm = 0.5 - driven * 0.45;
-                        let y_px = vis_y + (y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                        let inp = (px as f32 / w_f) * 2.0 - 1.0;
+                        let driven = inp * (1.0 + drive * 9.0);
+                        let output = driven.tanh();
+                        let y_norm = 0.5 - output * 0.45;
+                        let y_px = vis_y + (y_norm * h_f) as i32;
                         if px > 0 {
                             let _ = canvas.draw_line(
                                 sdl2::rect::Point::new(vis_x + px - 1, prev_y_px),
@@ -7324,7 +7678,56 @@ fn draw_master_rack(
                         }
                         prev_y_px = y_px;
                     }
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 100));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, vis_y + vis_h),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, vis_y),
+                    );
                 }
+
+                "Delay" => {
+                    // Delay tap bars (synced with track rack vis)
+                    let time = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "time")
+                        .map(|(_, v)| *v)
+                        .unwrap_or(0.3);
+                    let feedback = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "feedback")
+                        .map(|(_, v)| *v)
+                        .unwrap_or(0.3);
+                    let mix = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "mix")
+                        .map(|(_, v)| *v)
+                        .unwrap_or(0.5);
+                    let w_f = vis_w as f32;
+                    let h_f = vis_h as f32;
+                    let accent = Theme::c(state.theme.accent);
+                    let mut level = mix;
+                    let tap_spacing = (time * w_f * 0.5).max(6.0) as i32;
+                    let tap_w = (tap_spacing / 2).max(3);
+                    let mut tap_x = vis_x + 4;
+                    for _ in 0..8 {
+                        if level < 0.02 || tap_x + tap_w > vis_x + vis_w as i32 - 2 {
+                            break;
+                        }
+                        let bar_h = (level * h_f * 0.85) as i32;
+                        let bar_y = vis_y + vis_h - bar_h;
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                            accent.r,
+                            accent.g,
+                            accent.b,
+                            (level * 220.0) as u8,
+                        ));
+                        let _ =
+                            canvas.fill_rect(Rect::new(tap_x, bar_y, tap_w as u32, bar_h as u32));
+                        tap_x += tap_spacing;
+                        level *= feedback;
+                    }
+                }
+
                 "Limiter" => {
                     let gain_db = params_snap
                         .iter()
@@ -7336,58 +7739,85 @@ fn draw_master_rack(
                         .find(|(k, _)| k == "ceiling_db")
                         .map(|(_, v)| *v)
                         .unwrap_or(0.0);
+                    let accent = Theme::c(state.theme.accent);
 
-                    // Use master bus pre/post RMS for IN/OUT levels
+                    // ── Transfer curve (upper 2/3) ──
+                    let curve_h = (vis_h as f32 * 0.65) as i32;
+                    let w_f = vis_w as f32;
+                    let h_f = curve_h as f32;
+
+                    // Unity reference line
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 50, 60, 120));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, vis_y + curve_h),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, vis_y),
+                    );
+
+                    // Draw the limiter transfer curve
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                        accent.r, accent.g, accent.b, 220,
+                    ));
+                    let mut prev_y_px = 0i32;
+                    for px in 0..vis_w as i32 {
+                        let in_db_c = -60.0 + (px as f32 / w_f) * 60.0;
+                        let after_gain = in_db_c + gain_db;
+                        let out_db_c = after_gain.min(ceiling_db);
+                        let y_norm = 1.0 - (out_db_c + 60.0) / 60.0;
+                        let y_px = vis_y + (y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                        if px > 0 {
+                            let _ = canvas.draw_line(
+                                sdl2::rect::Point::new(vis_x + px - 1, prev_y_px),
+                                sdl2::rect::Point::new(vis_x + px, y_px),
+                            );
+                        }
+                        prev_y_px = y_px;
+                    }
+
+                    // Ceiling reference line
+                    let ceil_y_norm = 1.0 - (ceiling_db + 60.0) / 60.0;
+                    let ceil_y = vis_y + (ceil_y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 90, 70, 160));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, ceil_y),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, ceil_y),
+                    );
+
+                    // ── Meters on bottom third (IN + GR) ──
+                    let meter_y = vis_y + curve_h + 3;
+                    let meter_h = (vis_h - curve_h - 6).max(4);
+
                     let input_rms = state.meters.master_rms_pre;
-                    let output_rms = state.meters.master_rms;
-
-                    let in_db = if input_rms > 1e-6 {
+                    let in_db_live = if input_rms > 1e-6 {
                         20.0 * input_rms.log10()
                     } else {
                         -60.0_f32
                     };
-                    let out_db = if output_rms > 1e-6 {
-                        20.0 * output_rms.log10()
-                    } else {
-                        -60.0_f32
-                    };
-
-                    // Use real GR from master_effect_gr if available, else estimate
                     let gr_db = state
                         .meters
                         .master_effect_gr
                         .get(slot_idx)
                         .copied()
                         .unwrap_or_else(|| {
-                            let in_after = in_db + gain_db;
-                            if in_after > ceiling_db {
-                                ceiling_db - in_after
+                            let after = in_db_live + gain_db;
+                            if after > ceiling_db {
+                                ceiling_db - after
                             } else {
                                 0.0
                             }
                         });
 
-                    let meter_w = 8i32;
-                    let meter_gap = 3i32;
-                    let in_meter_x = vis_x + 2;
-                    let out_meter_x = vis_x + meter_w + meter_gap + 2;
-                    let gr_meter_x = out_meter_x + meter_w + meter_gap;
-                    let gr_meter_w = 12i32;
-                    let info_x = gr_meter_x + gr_meter_w + meter_gap + 2;
-                    let meter_top = vis_y + 2;
-                    let meter_h = (vis_h - 4).max(4);
-
-                    // Input meter background + fill
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 24, 220));
+                    // Input level bar (horizontal)
+                    let in_meter_w = (vis_w as i32 - 4) / 2 - 1;
+                    let in_frac = ((in_db_live + 60.0) / 60.0).clamp(0.0, 1.0);
+                    let in_fill_w = (in_frac * in_meter_w as f32) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(25, 25, 30, 220));
                     let _ = canvas.fill_rect(Rect::new(
-                        in_meter_x,
-                        meter_top,
-                        meter_w as u32,
+                        vis_x + 2,
+                        meter_y,
+                        in_meter_w as u32,
                         meter_h as u32,
                     ));
-                    let in_frac = ((in_db + 60.0) / 60.0).clamp(0.0, 1.0);
-                    let in_fill_h = (in_frac * meter_h as f32) as i32;
-                    if in_fill_h > 0 {
+                    if in_fill_w > 0 {
                         let col = if in_frac > 0.85 {
                             sdl2::pixels::Color::RGBA(220, 60, 60, 230)
                         } else if in_frac > 0.6 {
@@ -7397,171 +7827,65 @@ fn draw_master_rack(
                         };
                         canvas.set_draw_color(col);
                         let _ = canvas.fill_rect(Rect::new(
-                            in_meter_x,
-                            meter_top + meter_h - in_fill_h,
-                            meter_w as u32,
-                            in_fill_h as u32,
+                            vis_x + 2,
+                            meter_y + meter_h - 1,
+                            in_fill_w as u32,
+                            1,
                         ));
                     }
-
-                    // Output meter background + fill
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 24, 220));
-                    let _ = canvas.fill_rect(Rect::new(
-                        out_meter_x,
-                        meter_top,
-                        meter_w as u32,
-                        meter_h as u32,
-                    ));
-                    let out_frac = ((out_db + 60.0) / 60.0).clamp(0.0, 1.0);
-                    let out_fill_h = (out_frac * meter_h as f32) as i32;
-                    if out_fill_h > 0 {
-                        let col = if out_frac > 0.85 {
-                            sdl2::pixels::Color::RGBA(220, 60, 60, 230)
-                        } else if out_frac > 0.6 {
-                            sdl2::pixels::Color::RGBA(200, 180, 50, 230)
-                        } else {
-                            sdl2::pixels::Color::RGBA(60, 160, 220, 230)
-                        };
-                        canvas.set_draw_color(col);
-                        let _ = canvas.fill_rect(Rect::new(
-                            out_meter_x,
-                            meter_top + meter_h - out_fill_h,
-                            meter_w as u32,
-                            out_fill_h as u32,
-                        ));
-                    }
-
-                    // GR meter background + fill (fills from top — more GR = taller bar)
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 24, 220));
-                    let _ = canvas.fill_rect(Rect::new(
-                        gr_meter_x,
-                        meter_top,
-                        gr_meter_w as u32,
-                        meter_h as u32,
-                    ));
-                    let gr_frac = ((-gr_db) / 24.0).clamp(0.0, 1.0);
-                    let gr_fill_h = (gr_frac * meter_h as f32) as i32;
-                    if gr_fill_h > 0 {
-                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 80, 60, 220));
-                        let _ = canvas.fill_rect(Rect::new(
-                            gr_meter_x,
-                            meter_top,
-                            gr_meter_w as u32,
-                            gr_fill_h as u32,
-                        ));
-                    }
-
-                    // Ceiling line across all meters
-                    let ceil_frac = ((ceiling_db + 60.0) / 60.0).clamp(0.0, 1.0);
-                    let ceil_y = meter_top + meter_h - (ceil_frac * meter_h as f32) as i32;
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 100, 80, 180));
-                    let _ = canvas.draw_line(
-                        sdl2::rect::Point::new(vis_x, ceil_y),
-                        sdl2::rect::Point::new(vis_x + vis_w as i32, ceil_y),
-                    );
-
-                    // Labels: IN / OUT / GR
                     draw_pixel_label(
                         canvas,
                         &state.theme,
                         "IN",
-                        in_meter_x,
-                        vis_y + vis_h - 8,
-                        14,
-                        sdl2::pixels::Color::RGBA(140, 180, 140, 180),
+                        vis_x + 2,
+                        meter_y,
+                        20,
+                        sdl2::pixels::Color::RGBA(140, 200, 140, 160),
                     );
-                    draw_pixel_label(
-                        canvas,
-                        &state.theme,
-                        "OUT",
-                        out_meter_x - 1,
-                        vis_y + vis_h - 8,
-                        18,
-                        sdl2::pixels::Color::RGBA(100, 150, 200, 180),
-                    );
+
+                    // GR bar (fills from left as GR increases)
+                    let gr_meter_x = vis_x + 2 + in_meter_w + 2;
+                    let gr_meter_w = vis_w as i32 - 4 - in_meter_w - 2;
+                    let gr_frac = ((-gr_db) / 24.0).clamp(0.0, 1.0);
+                    let gr_fill_w = (gr_frac * gr_meter_w as f32) as i32;
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(25, 25, 30, 220));
+                    let _ = canvas.fill_rect(Rect::new(
+                        gr_meter_x,
+                        meter_y,
+                        gr_meter_w as u32,
+                        meter_h as u32,
+                    ));
+                    if gr_fill_w > 0 {
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 80, 60, 220));
+                        let _ = canvas.fill_rect(Rect::new(
+                            gr_meter_x,
+                            meter_y,
+                            gr_fill_w as u32,
+                            meter_h as u32,
+                        ));
+                    }
                     draw_pixel_label(
                         canvas,
                         &state.theme,
                         "GR",
-                        gr_meter_x + 1,
-                        vis_y + vis_h - 8,
-                        14,
-                        sdl2::pixels::Color::RGBA(200, 100, 80, 180),
+                        gr_meter_x + 2,
+                        meter_y,
+                        20,
+                        sdl2::pixels::Color::RGBA(180, 100, 100, 160),
                     );
 
-                    // GR dB readout
                     if gr_db < -0.1 {
-                        let gr_text = format!("{:.1}", gr_db);
+                        let gr_text = format!("{:.1}dB", gr_db);
                         draw_pixel_label(
                             canvas,
                             &state.theme,
                             &gr_text,
-                            info_x,
-                            meter_top + 2,
-                            40,
-                            sdl2::pixels::Color::RGBA(200, 100, 80, 220),
-                        );
-                        draw_pixel_label(
-                            canvas,
-                            &state.theme,
-                            "dB",
-                            info_x,
-                            meter_top + 12,
-                            14,
-                            sdl2::pixels::Color::RGBA(160, 80, 60, 160),
+                            gr_meter_x + 18,
+                            meter_y,
+                            gr_meter_w - 20,
+                            sdl2::pixels::Color::RGBA(200, 100, 80, 200),
                         );
                     }
-
-                    // IN / OUT dB readouts
-                    let in_text = if in_db > -59.0 {
-                        format!("{:.0}", in_db)
-                    } else {
-                        "-∞".into()
-                    };
-                    draw_pixel_label(
-                        canvas,
-                        &state.theme,
-                        &in_text,
-                        info_x,
-                        meter_top + meter_h / 2 - 6,
-                        30,
-                        sdl2::pixels::Color::RGBA(140, 180, 140, 160),
-                    );
-                    let out_text = if out_db > -59.0 {
-                        format!("{:.0}", out_db)
-                    } else {
-                        "-∞".into()
-                    };
-                    draw_pixel_label(
-                        canvas,
-                        &state.theme,
-                        &out_text,
-                        info_x,
-                        meter_top + meter_h / 2 + 4,
-                        30,
-                        sdl2::pixels::Color::RGBA(100, 150, 200, 160),
-                    );
-
-                    // Ceiling readout
-                    let ceil_text = format!("{:.1}", ceiling_db);
-                    draw_pixel_label(
-                        canvas,
-                        &state.theme,
-                        &ceil_text,
-                        info_x,
-                        meter_top + meter_h - 20,
-                        30,
-                        sdl2::pixels::Color::RGBA(255, 100, 80, 150),
-                    );
-                    draw_pixel_label(
-                        canvas,
-                        &state.theme,
-                        "CEIL",
-                        info_x,
-                        meter_top + meter_h - 10,
-                        24,
-                        sdl2::pixels::Color::RGBA(200, 80, 60, 120),
-                    );
                 }
                 _ => {}
             }
@@ -7582,6 +7906,11 @@ fn draw_master_rack(
 
     // Show drop hint when dragging a module
     if state.module_drag.is_some() && drop_hover {
+        // Hovering over empty drop zone — clear stale replace/insert indices
+        // so the module is appended at the end, not swapped with an existing slot.
+        state.module_drag_replace_idx = None;
+        state.module_drag_insert_idx = None;
+
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(100, 200, 100, 80));
         let _ = canvas.fill_rect(Rect::new(
             drop_zone_x,
@@ -8356,7 +8685,7 @@ fn draw_left_panel_files(
                     // Cache the clip length in beats for the drag preview
                     let file_str = row.path.to_string_lossy().to_string();
                     let clip_len_beats = if let Ok((samples, sr)) =
-                        crate::audio::load_wav(std::path::Path::new(&file_str))
+                        crate::audio::load_audio(std::path::Path::new(&file_str))
                     {
                         let duration_secs = samples.len() as f64 / sr as f64;
                         let beats_per_sec = state.project.tempo_map.bpm_at(0.0) / 60.0;
@@ -8676,7 +9005,7 @@ fn draw_left_panel_files(
                             if !replaced_clip {
                                 // Calculate clip length from audio file duration
                                 let clip_len_beats = if let Ok((samples, sr)) =
-                                    crate::audio::load_wav(std::path::Path::new(&file_str))
+                                    crate::audio::load_audio(std::path::Path::new(&file_str))
                                 {
                                     let duration_secs = samples.len() as f64 / sr as f64;
                                     let beats_per_sec = state.project.tempo_map.bpm_at(0.0) / 60.0;
@@ -9252,6 +9581,10 @@ fn draw_left_panel_instruments(
                     icon: "▐",
                     name: "Limiter",
                 },
+                ModuleEntry {
+                    icon: "⌄",
+                    name: "Autoduck",
+                },
             ],
         },
     ];
@@ -9745,6 +10078,18 @@ pub fn draw_project_manager(
     let w = state.window_width as i32;
     let h = state.window_height as i32;
 
+    // When the project browser overlay or new-project popup is open, the
+    // underlying card must not react to input — use a dead InputState so
+    // buttons are drawn but inert.
+    let mut dead_input = InputState::default();
+    dead_input.mouse_x = input.mouse_x;
+    dead_input.mouse_y = input.mouse_y;
+    let card_input = if state.project_browser_open || state.new_project_popup_open {
+        &mut dead_input
+    } else {
+        &mut *input
+    };
+
     // Full-screen dark background
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(18, 20, 26, 255));
     let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
@@ -9827,10 +10172,10 @@ pub fn draw_project_manager(
             state.project.name.clone()
         };
         let continue_label = format!("▶ Continue  \"{}\"", proj_name);
-        let __auto_id_36 = input.next_id();
+        let __auto_id_36 = card_input.next_id();
         let continue_clicked = button(
             canvas,
-            input,
+            card_input,
             &state.theme,
             &ButtonParams {
                 id: __auto_id_36,
@@ -9855,10 +10200,10 @@ pub fn draw_project_manager(
     }
 
     // "New Project" button
-    let __auto_id_37 = input.next_id();
+    let __auto_id_37 = card_input.next_id();
     let new_clicked = button(
         canvas,
-        input,
+        card_input,
         &state.theme,
         &ButtonParams {
             id: __auto_id_37,
@@ -9874,21 +10219,16 @@ pub fn draw_project_manager(
         },
     );
     if new_clicked {
-        state.project = crate::models::Project::default();
-        state.project.name = "Untitled Project".into();
-        state.last_save_path = None;
-        state.dirty = false;
-        state.commands = crate::commands::CommandManager::new(1000);
-        state.mode = crate::state::AppMode::Arrangement;
-        state.push_status("New project created");
+        state.new_project_name_buffer = "Untitled Project".to_string();
+        state.new_project_popup_open = true;
     }
 
     // "Open Project…" button (launches folder navigator style: opens last used dir or home)
     let open_y = btn_y + 46;
-    let __auto_id_38 = input.next_id();
+    let __auto_id_38 = card_input.next_id();
     let open_clicked = button(
         canvas,
-        input,
+        card_input,
         &state.theme,
         &ButtonParams {
             id: __auto_id_38,
@@ -9904,11 +10244,9 @@ pub fn draw_project_manager(
         },
     );
     if open_clicked {
-        // Open folder navigator scoped to .eden.json files
-        state.folder_nav_open = true;
-        state.refresh_folder_nav();
-        // Mark that the folder nav is being used for project open
-        state.mode = crate::state::AppMode::Arrangement; // switch first so nav can dismiss back here
+        // Open the project file browser overlay
+        state.project_browser_open = true;
+        state.refresh_project_browser();
     }
 
     // "Recent Projects" header
@@ -9948,7 +10286,7 @@ pub fn draw_project_manager(
     } else {
         for (i, path) in recents.iter().take(max_items).enumerate() {
             let iy = list_top + i as i32 * item_h;
-            let hover = input.mouse_in_rect(card_x + 10, iy, card_w - 20, item_h - 2);
+            let hover = card_input.mouse_in_rect(card_x + 10, iy, card_w - 20, item_h - 2);
 
             // Row background
             if hover {
@@ -9992,7 +10330,7 @@ pub fn draw_project_manager(
             );
 
             // Click to open
-            if hover && input.mouse_pressed && input.active_widget == WidgetId::None {
+            if hover && card_input.mouse_pressed && card_input.active_widget == WidgetId::None {
                 let path_clone = path.clone();
                 match state.load_project(&path_clone) {
                     Ok(()) => {
@@ -10017,6 +10355,204 @@ pub fn draw_project_manager(
         card_w - 40,
         sdl2::pixels::Color::RGBA(60, 65, 80, 180),
     );
+
+    // ── Project file browser overlay ──────────────────────────────────
+    if state.project_browser_open {
+        // Dim background
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 160));
+        let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
+
+        // Browser panel
+        let bw = 500i32;
+        let bh = 440i32;
+        let bx = (w - bw) / 2;
+        let by = (h - bh) / 2;
+
+        // Shadow
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 120));
+        let _ = canvas.fill_rect(Rect::new(bx + 4, by + 4, bw as u32, bh as u32));
+
+        // Panel background
+        canvas.set_draw_color(Theme::c(state.theme.panel_bg));
+        let _ = canvas.fill_rect(Rect::new(bx, by, bw as u32, bh as u32));
+        canvas.set_draw_color(Theme::c(state.theme.panel_border));
+        let _ = canvas.draw_rect(Rect::new(bx, by, bw as u32, bh as u32));
+
+        // Accent top bar
+        canvas.set_draw_color(Theme::c(state.theme.accent));
+        let _ = canvas.fill_rect(Rect::new(bx, by, bw as u32, 3));
+
+        // Title
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            "Open Project",
+            bx + 16,
+            by + 10,
+            bw - 80,
+            Theme::c(state.theme.text_primary),
+        );
+
+        // Close button (X)
+        let __auto_id_pb_close = input.next_id();
+        let close_clicked = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: __auto_id_pb_close,
+                x: bx + bw - 30,
+                y: by + 6,
+                width: 22,
+                height: 18,
+                label: "✕".into(),
+                toggled: false,
+                icon: ButtonIcon::None,
+                hint: Some("Cancel".into()),
+                ..Default::default()
+            },
+        );
+        if close_clicked {
+            state.project_browser_open = false;
+        }
+
+        // Current path label
+        let path_str = state.project_browser_path.to_string_lossy().to_string();
+        let display_path = if path_str.len() > 60 {
+            format!("...{}", &path_str[path_str.len() - 60..])
+        } else {
+            path_str
+        };
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            &display_path,
+            bx + 16,
+            by + 30,
+            bw - 32,
+            Theme::c(state.theme.text_secondary),
+        );
+
+        // Back button
+        let __auto_id_pb_back = input.next_id();
+        let back_clicked = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: __auto_id_pb_back,
+                x: bx + 16,
+                y: by + 44,
+                width: 80,
+                height: 20,
+                label: "← Back".into(),
+                toggled: false,
+                icon: ButtonIcon::None,
+                hint: Some("Go to parent folder".into()),
+                ..Default::default()
+            },
+        );
+        if back_clicked {
+            if let Some(parent) = state.project_browser_path.parent() {
+                state.project_browser_path = parent.to_path_buf();
+                state.refresh_project_browser();
+            }
+        }
+
+        // File listing
+        let list_y = by + 70;
+        let list_h = bh - 80;
+        let row_h = 24i32;
+        let visible_rows = list_h / row_h;
+
+        // Scroll
+        if input.mouse_in_rect(bx, list_y, bw, list_h)
+            && input.scroll_y != 0
+            && !input.scroll_consumed
+        {
+            state.project_browser_scroll -= input.scroll_y * 3;
+            let total = state.project_browser_entries.len() as i32;
+            state.project_browser_scroll = state
+                .project_browser_scroll
+                .max(0)
+                .min((total - visible_rows).max(0));
+            input.scroll_consumed = true;
+        }
+
+        let entries = state.project_browser_entries.clone();
+        let scroll = state.project_browser_scroll;
+
+        if entries.is_empty() {
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                "No project files found",
+                bx + 20,
+                list_y + 16,
+                bw - 40,
+                sdl2::pixels::Color::RGBA(80, 85, 100, 180),
+            );
+        }
+
+        for (i, (name, path, is_dir)) in entries.iter().enumerate().skip(scroll as usize) {
+            let row_idx = i as i32 - scroll;
+            if row_idx >= visible_rows {
+                break;
+            }
+            let ry = list_y + row_idx * row_h;
+
+            let is_hovered = input.mouse_in_rect(bx + 4, ry, bw - 8, row_h - 2);
+
+            if is_hovered {
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 70, 200));
+                let _ =
+                    canvas.fill_rect(Rect::new(bx + 4, ry, (bw - 8) as u32, (row_h - 2) as u32));
+            }
+
+            // Icon + name
+            let icon = if *is_dir { "▸" } else { "♫" };
+            let col = if *is_dir {
+                Theme::c(state.theme.text_secondary)
+            } else {
+                Theme::c(state.theme.accent)
+            };
+            draw_pixel_label(canvas, &state.theme, icon, bx + 12, ry + 6, 14, col);
+            draw_pixel_label(canvas, &state.theme, name, bx + 28, ry + 6, bw - 48, col);
+
+            // Click handling
+            if is_hovered && input.mouse_pressed && !input.consumed {
+                if *is_dir {
+                    // Navigate into directory
+                    state.project_browser_path = path.clone();
+                    state.refresh_project_browser();
+                } else {
+                    // Load the project file
+                    let path_str = path.to_string_lossy().to_string();
+                    match state.load_project(&path_str) {
+                        Ok(()) => {
+                            state.project_browser_open = false;
+                            state.mode = crate::state::AppMode::Arrangement;
+                        }
+                        Err(e) => {
+                            state.push_status(format!("Failed to load: {}", e));
+                        }
+                    }
+                }
+                input.consume();
+            }
+        }
+
+        // Click outside the browser panel to dismiss
+        if input.mouse_pressed && !input.consumed && !input.mouse_in_rect(bx, by, bw, bh) {
+            state.project_browser_open = false;
+            input.consume();
+        }
+    }
+
+    // ── New-project name popup (drawn on top of everything) ──
+    if state.new_project_popup_open {
+        draw_new_project_popup(canvas, input, state);
+    }
 }
 
 pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
@@ -10661,6 +11197,16 @@ fn draw_overlays(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mu
         draw_render_popup(canvas, input, state);
     }
 
+    // New-project name prompt popup
+    if state.new_project_popup_open {
+        draw_new_project_popup(canvas, input, state);
+    }
+
+    // Save As popup
+    if state.save_as_popup_open {
+        draw_save_as_popup(canvas, input, state);
+    }
+
     // ── Confirmation dialogs (ConfirmDialog layer — highest priority) ─────────
     if let Some(del_idx) = state.clip_lib_confirm_delete {
         canvas.set_clip_rect(None);
@@ -10762,9 +11308,10 @@ fn draw_overlays(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mu
         let escape_pressed = input
             .keys_pressed
             .contains(&sdl2::keyboard::Keycode::Escape);
-        // Click outside dialog cancels
-        let clicked_outside =
-            input.mouse_pressed && !input.mouse_in_rect(dlg_x, dlg_y, dlg_w, dlg_h);
+        // Click outside dialog cancels (only unprocessed clicks)
+        let clicked_outside = input.mouse_pressed
+            && !input.consumed
+            && !input.mouse_in_rect(dlg_x, dlg_y, dlg_w, dlg_h);
 
         if yes_clicked {
             state.clip_lib_confirm_execute = true;
@@ -10874,8 +11421,9 @@ fn draw_overlays(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mu
         let escape_pressed = input
             .keys_pressed
             .contains(&sdl2::keyboard::Keycode::Escape);
-        let clicked_outside =
-            input.mouse_pressed && !input.mouse_in_rect(dlg_x, dlg_y, dlg_w, dlg_h);
+        let clicked_outside = input.mouse_pressed
+            && !input.consumed
+            && !input.mouse_in_rect(dlg_x, dlg_y, dlg_w, dlg_h);
 
         if yes_clicked {
             let id = track_id;
@@ -11297,6 +11845,61 @@ fn draw_project_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
         rw,
         Theme::c(state.theme.text_primary),
     );
+    ry += 28;
+
+    // ── Save / Save As buttons ──
+    let save_btn_w2 = (rw - 6) / 2;
+    let __auto_id_proj_save = input.next_id();
+    let proj_save_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: __auto_id_proj_save,
+            x: vx,
+            y: ry,
+            width: save_btn_w2,
+            height: 24,
+            label: "Save".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Save project (Ctrl+S)".into()),
+            ..Default::default()
+        },
+    );
+    if proj_save_clicked {
+        match state.quick_save() {
+            Ok(()) => println!("[save] Project saved"),
+            Err(e) => eprintln!("[save] Error: {}", e),
+        }
+    }
+    let __auto_id_proj_saveas = input.next_id();
+    let proj_saveas_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: __auto_id_proj_saveas,
+            x: vx + save_btn_w2 + 6,
+            y: ry,
+            width: save_btn_w2,
+            height: 24,
+            label: "Save As".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Save project to a new file".into()),
+            ..Default::default()
+        },
+    );
+    if proj_saveas_clicked {
+        let default_name = if let Some(ref p) = state.last_save_path {
+            p.clone()
+        } else {
+            format!("{}.eden.json", state.project.name)
+        };
+        state.save_as_name_buffer = default_name;
+        state.save_as_popup_open = true;
+    }
 
     // Click outside to close
     if input.mouse_pressed
@@ -11305,6 +11908,385 @@ fn draw_project_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
     {
         state.project_popup_open = false;
     }
+}
+
+fn draw_new_project_popup(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    state: &mut AppState,
+) {
+    let w = state.window_width as i32;
+    let h = state.window_height as i32;
+    let popup_w = 320i32;
+    let popup_h = 130i32;
+    let popup_x = w / 2 - popup_w / 2;
+    let popup_y = h / 2 - popup_h / 2;
+
+    // Dimmed backdrop
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 140));
+    let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
+
+    // Panel shadow
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 120));
+    let _ = canvas.fill_rect(Rect::new(
+        popup_x + 4,
+        popup_y + 4,
+        popup_w as u32,
+        popup_h as u32,
+    ));
+
+    // Panel background
+    canvas.set_draw_color(Theme::c(state.theme.panel_bg));
+    let _ = canvas.fill_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+
+    // Panel border
+    canvas.set_draw_color(Theme::c(state.theme.accent));
+    let _ = canvas.draw_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+
+    // Title
+    canvas.set_draw_color(Theme::c(state.theme.bg_light));
+    let _ = canvas.fill_rect(Rect::new(popup_x, popup_y, popup_w as u32, 22));
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "NEW PROJECT",
+        popup_x + 10,
+        popup_y + 8,
+        popup_w - 20,
+        Theme::c(state.theme.text_primary),
+    );
+
+    let lx = popup_x + 14;
+    let vx = popup_x + 80;
+    let rw = popup_w - 94;
+    let ry = popup_y + 38;
+
+    // Name label + text field
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "Name",
+        lx,
+        ry + 3,
+        60,
+        Theme::c(state.theme.text_secondary),
+    );
+    let (committed, new_val) = text_field(
+        canvas,
+        input,
+        &state.theme,
+        &TextFieldParams {
+            id: 300,
+            x: vx,
+            y: ry,
+            width: rw,
+            height: 20,
+            hint: Some("Project name".into()),
+        },
+        &state.new_project_name_buffer.clone(),
+        &mut state.text_field_active_id,
+        &mut state.text_field_buffer,
+        &mut state.text_field_cursor,
+    );
+    if committed {
+        if let Some(new_name) = new_val {
+            let trimmed = new_name.trim().to_string();
+            if !trimmed.is_empty() {
+                state.new_project_name_buffer = trimmed;
+            }
+        }
+    }
+
+    // Auto-activate the text field on first open
+    if state.text_field_active_id == 0 {
+        state.text_field_active_id = 300;
+        state.text_field_buffer = state.new_project_name_buffer.clone();
+        state.text_field_cursor = state.text_field_buffer.len();
+    }
+
+    // Buttons: Create / Cancel
+    let btn_y = ry + 36;
+    let btn_w = (rw - 6) / 2;
+
+    let __auto_id_np_create = input.next_id();
+    let create_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: __auto_id_np_create,
+            x: vx,
+            y: btn_y,
+            width: btn_w,
+            height: 26,
+            label: "Create".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Create new project with this name".into()),
+            ..Default::default()
+        },
+    );
+
+    let __auto_id_np_cancel = input.next_id();
+    let cancel_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: __auto_id_np_cancel,
+            x: vx + btn_w + 6,
+            y: btn_y,
+            width: btn_w,
+            height: 26,
+            label: "Cancel".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Cancel".into()),
+            ..Default::default()
+        },
+    );
+
+    // Also accept Enter as Create, Escape as Cancel
+    let enter_pressed = input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Return)
+        || input
+            .keys_pressed
+            .contains(&sdl2::keyboard::Keycode::KpEnter);
+    let esc_pressed = input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Escape);
+
+    if create_clicked || enter_pressed {
+        // Commit any pending text field edit
+        let name = if state.text_field_active_id == 300 {
+            let s = state.text_field_buffer.trim().to_string();
+            if s.is_empty() {
+                state.new_project_name_buffer.clone()
+            } else {
+                s
+            }
+        } else {
+            state.new_project_name_buffer.clone()
+        };
+        state.project = crate::models::Project::default();
+        state.project.name = name;
+        state.last_save_path = None;
+        state.dirty = false;
+        state.commands = crate::commands::CommandManager::new(1000);
+        state.mode = crate::state::AppMode::Arrangement;
+        state.new_project_popup_open = false;
+        state.text_field_active_id = 0;
+        state.push_status("New project created");
+    }
+
+    if cancel_clicked || esc_pressed {
+        state.new_project_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    // Block clicks outside popup (closing it)
+    if input.mouse_pressed
+        && !input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h)
+        && input.active_widget == WidgetId::None
+    {
+        state.new_project_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    // Block all input from passing through
+    input.consumed = true;
+}
+
+fn draw_save_as_popup(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    state: &mut AppState,
+) {
+    let w = state.window_width as i32;
+    let h = state.window_height as i32;
+    let popup_w = 400i32;
+    let popup_h = 130i32;
+    let popup_x = w / 2 - popup_w / 2;
+    let popup_y = h / 2 - popup_h / 2;
+
+    // Dimmed backdrop
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 140));
+    let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
+
+    // Panel shadow
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 120));
+    let _ = canvas.fill_rect(Rect::new(
+        popup_x + 4,
+        popup_y + 4,
+        popup_w as u32,
+        popup_h as u32,
+    ));
+
+    // Panel background
+    canvas.set_draw_color(Theme::c(state.theme.panel_bg));
+    let _ = canvas.fill_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+
+    // Panel border
+    canvas.set_draw_color(Theme::c(state.theme.accent));
+    let _ = canvas.draw_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+
+    // Title
+    canvas.set_draw_color(Theme::c(state.theme.bg_light));
+    let _ = canvas.fill_rect(Rect::new(popup_x, popup_y, popup_w as u32, 22));
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "SAVE AS",
+        popup_x + 10,
+        popup_y + 8,
+        popup_w - 20,
+        Theme::c(state.theme.text_primary),
+    );
+
+    let lx = popup_x + 14;
+    let vx = popup_x + 80;
+    let rw = popup_w - 94;
+    let ry = popup_y + 38;
+
+    // File path label + text field
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "File",
+        lx,
+        ry + 3,
+        60,
+        Theme::c(state.theme.text_secondary),
+    );
+    let (committed, new_val) = text_field(
+        canvas,
+        input,
+        &state.theme,
+        &TextFieldParams {
+            id: 301,
+            x: vx,
+            y: ry,
+            width: rw,
+            height: 20,
+            hint: Some("filename.eden.json".into()),
+        },
+        &state.save_as_name_buffer.clone(),
+        &mut state.text_field_active_id,
+        &mut state.text_field_buffer,
+        &mut state.text_field_cursor,
+    );
+    if committed {
+        if let Some(new_name) = new_val {
+            let trimmed = new_name.trim().to_string();
+            if !trimmed.is_empty() {
+                state.save_as_name_buffer = trimmed;
+            }
+        }
+    }
+
+    // Auto-activate the text field on first open
+    if state.text_field_active_id == 0 {
+        state.text_field_active_id = 301;
+        state.text_field_buffer = state.save_as_name_buffer.clone();
+        state.text_field_cursor = state.text_field_buffer.len();
+    }
+
+    // Buttons: Save / Cancel
+    let btn_y = ry + 36;
+    let btn_w = (rw - 6) / 2;
+
+    let __auto_id_sa_save = input.next_id();
+    let save_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: __auto_id_sa_save,
+            x: vx,
+            y: btn_y,
+            width: btn_w,
+            height: 26,
+            label: "Save".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Save to this file".into()),
+            ..Default::default()
+        },
+    );
+
+    let __auto_id_sa_cancel = input.next_id();
+    let cancel_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: __auto_id_sa_cancel,
+            x: vx + btn_w + 6,
+            y: btn_y,
+            width: btn_w,
+            height: 26,
+            label: "Cancel".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Cancel".into()),
+            ..Default::default()
+        },
+    );
+
+    // Also accept Enter as Save, Escape as Cancel
+    let enter_pressed = input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Return)
+        || input
+            .keys_pressed
+            .contains(&sdl2::keyboard::Keycode::KpEnter);
+    let esc_pressed = input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Escape);
+
+    if save_clicked || enter_pressed {
+        // Commit any pending text field edit
+        let path = if state.text_field_active_id == 301 {
+            let s = state.text_field_buffer.trim().to_string();
+            if s.is_empty() {
+                state.save_as_name_buffer.clone()
+            } else {
+                s
+            }
+        } else {
+            state.save_as_name_buffer.clone()
+        };
+        // Ensure .eden.json extension
+        let path = if !path.ends_with(".eden.json") {
+            format!("{}.eden.json", path)
+        } else {
+            path
+        };
+        match state.save_project(&path) {
+            Ok(()) => println!("[save-as] Saved to {}", path),
+            Err(e) => eprintln!("[save-as] Error: {}", e),
+        }
+        state.save_as_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    if cancel_clicked || esc_pressed {
+        state.save_as_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    // Block clicks outside popup (closing it)
+    if input.mouse_pressed
+        && !input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h)
+        && input.active_widget == WidgetId::None
+    {
+        state.save_as_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    // Block all input from passing through
+    input.consumed = true;
 }
 
 fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
@@ -12633,11 +13615,13 @@ fn draw_clip_manager(
     let text_x = prev_x + preview_w + padding;
 
     // Handle scroll
-    if input.mouse_in_rect(sb_w, list_top, w - sb_w, list_h) {
+    if input.mouse_in_rect(sb_w, list_top, w - sb_w, list_h)
+        && input.scroll_y != 0
+        && !input.scroll_consumed
+    {
         let scroll_delta = input.scroll_y * item_h / 3;
         state.clip_manager_scroll = (state.clip_manager_scroll - scroll_delta).max(0);
-        input.scroll_y = 0;
-        input.scroll_x = 0;
+        input.scroll_consumed = true;
     }
 
     state.sync_clip_library();
@@ -12772,8 +13756,9 @@ fn draw_clip_manager(
             remove_btn_w - 4,
             sdl2::pixels::Color::RGBA(220, 180, 180, 255),
         );
-        if rm_hover && input.mouse_pressed {
+        if rm_hover && input.mouse_pressed && !input.consumed {
             state.clip_lib_confirm_delete = Some(lib_idx);
+            input.consume();
         }
 
         // Mini-preview area
@@ -14243,8 +15228,9 @@ fn draw_piano_roll_impl(
         }
     }
 
-    // ── Focus: clicking in piano roll area claims keyboard focus ──────
-    if (in_grid || in_ruler) && input.mouse_pressed {
+    // ── Focus: clicking anywhere in piano roll area claims keyboard focus ──
+    let in_piano_roll_area = input.mouse_in_rect(0, top, w, h);
+    if in_piano_roll_area && input.mouse_pressed {
         state.focused_panel = crate::state::FocusedPanel::PianoRoll;
     }
 
@@ -14468,14 +15454,11 @@ fn draw_piano_roll_impl(
         }
     }
 
-    // Delete key: delete selected notes
-    if !state.piano_roll_selected_notes.is_empty()
-        && (input
-            .keys_pressed
-            .contains(&sdl2::keyboard::Keycode::Delete)
-            || input
-                .keys_pressed
-                .contains(&sdl2::keyboard::Keycode::Backspace))
+    // Delete key: delete selected notes (only when piano roll has focus)
+    if state.focused_panel == crate::state::FocusedPanel::PianoRoll
+        && !state.piano_roll_selected_notes.is_empty()
+        && (input.key_available(sdl2::keyboard::Keycode::Delete)
+            || input.key_available(sdl2::keyboard::Keycode::Backspace))
     {
         let to_delete: Vec<(usize, crate::models::MidiNote)> = state
             .project
@@ -14508,10 +15491,15 @@ fn draw_piano_roll_impl(
             state.piano_roll_selected_notes.clear();
             state.dirty = true;
         }
+        input.consume_key(sdl2::keyboard::Keycode::Delete);
+        input.consume_key(sdl2::keyboard::Keycode::Backspace);
     }
 
-    // ── Ctrl+A: select all ───────────────────────────────────────────
-    if input.ctrl() && input.keys_pressed.contains(&sdl2::keyboard::Keycode::A) {
+    // ── Ctrl+A: select all (only when piano roll has focus) ──────────
+    if state.focused_panel == crate::state::FocusedPanel::PianoRoll
+        && input.ctrl()
+        && input.key_available(sdl2::keyboard::Keycode::A)
+    {
         let n = state
             .project
             .tracks
@@ -14526,12 +15514,14 @@ fn draw_piano_roll_impl(
             })
             .unwrap_or(0);
         state.piano_roll_selected_notes = (0..n).collect();
+        input.consume_key(sdl2::keyboard::Keycode::A);
     }
 
     // ── Up/Down arrows: move selected notes by semitone (Shift = octave) ──
-    {
-        let up = input.keys_pressed.contains(&sdl2::keyboard::Keycode::Up);
-        let down = input.keys_pressed.contains(&sdl2::keyboard::Keycode::Down);
+    // Only when piano roll has focus, to prevent cross-bleed with arrangement.
+    if state.focused_panel == crate::state::FocusedPanel::PianoRoll {
+        let up = input.key_available(sdl2::keyboard::Keycode::Up);
+        let down = input.key_available(sdl2::keyboard::Keycode::Down);
         if (up || down) && !state.piano_roll_selected_notes.is_empty() {
             let shift = if input.shift() { 12i8 } else { 1i8 };
             let delta: i8 = if up { shift } else { -shift };
@@ -14594,6 +15584,13 @@ fn draw_piano_roll_impl(
                     state.dirty = true;
                 }
             }
+        }
+        // Consume the arrow keys so arrangement doesn't also handle them
+        if up {
+            input.consume_key(sdl2::keyboard::Keycode::Up);
+        }
+        if down {
+            input.consume_key(sdl2::keyboard::Keycode::Down);
         }
     }
 
@@ -16882,130 +17879,204 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     let h = state.window_height as i32;
 
     // Semi-transparent backdrop
-    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 180));
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 200));
     let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
 
-    // Panel dimensions — two columns so we can fit more entries
-    let pw = 700i32.min(w - 40);
-    let ph = (h - 40).min(h - 40); // use almost full height
+    // Two-column panel — wide enough to show both columns comfortably
+    let pw = (w - 40).min(980);
+    let ph = (h - 40).min(h - 40);
     let px = (w - pw) / 2;
     let py = (h - ph) / 2;
 
     // Panel background
-    canvas.set_draw_color(sdl2::pixels::Color::RGBA(30, 32, 38, 245));
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(24, 26, 32, 248));
     let _ = canvas.fill_rect(Rect::new(px, py, pw as u32, ph as u32));
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 100, 140, 200));
     let _ = canvas.draw_rect(Rect::new(px, py, pw as u32, ph as u32));
 
-    // Title
+    // Title bar
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(40, 50, 70, 255));
+    let _ = canvas.fill_rect(Rect::new(px, py, pw as u32, 20));
     draw_pixel_label(
         canvas,
         &state.theme,
-        "Eden DAW — Keyboard Shortcuts",
-        px + 16,
-        py + 12,
-        pw - 32,
-        sdl2::pixels::Color::RGBA(120, 180, 255, 255),
+        "Eden DAW  —  Help  (F1 or click anywhere to close)",
+        px + 8,
+        py + 5,
+        pw - 16,
+        sdl2::pixels::Color::RGBA(140, 190, 255, 255),
     );
 
-    // Shortcut entries: (key, description)
+    // ── Content ──────────────────────────────────────────────────────────
+    // Left column: shortcuts / transport / arrangement
+    // Right column: widgets / mixer / piano roll / piano keyboard
+
+    let col_w = pw / 2 - 8;
+    let lx = px + 8;
+    let rx = px + pw / 2 + 4;
+    let line_h = 13i32;
+    let content_top = py + 26;
+    let content_bot = py + ph - 6;
+
+    // Helper colours (captured as variables, not closures, to avoid borrow issues)
+    let c_section  = sdl2::pixels::Color::RGBA(200, 165, 80,  255);
+    let c_key      = sdl2::pixels::Color::RGBA(255, 220, 140, 230);
+    let c_desc     = sdl2::pixels::Color::RGBA(178, 184, 200, 220);
+    let c_note     = sdl2::pixels::Color::RGBA(130, 200, 130, 200);
+
+    // Left column entries: (key, description, is_section)
+    // Empty key + empty desc = small spacer
     #[allow(clippy::type_complexity)]
-    let shortcuts = &[
-        ("── Transport ──", ""),
-        ("Space", "Play / Stop (also stops preview)"),
-        ("Enter", "Rewind to start (or loop start)"),
-        ("L", "Toggle loop on/off"),
-        ("", ""),
-        ("── General ──", ""),
-        ("1 / 2 / 3", "Arrangement / Mixer / Edit mode"),
-        ("T", "Cycle colour theme"),
-        ("+ / =", "Zoom in (arrangement)"),
-        ("-", "Zoom out (arrangement)"),
-        ("Ctrl+S", "Save project"),
-        ("Ctrl+Z", "Undo"),
-        ("Ctrl+Shift+Z  /  Ctrl+R", "Redo"),
-        ("Escape", "Deselect / close popups / close help"),
-        ("F1", "Toggle this help screen"),
-        ("", ""),
-        ("── Arrangement ──", ""),
-        ("Click clip", "Select clip"),
-        ("Shift+Click", "Add / remove clip from selection"),
-        ("Ctrl+Drag", "Duplicate clip while dragging"),
-        ("Drag clip up/down", "Move clip to another track"),
-        ("Double-click clip", "Open in Piano Roll / editor"),
-        ("Right-click clip", "Delete clip (drag to erase multiple)"),
-        ("Ctrl+A", "Select all clips (arrangement focus)"),
-        ("Ctrl+C", "Copy selected clips"),
-        ("Ctrl+V", "Paste at playhead position"),
-        ("Ctrl+D", "Duplicate selected clips"),
-        ("Delete / Backspace", "Delete selected clips"),
-        ("Shift+Up / Down", "Reorder selected track up / down"),
-        ("", ""),
-        ("── Piano Roll ──", ""),
-        ("Click piano key", "Preview note"),
-        ("Click grid", "Draw note (DRAW mode)"),
-        ("Ctrl+Click drag", "Rubber-band select notes"),
-        ("Right-click note", "Delete note"),
-        ("Ctrl+A", "Select all notes"),
-        ("Ctrl+D", "Duplicate selected notes"),
-        ("Delete / Backspace", "Delete selected notes"),
-        ("Arrow Up / Down", "Transpose selected notes ±1 semitone"),
-        ("Shift+Up / Down", "Transpose selected notes ±1 octave"),
-        ("Arrow Left / Right", "Nudge selected notes by snap unit"),
-        ("", ""),
-        ("── Computer Keyboard Piano ──", ""),
-        ("A S D F G H J", "White keys  C D E F G A B"),
-        ("W E   T Y U", "Black keys  C# D# F# G# A#"),
-        ("K L", "White keys  C D  (next octave)"),
-        ("O", "Black key   C#   (next octave)"),
-        ("Z / X", "Octave down / up"),
+    let left: &[(&str, &str, bool)] = &[
+        // ── Transport ──────────────────────────────────────────────
+        ("── Transport ──",                  "",  true),
+        ("Space",                            "Play / Stop",                                                false),
+        ("Space  (preview playing)",         "Stops sample preview instead",                               false),
+        ("Enter",                            "Stop and rewind to start (or loop start)",                   false),
+        ("L",                                "Toggle loop on / off",                                       false),
+        ("",                                 "",  false),
+        // ── Views ──────────────────────────────────────────────────
+        ("── Views ──",                      "",  true),
+        ("1",                                "Arrangement view",                                           false),
+        ("2",                                "Mixer view",                                                 false),
+        ("3",                                "Edit / piano-roll view",                                     false),
+        ("F1",                               "Toggle this help screen",                                    false),
+        ("Escape",                           "Deselect / close popup / close help",                        false),
+        ("T",                                "Cycle colour theme",                                         false),
+        ("",                                 "",  false),
+        // ── Global ─────────────────────────────────────────────────
+        ("── Global ──",                     "",  true),
+        ("Ctrl+S",                           "Save project",                                               false),
+        ("Right-click Save btn",             "Open Save As… dialog",                                       false),
+        ("Ctrl+Z",                           "Undo",                                                       false),
+        ("Ctrl+Shift+Z  /  Ctrl+R",          "Redo",                                                       false),
+        ("",                                 "",  false),
+        // ── Arrangement ────────────────────────────────────────────
+        ("── Arrangement ──",                "",  true),
+        ("Middle-drag (timeline area)",      "Pan view left/right and up/down simultaneously",             false),
+        ("Scroll wheel",                     "Scroll tracks up / down",                                    false),
+        ("Shift+Scroll",                     "Scroll timeline left / right",                               false),
+        ("Ctrl+Scroll",                      "Zoom timeline in / out (anchored to cursor)",                false),
+        ("+ / =  or  -",                     "Zoom in / out",                                              false),
+        ("",                                 "",  false),
+        ("Left-click clip",                  "Select clip",                                                false),
+        ("Shift+Click clip",                 "Add / remove from multi-selection",                          false),
+        ("Ctrl+A",                           "Select all clips",                                           false),
+        ("Ctrl+C / Ctrl+V",                  "Copy / Paste selected clips at playhead",                   false),
+        ("Ctrl+D",                           "Duplicate selected clips",                                   false),
+        ("Delete / Backspace",               "Delete selected clips",                                      false),
+        ("Drag clip",                        "Move clip; hold Ctrl to copy instead",                       false),
+        ("Drag clip up / down",              "Move clip to another track",                                 false),
+        ("Drag clip left / right edge",      "Resize clip (trim start or end)",                            false),
+        ("Double-click clip",                "Open clip in Piano Roll",                                    false),
+        ("Double-click empty lane",          "Create new clip at that position",                           false),
+        ("Right-click clip",                 "Delete clip; hold+drag to erase a range",                   false),
+        ("Drag ruler",                       "Set loop region start / end",                                false),
+        ("Right-click ruler",                "Clear loop region",                                          false),
+        ("Shift+Up / Down",                  "Reorder selected track up / down",                          false),
     ];
 
-    let line_h = 14i32;
-    let col1_x = px + 20;
-    let col2_x = px + 200;
-    let mut cy = py + 32;
+    #[allow(clippy::type_complexity)]
+    let right: &[(&str, &str, bool)] = &[
+        // ── Knobs ──────────────────────────────────────────────────
+        ("── Knobs ──",                      "",  true),
+        ("Left-drag up / down",              "Adjust value",                                               false),
+        ("Middle-drag up / down",            "Fine adjustment (5× slower)",                                false),
+        ("Shift+Click",                      "Reset to default value",                                     false),
+        ("Hover",                            "Shows current value as tooltip",                             false),
+        ("",                                 "",  false),
+        // ── Sliders ────────────────────────────────────────────────
+        ("── Sliders ──",                    "",  true),
+        ("Left-drag",                        "Adjust value",                                               false),
+        ("Shift+Click",                      "Reset to default value",                                     false),
+        ("",                                 "",  false),
+        // ── Dropdowns & Buttons ────────────────────────────────────
+        ("── Dropdowns & Buttons ──",        "",  true),
+        ("Left-click dropdown",              "Cycle forward through options",                              false),
+        ("Right-click dropdown",             "Cycle backward through options",                             false),
+        ("",                                 "",  false),
+        // ── Mixer / Effect Rack ────────────────────────────────────
+        ("── Mixer & Effect Rack ──",        "",  true),
+        ("Drag from browser",                "Add effect / instrument to rack",                            false),
+        ("Right-drag module header",         "Reorder modules in the rack",                               false),
+        ("Middle-click effect slot",         "Open sidechain source dropdown",                             false),
+        ("Right-click knob",                 "Assign knob to an automation lane",                          false),
+        ("",                                 "",  false),
+        // ── Piano Roll ─────────────────────────────────────────────
+        ("── Piano Roll ──",                 "",  true),
+        ("Middle-drag",                      "Pan view in any direction",                                  false),
+        ("Scroll wheel",                     "Scroll pitch up / down",                                     false),
+        ("Shift+Scroll",                     "Scroll timeline left / right",                               false),
+        ("Ctrl+Scroll",                      "Zoom timeline in / out (anchored to cursor)",                false),
+        ("",                                 "",  false),
+        ("Left-click (draw mode)",           "Place new note",                                             false),
+        ("Left-drag (draw mode)",            "Draw note and set length",                                   false),
+        ("Right-click note",                 "Delete note; drag to erase multiple",                        false),
+        ("Ctrl+Drag (select mode)",          "Rubber-band select notes",                                   false),
+        ("Ctrl+A",                           "Select all notes",                                           false),
+        ("Ctrl+D",                           "Duplicate selected notes",                                   false),
+        ("Delete / Backspace",               "Delete selected notes",                                      false),
+        ("Arrow Up / Down",                  "Transpose selected ±1 semitone",                             false),
+        ("Shift+Up / Down",                  "Transpose selected ±1 octave",                               false),
+        ("Arrow Left / Right",               "Nudge selected notes by snap unit",                          false),
+        ("Left-click piano key strip",       "Audition / preview a note",                                  false),
+        ("",                                 "",  false),
+        // ── Computer Keyboard Piano ────────────────────────────────
+        ("── Computer Keyboard Piano ──",    "",  true),
+        ("A  W  S  E  D  F  T",             "C  C#  D  D#  E  F  F#",                                     false),
+        ("G  Y  H  U  J",                   "G  G#  A  A#  B",                                             false),
+        ("K  O  L",                          "C  C#  D  (next octave)",                                    false),
+        ("Z / X",                            "Octave down / up",                                           false),
+        ("",                                 "",  false),
+        ("  * Piano mode active when",       "keyboard icon is lit in the toolbar",                        false),
+    ];
 
-    for (key, desc) in shortcuts {
-        if cy + line_h > py + ph - 8 {
-            break;
-        }
+    // Draw left column
+    let mut ly = content_top;
+    for (key, desc, is_section) in left {
+        if ly + line_h > content_bot { break; }
         if key.is_empty() && desc.is_empty() {
-            cy += 4; // spacer
+            ly += 4;
             continue;
         }
-        if desc.is_empty() {
-            // Section header
-            draw_pixel_label(
-                canvas,
-                &state.theme,
-                key,
-                col1_x,
-                cy,
-                pw - 40,
-                sdl2::pixels::Color::RGBA(200, 160, 80, 255),
-            );
+        if *is_section {
+            draw_pixel_label(canvas, &state.theme, key, lx, ly, col_w, c_section);
         } else {
-            draw_pixel_label(
-                canvas,
-                &state.theme,
-                key,
-                col1_x,
-                cy,
-                170,
-                sdl2::pixels::Color::RGBA(255, 220, 140, 230),
-            );
-            draw_pixel_label(
-                canvas,
-                &state.theme,
-                desc,
-                col2_x,
-                cy,
-                pw - 220,
-                sdl2::pixels::Color::RGBA(180, 185, 200, 220),
-            );
+            let key_w = (col_w as f32 * 0.47) as i32;
+            let desc_x = lx + key_w + 4;
+            let desc_w = col_w - key_w - 4;
+            draw_pixel_label(canvas, &state.theme, key,  lx,     ly, key_w,  c_key);
+            draw_pixel_label(canvas, &state.theme, desc, desc_x, ly, desc_w, c_desc);
         }
-        cy += line_h;
+        ly += line_h;
+    }
+
+    // Vertical divider
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 90, 110, 160));
+    let _ = canvas.draw_line(
+        sdl2::rect::Point::new(px + pw / 2, content_top),
+        sdl2::rect::Point::new(px + pw / 2, content_bot),
+    );
+
+    // Draw right column
+    let mut ry = content_top;
+    for (key, desc, is_section) in right {
+        if ry + line_h > content_bot { break; }
+        if key.is_empty() && desc.is_empty() {
+            ry += 4;
+            continue;
+        }
+        if *is_section {
+            draw_pixel_label(canvas, &state.theme, key, rx, ry, col_w, c_section);
+        } else {
+            let key_w = (col_w as f32 * 0.47) as i32;
+            let desc_x = rx + key_w + 4;
+            let desc_w = col_w - key_w - 4;
+            let col = if key.starts_with("  *") { c_note } else { c_key };
+            draw_pixel_label(canvas, &state.theme, key,  rx,     ry, key_w,  col);
+            draw_pixel_label(canvas, &state.theme, desc, desc_x, ry, desc_w, c_desc);
+        }
+        ry += line_h;
     }
 
     // Click anywhere to dismiss

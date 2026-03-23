@@ -53,6 +53,8 @@ pub struct InputState {
     pub right_mouse_pressed: bool,
     pub right_mouse_released: bool,
     pub middle_mouse_down: bool,
+    pub middle_mouse_pressed: bool,
+    pub middle_mouse_released: bool,
     pub scroll_x: i32,
     pub scroll_y: i32,
 
@@ -98,6 +100,12 @@ pub struct InputState {
     pub keys_pressed: Vec<sdl2::keyboard::Keycode>,
     pub keys_held: Vec<sdl2::keyboard::Keycode>,
 
+    /// Set of keys that have been claimed by a handler this frame.
+    /// Other handlers must call `key_available()` before acting on a key
+    /// and `consume_key()` after handling it, preventing cross-bleed
+    /// between panels (e.g. piano roll vs arrangement).
+    pub keys_consumed: std::collections::HashSet<sdl2::keyboard::Keycode>,
+
     // Text input (from SDL2 TextInput events)
     pub text_input_chars: Vec<char>,
 
@@ -131,6 +139,8 @@ impl Default for InputState {
             right_mouse_pressed: false,
             right_mouse_released: false,
             middle_mouse_down: false,
+            middle_mouse_pressed: false,
+            middle_mouse_released: false,
             scroll_x: 0,
             scroll_y: 0,
             click_type: None,
@@ -151,6 +161,7 @@ impl Default for InputState {
             key_mod: Mod::empty(),
             keys_pressed: Vec::new(),
             keys_held: Vec::new(),
+            keys_consumed: std::collections::HashSet::new(),
             text_input_chars: Vec::new(),
             hover_hint_text: None,
             hover_hint_widget: WidgetId::None,
@@ -168,10 +179,13 @@ impl InputState {
         self.mouse_released = false;
         self.right_mouse_pressed = false;
         self.right_mouse_released = false;
+        self.middle_mouse_pressed = false;
+        self.middle_mouse_released = false;
         self.scroll_x = 0;
         self.scroll_y = 0;
         self.click_type = None;
         self.keys_pressed.clear();
+        self.keys_consumed.clear();
         self.text_input_chars.clear();
         self.hot_widget = WidgetId::None;
         self.hover_hint_text = None;
@@ -208,6 +222,20 @@ impl InputState {
         self.consumed = true;
     }
 
+    /// Mark a keyboard key as consumed this frame. Other handlers should call
+    /// `key_available()` before acting on a key to prevent cross-bleed between
+    /// panels (e.g. Shift+Up in piano roll vs arrangement).
+    pub fn consume_key(&mut self, key: sdl2::keyboard::Keycode) {
+        self.keys_consumed.insert(key);
+    }
+
+    /// Returns `true` if the key was pressed this frame AND has not been consumed
+    /// by another handler. Always use this instead of raw `keys_pressed.contains()`
+    /// for shortcut handlers that could overlap between panels.
+    pub fn key_available(&self, key: sdl2::keyboard::Keycode) -> bool {
+        self.keys_pressed.contains(&key) && !self.keys_consumed.contains(&key)
+    }
+
     pub fn on_scroll(&mut self, x: i32, y: i32) {
         self.scroll_x = x;
         self.scroll_y = y;
@@ -240,6 +268,7 @@ impl InputState {
             }
             sdl2::mouse::MouseButton::Middle => {
                 self.middle_mouse_down = true;
+                self.middle_mouse_pressed = true;
             }
             _ => {}
         }
@@ -259,6 +288,7 @@ impl InputState {
             }
             sdl2::mouse::MouseButton::Middle => {
                 self.middle_mouse_down = false;
+                self.middle_mouse_released = true;
             }
             _ => {}
         }

@@ -12,6 +12,7 @@ pkgs.mkShell {
     SDL2_image
     alsa-lib
     libjack2
+    patchelf
   ];
 
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [

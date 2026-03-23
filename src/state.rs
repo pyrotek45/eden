@@ -460,6 +460,15 @@ pub struct AppState {
     pub folder_nav_entries: Vec<(String, std::path::PathBuf, bool)>, // (name, path, is_dir)
     /// Scroll offset in the folder navigator
     pub folder_nav_scroll: i32,
+    // ── Project file browser (home page "Open Project" popup) ────────
+    /// Is the project file browser overlay open?
+    pub project_browser_open: bool,
+    /// Current path being browsed in the project file browser
+    pub project_browser_path: std::path::PathBuf,
+    /// Cached directory listing for the project browser (name, path, is_dir)
+    pub project_browser_entries: Vec<(String, std::path::PathBuf, bool)>,
+    /// Scroll offset in the project browser
+    pub project_browser_scroll: i32,
     // ── Left panel ───────────────────────────────────────────────────
     /// Which tab is active in the left panel
     pub left_panel_tab: LeftPanelTab,
@@ -489,6 +498,28 @@ pub struct AppState {
     pub clip_lib_confirm_execute: bool,
     /// The index to delete after confirmation
     pub clip_lib_confirmed_idx: Option<usize>,
+
+    // ── Sidechain dropdown popup ─────────────────────────────────────
+    /// Whether the sidechain picker popup list is open
+    pub sc_popup_open: bool,
+    /// Screen position for the sidechain popup
+    pub sc_popup_x: i32,
+    pub sc_popup_y: i32,
+    /// Track index and slot index for the sidechain popup target
+    pub sc_popup_track_idx: usize,
+    pub sc_popup_slot_idx: usize,
+
+    // ── New-project name prompt ──────────────────────────────────────
+    /// When true, show a dialog prompting for the new project name
+    pub new_project_popup_open: bool,
+    /// Buffer for the new project name text field
+    pub new_project_name_buffer: String,
+
+    // ── Save As popup ────────────────────────────────────────────────
+    /// When true, show a dialog prompting for save-as filename
+    pub save_as_popup_open: bool,
+    /// Buffer for the save-as filename text field
+    pub save_as_name_buffer: String,
     /// Track pending delete confirmation (track_id, track_index)
     pub track_confirm_delete: Option<(u32, usize)>,
     /// Multi-track delete confirmation: list of track IDs to delete
@@ -701,6 +732,10 @@ impl AppState {
             folder_nav_path: dirs_home(),
             folder_nav_entries: Vec::new(),
             folder_nav_scroll: 0,
+            project_browser_open: false,
+            project_browser_path: dirs_home(),
+            project_browser_entries: Vec::new(),
+            project_browser_scroll: 0,
             left_panel_tab: LeftPanelTab::Files,
             rack_expanded_slot: None,
             rack_scroll_x: 0.0,
@@ -714,6 +749,15 @@ impl AppState {
             clip_lib_confirm_delete: None,
             clip_lib_confirm_execute: false,
             clip_lib_confirmed_idx: None,
+            sc_popup_open: false,
+            sc_popup_x: 0,
+            sc_popup_y: 0,
+            sc_popup_track_idx: 0,
+            sc_popup_slot_idx: 0,
+            new_project_popup_open: false,
+            new_project_name_buffer: String::new(),
+            save_as_popup_open: false,
+            save_as_name_buffer: String::new(),
             track_confirm_delete: None,
             track_confirm_multi_delete: None,
             automation_drag_idx: None,
@@ -773,6 +817,11 @@ impl AppState {
     /// Adds any clips not already present (by name+type match).
     /// Should be called after clip creation or project load.
     pub fn sync_clip_library(&mut self) {
+        // Remove entries whose track no longer exists in the project
+        let track_ids: Vec<u32> = self.project.tracks.iter().map(|t| t.id).collect();
+        self.clip_library.retain(|(tid, _)| track_ids.contains(tid));
+
+        // Add any new clips that aren't already in the library
         for track in &self.project.tracks {
             for clip in &track.clips {
                 let already = self.clip_library.iter().any(|(tid, lc)| {
@@ -799,6 +848,16 @@ impl AppState {
         Ok(())
     }
 
+    /// Autosave project to JSON file WITHOUT updating last_save_path or
+    /// clearing the dirty flag. This prevents autosave from hijacking
+    /// the user's manual save path.
+    pub fn autosave_project(&mut self, path: &str) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(&self.project)
+            .map_err(|e| format!("Serialize error: {}", e))?;
+        std::fs::write(path, json).map_err(|e| format!("Write error: {}", e))?;
+        Ok(())
+    }
+
     /// Load project from JSON file.
     pub fn load_project(&mut self, path: &str) -> Result<(), String> {
         let data = std::fs::read_to_string(path).map_err(|e| format!("Read error: {}", e))?;
@@ -809,6 +868,7 @@ impl AppState {
         self.dirty = false;
         self.selected_track = None;
         self.selected_clip = None;
+        self.clip_library.clear();
         self.push_recent_project(path.to_string());
         self.push_status(format!("Loaded {}", path));
         Ok(())
@@ -908,6 +968,37 @@ impl AppState {
         self.folder_nav_scroll = 0;
     }
 
+    /// Refresh the project file browser entries for the current project_browser_path.
+    /// Shows directories and .eden.json files.
+    pub fn refresh_project_browser(&mut self) {
+        self.project_browser_entries.clear();
+        if let Ok(entries) = std::fs::read_dir(&self.project_browser_path) {
+            let mut items: Vec<(String, std::path::PathBuf, bool)> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| {
+                    let p = e.path();
+                    let name = e.file_name().to_string_lossy().to_string();
+                    let is_dir = p.is_dir();
+                    (name, p, is_dir)
+                })
+                .filter(|(name, _path, is_dir)| {
+                    if name.starts_with('.') {
+                        return false;
+                    }
+                    // Show directories and .eden.json files
+                    *is_dir || name.ends_with(".eden.json")
+                })
+                .collect();
+            // Sort: directories first, then alphabetical
+            items.sort_by(|a, b| {
+                b.2.cmp(&a.2)
+                    .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+            });
+            self.project_browser_entries = items;
+        }
+        self.project_browser_scroll = 0;
+    }
+
     /// Returns the highest-priority UI layer that is currently active.
     /// The layer that owns input this frame — everything below it gets a dead input.
     pub fn active_layer(&self) -> crate::state::UiLayer {
@@ -921,7 +1012,11 @@ impl AppState {
         if self.render_popup_open {
             return crate::state::UiLayer::RenderDialog;
         }
-        if self.project_popup_open || self.options_open {
+        if self.project_popup_open
+            || self.options_open
+            || self.new_project_popup_open
+            || self.save_as_popup_open
+        {
             return crate::state::UiLayer::Popup;
         }
         crate::state::UiLayer::Base
@@ -1087,41 +1182,18 @@ impl AppState {
 /// Load waveform peak data from a WAV file.
 /// Returns (peaks, total_duration_seconds).
 fn load_waveform_peaks(path: &str, num_peaks: usize) -> (Vec<f32>, f64) {
-    let reader = match hound::WavReader::open(path) {
-        Ok(r) => r,
+    let path_ref = std::path::Path::new(path);
+    let (samples, sample_rate) = match crate::audio::load_audio(path_ref) {
+        Ok(v) => v,
         Err(_) => return (vec![0.0; num_peaks], 0.0),
-    };
-    let spec = reader.spec();
-    let sample_rate = spec.sample_rate as f64;
-    let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Int => {
-            let max_val = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .into_samples::<i32>()
-                .filter_map(|s| s.ok())
-                .map(|s| s as f32 / max_val)
-                .collect()
-        }
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .filter_map(|s| s.ok())
-            .collect(),
     };
     if samples.is_empty() {
         return (vec![0.0; num_peaks], 0.0);
     }
-    // Mono-ify if stereo
-    let channels = spec.channels as usize;
-    let total_frames = samples.len() / channels;
-    let total_duration = total_frames as f64 / sample_rate;
-    let mono: Vec<f32> = if channels > 1 {
-        samples
-            .chunks(channels)
-            .map(|ch| ch.iter().map(|s| s.abs()).sum::<f32>() / channels as f32)
-            .collect()
-    } else {
-        samples.iter().map(|s| s.abs()).collect()
-    };
+    let total_frames = samples.len();
+    let total_duration = total_frames as f64 / sample_rate as f64;
+    // load_audio returns mono already; take abs for peaks
+    let mono: Vec<f32> = samples.iter().map(|s| s.abs()).collect();
     // Downsample to num_peaks by taking the max of each chunk
     let chunk_size = (mono.len() / num_peaks).max(1);
     let mut peaks = Vec::with_capacity(num_peaks);
@@ -1136,7 +1208,7 @@ fn load_waveform_peaks(path: &str, num_peaks: usize) -> (Vec<f32>, f64) {
     (peaks, total_duration)
 }
 
-/// Load stereo waveform peak data from a WAV file.
+/// Load stereo waveform peak data from any supported audio file (WAV or OGG).
 /// Returns (left_peaks, right_peaks) where each is a Vec of signed peak values (-1.0..1.0).
 /// For mono files, both channels will be identical.
 /// Returns (left_max, left_min, right_max, right_min) — all num_peaks long.
@@ -1153,25 +1225,10 @@ pub fn load_waveform_stereo(
             vec![0.0f32; num_peaks],
         )
     };
-    let reader = match hound::WavReader::open(path) {
-        Ok(r) => r,
+    let path_ref = std::path::Path::new(path);
+    let (raw, channels, _sample_rate) = match crate::audio::load_audio_interleaved(path_ref) {
+        Ok(v) => v,
         Err(_) => return zero4(),
-    };
-    let spec = reader.spec();
-    let channels = spec.channels as usize;
-    let raw: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Int => {
-            let max_val = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .into_samples::<i32>()
-                .filter_map(|s| s.ok())
-                .map(|s| s as f32 / max_val)
-                .collect()
-        }
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .filter_map(|s| s.ok())
-            .collect(),
     };
     if raw.is_empty() {
         return zero4();

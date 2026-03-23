@@ -1,9 +1,0 @@
---- src/views.rs
-+++ src/views.rs
-@@ -908,9 +908,6 @@
-             let _ = canvas.draw_rect(Rect::new(cx, clip_y, cw.max(4) as u32, clip_h as u32));
-             let _ = canvas.draw_rect(Rect::new(cx+1, clip_y+1, (cw.max(4).saturating_sub(2)) as u32, (clip_h.saturating_sub(2)) as u32));
-         }
--        }
--
--        // ── Clip header bar (darker strip at top) ──

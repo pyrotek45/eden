@@ -188,6 +188,7 @@ impl RackSlot {
             params: vec![
                 RackParam::new("cutoff", "Cutoff", 1.0, 0.0, 1.0),
                 RackParam::new("resonance", "Resonance", 0.0, 0.0, 1.0),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
         }
     }
@@ -203,6 +204,7 @@ impl RackSlot {
                 RackParam::new("time", "Time", 0.25, 0.01, 2.0),
                 RackParam::new("feedback", "Feedback", 0.3, 0.0, 0.99),
                 RackParam::new("mix", "Mix", 0.3, 0.0, 1.0),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
         }
     }
@@ -261,7 +263,7 @@ impl RackSlot {
                 RackParam::new("osc1_wave", "Osc1 Shape", 1.0, 0.0, 4.0),
                 RackParam::new("osc2_wave", "Osc2 Shape", 1.0, 0.0, 4.0),
                 RackParam::new("osc_mix", "Osc Mix", 0.0, 0.0, 1.0),
-                RackParam::new("gain", "Gain", 0.8, 0.0, 1.0),
+                RackParam::new("gain", "Gain", 0.0, -60.0, 24.0),
                 // ── Oscillator tuning ──
                 RackParam::new("osc2_semi", "Semi", 0.0, -24.0, 24.0),
                 RackParam::new("osc2_fine", "Fine", 0.0, -100.0, 100.0),
@@ -306,8 +308,9 @@ impl RackSlot {
                 RackParam::new("osc_blend", "Osc Blend", 0.0, 0.0, 1.0),
                 RackParam::new("osc2_semi", "O2 Semi", 0.0, -24.0, 24.0),
                 RackParam::new("osc2_fine", "O2 Fine", 0.0, -100.0, 100.0),
-                RackParam::new("gain", "Gain", 0.7, 0.0, 1.0),
+                RackParam::new("gain", "Gain", 0.0, -60.0, 24.0),
                 RackParam::new("noise_gain", "Noise", 0.0, 0.0, 1.0),
+                RackParam::new("noise_hp", "Noise HP", 0.15, 0.0, 1.0),
                 // ── Filter ──
                 RackParam::new("filter_cutoff", "Cutoff", 0.9, 0.0, 1.0),
                 RackParam::new("filter_reso", "Reso", 0.1, 0.0, 1.0),
@@ -345,7 +348,7 @@ impl RackSlot {
                 RackParam::new("amp_s", "Amp S", 1.0, 0.0, 1.0),
                 RackParam::new("amp_r", "Amp R", 0.1, 0.001, 5.0),
                 // ── Master ──
-                RackParam::new("gain", "Gain", 0.8, 0.0, 1.0),
+                RackParam::new("gain", "Gain", 0.0, -60.0, 24.0),
             ],
         }
     }
@@ -362,7 +365,7 @@ impl RackSlot {
                 RackParam::new("osc_shape", "Shape", 1.0, 0.0, 7.0),
                 RackParam::new("sub_level", "Sub", 0.0, 0.0, 1.0),
                 RackParam::new("noise_mix", "Noise", 0.0, 0.0, 1.0),
-                RackParam::new("gain", "Gain", 0.8, 0.0, 1.0),
+                RackParam::new("gain", "Gain", 0.0, -60.0, 24.0),
                 // ── Filter ──
                 RackParam::new("filter_cutoff", "Cutoff", 0.8, 0.0, 1.0),
                 RackParam::new("filter_reso", "Reso", 0.0, 0.0, 1.0),
@@ -393,11 +396,12 @@ impl RackSlot {
             params: vec![
                 RackParam::new("cutoff", "Cutoff", 0.0, 0.0, 1.0),
                 RackParam::new("resonance", "Resonance", 0.0, 0.0, 1.0),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
         }
     }
 
-    /// Create a Reverb effect slot.
+    /// Create a Reverb effect slot (Dragonfly Hall Reverb parameters).
     pub fn reverb(slot_id: u32) -> Self {
         Self {
             slot_id,
@@ -405,8 +409,26 @@ impl RackSlot {
             enabled: true,
             sidechain_track_id: None,
             params: vec![
-                RackParam::new("decay", "Decay", 0.5, 0.0, 1.0),
-                RackParam::new("mix", "Mix", 0.3, 0.0, 1.0),
+                RackParam::new("mix", "Mix", 70.0, 0.0, 100.0),
+                RackParam::new("dry", "Dry", 80.0, 0.0, 100.0),
+                RackParam::new("early", "Early", 25.0, 0.0, 100.0),
+                RackParam::new("early_send", "Early Send", 30.0, 0.0, 100.0),
+                RackParam::new("late", "Late", 40.0, 0.0, 100.0),
+                RackParam::new("size", "Size", 24.0, 8.0, 60.0),
+                RackParam::new("width", "Width", 100.0, 0.0, 100.0),
+                RackParam::new("predelay", "Predelay", 14.0, 0.0, 100.0),
+                RackParam::new("decay", "Decay", 3.0, 0.1, 10.0),
+                RackParam::new("diffuse", "Diffuse", 80.0, 0.0, 100.0),
+                RackParam::new("modulation", "Modulation", 10.0, 0.0, 100.0),
+                RackParam::new("spin", "Spin", 0.40, 0.0, 5.0),
+                RackParam::new("wander", "Wander", 12.0, 0.0, 40.0),
+                RackParam::new("high_cut", "High Cut", 16000.0, 1000.0, 16000.0),
+                RackParam::new("high_xover", "High Xover", 5600.0, 1000.0, 16000.0),
+                RackParam::new("high_mult", "High Mult", 0.5, 0.2, 2.5),
+                RackParam::new("low_cut", "Low Cut", 0.0, 0.0, 200.0),
+                RackParam::new("low_xover", "Low Xover", 500.0, 50.0, 1000.0),
+                RackParam::new("low_mult", "Low Mult", 1.0, 0.5, 2.5),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
         }
     }
@@ -422,6 +444,7 @@ impl RackSlot {
                 RackParam::new("rate", "Rate", 0.5, 0.01, 5.0),
                 RackParam::new("depth", "Depth", 0.005, 0.0, 0.02),
                 RackParam::new("mix", "Mix", 0.5, 0.0, 1.0),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
         }
     }
@@ -437,6 +460,7 @@ impl RackSlot {
                 RackParam::new("drive", "Drive", 0.5, 0.0, 1.0),
                 RackParam::new("type", "Type", 0.0, 0.0, 3.0), // 0=soft,1=hard,2=fold,3=crush
                 RackParam::new("mix", "Mix", 1.0, 0.0, 1.0),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
         }
     }
@@ -449,15 +473,19 @@ impl RackSlot {
             enabled: true,
             sidechain_track_id: None,
             params: vec![
-                RackParam::new("threshold", "Threshold", 0.5, 0.0, 1.0),
-                RackParam::new("ratio", "Ratio", 0.3, 0.0, 1.0),
-                RackParam::new("attack", "Attack", 0.01, 0.001, 0.5),
-                RackParam::new("release", "Release", 0.1, 0.01, 1.0),
-                RackParam::new("makeup", "Makeup", 0.0, 0.0, 1.0),
+                RackParam::new("threshold", "Threshold", -18.0, -60.0, 0.0),
+                RackParam::new("ratio", "Ratio", 4.0, 1.0, 20.0),
+                RackParam::new("knee", "Knee", 6.0, 0.0, 24.0),
+                RackParam::new("attack", "Attack", 5.0, 0.1, 200.0),
+                RackParam::new("release", "Release", 100.0, 5.0, 2000.0),
+                RackParam::new("hold", "Hold", 0.0, 0.0, 500.0),
+                RackParam::new("makeup", "Makeup", 0.0, -24.0, 24.0),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
         }
     }
 
+    /// Create an EQ effect slot.
     /// Create an EQ effect slot.
     pub fn eq(slot_id: u32) -> Self {
         Self {
@@ -471,6 +499,7 @@ impl RackSlot {
                 RackParam::new("hi_gain", "Hi Gain", 0.0, -12.0, 12.0),
                 RackParam::new("lo_freq", "Lo Freq", 200.0, 20.0, 500.0),
                 RackParam::new("hi_freq", "Hi Freq", 4000.0, 1000.0, 16000.0),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
         }
     }
@@ -513,6 +542,27 @@ impl RackSlot {
                 RackParam::new("gain_db", "Input Gain", 0.0, 0.0, 24.0),
                 RackParam::new("ceiling_db", "Ceiling", 0.0, -12.0, 0.0),
                 RackParam::new("release", "Release", 0.05, 0.001, 1.0),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
+            ],
+        }
+    }
+
+    /// Create an Autoduck effect slot (tempo-synced volume ducking).
+    pub fn autoduck(slot_id: u32) -> Self {
+        Self {
+            slot_id,
+            plugin_name: "Autoduck".into(),
+            enabled: true,
+            sidechain_track_id: None,
+            params: vec![
+                RackParam::new("duck_db", "Duck", -12.0, -60.0, 0.0),
+                RackParam::new("attack", "Attack", 5.0, 0.1, 200.0),
+                RackParam::new("hold", "Hold", 50.0, 0.0, 500.0),
+                RackParam::new("release", "Release", 100.0, 1.0, 1000.0),
+                RackParam::new("period", "Period", 500.0, 50.0, 4000.0),
+                RackParam::new("shift", "Shift", 0.0, 0.0, 100.0),
+                RackParam::new("curve", "Curve", 50.0, 0.0, 100.0),
+                RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
         }
     }
@@ -600,6 +650,7 @@ pub fn create_rack_slot_for_module(name: &str, slot_id: u32) -> RackSlot {
         "Gain" => RackSlot::gain(slot_id),
         "Utility" => RackSlot::utility(slot_id),
         "Limiter" => RackSlot::limiter(slot_id),
+        "Autoduck" => RackSlot::autoduck(slot_id),
         "Arpeggiator" => RackSlot::arpeggiator(slot_id),
         "Chord" => RackSlot::chord(slot_id),
         "Transpose" => RackSlot::transpose(slot_id),

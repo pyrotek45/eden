@@ -58,6 +58,12 @@ pub struct VoiceState {
     pub filt_ic2_r: f64,
     pub hp_ic1_r: f64,
     pub hp_ic2_r: f64,
+    /// Noise highpass filter state (SuperSaw noise_hp knob).
+    pub noise_hp_ic1: f64,
+    pub noise_hp_ic2: f64,
+    /// Second noise HP filter state (for synths with two oscillators, e.g. Analog osc2).
+    pub noise_hp_ic1b: f64,
+    pub noise_hp_ic2b: f64,
 }
 
 impl Default for VoiceState {
@@ -109,6 +115,10 @@ impl Default for VoiceState {
             filt_ic2_r: 0.0,
             hp_ic1_r: 0.0,
             hp_ic2_r: 0.0,
+            noise_hp_ic1: 0.0,
+            noise_hp_ic2: 0.0,
+            noise_hp_ic1b: 0.0,
+            noise_hp_ic2b: 0.0,
         }
     }
 }
@@ -228,6 +238,12 @@ pub trait EffectModule: Send + Sync {
     /// Clear all internal delay/reverb buffers — called on seek/play-start to prevent
     /// time-based effects from bleeding stale audio into the new playback position.
     fn reset(&mut self) {}
+    /// Returns `true` for time-based effects (reverb, delay, chorus) that produce
+    /// output even after the input goes silent (i.e. they have a "tail").
+    /// The audio engine uses this to avoid skipping the effect chain when input is zero.
+    fn has_tail(&self) -> bool {
+        false
+    }
 }
 
 /// Extra data passed into instrument processing (e.g. sampler buffers).
@@ -366,6 +382,105 @@ pub fn param_val(params: &[(String, f32)], id: &str, default: f32) -> f32 {
         .find(|(k, _)| k == id)
         .map(|(_, v)| *v)
         .unwrap_or(default)
+}
+
+// ── Per-sample parameter smoother ──────────────────────────────────
+//
+// One-pole exponential smoother that prevents discontinuities when
+// automation (or manual knob tweaks) change a parameter value between
+// samples.  Without this, filter coefficients (and other DSP state
+// derived from parameters) jump instantaneously, producing audible
+// clicks and pops.
+//
+// ─── SMOOTHED PARAM ───────────────────────────────────────────────
+// RULE: Every continuous parameter in every effect that can be
+// automated MUST use a SmoothedParam.  This prevents the audible
+// clicks and pops that occur when a parameter value changes
+// instantaneously between samples (coefficient discontinuity).
+//
+// When adding a NEW effect:
+//   1. Add a `SmoothedParam` field for each continuous knob
+//      (e.g. sm_cutoff, sm_gain, sm_mix, sm_output …).
+//   2. Initialise them in the constructor with SmoothedParam::new().
+//   3. In process(), call  sm_xxx.tick(param_val(…))  per‐sample.
+//   4. In fresh(), return a default‐constructed instance so the
+//      smoothers reset.
+//
+// Default smoothing time: ~5 ms — fast enough to track even quick
+// automation ramps, slow enough to eliminate any click.
+
+/// One-pole parameter smoother.
+#[derive(Clone, Copy, Debug)]
+pub struct SmoothedParam {
+    /// Current (smoothed) value output each sample.
+    current: f64,
+    /// Target value set from the param list each sample.
+    target: f64,
+    /// One-pole coefficient: `current += coeff * (target - current)`.
+    /// Computed from sample rate and smoothing time in `new()`.
+    coeff: f64,
+}
+
+impl SmoothedParam {
+    /// Create a new smoother starting at `initial` with a ~5 ms ramp.
+    /// `sr` is the sample rate.
+    #[inline]
+    pub fn new(initial: f64, sr: f64) -> Self {
+        Self {
+            current: initial,
+            target: initial,
+            coeff: Self::coeff_for_ms(5.0, sr),
+        }
+    }
+
+    /// Compute the one-pole coefficient for a given smoothing time in ms.
+    #[inline]
+    fn coeff_for_ms(ms: f64, sr: f64) -> f64 {
+        if ms <= 0.0 || sr <= 0.0 {
+            return 1.0; // instant
+        }
+        let samples = ms * 0.001 * sr;
+        // 1 - exp(-1/n) ≈ fraction moved per sample toward target
+        1.0 - fast_exp(-1.0 / samples)
+    }
+
+    /// Set the target and advance one sample.  Returns the smoothed value.
+    #[inline(always)]
+    pub fn tick(&mut self, target: f64) -> f64 {
+        self.target = target;
+        self.current += self.coeff * (self.target - self.current);
+        self.current
+    }
+
+    /// Snap immediately to a value (used on reset / fresh).
+    #[inline]
+    pub fn snap(&mut self, val: f64) {
+        self.current = val;
+        self.target = val;
+    }
+}
+
+/// Convert dB to linear gain.  Used by output gain knobs on effects and synths.
+/// Range: -60 dB → ~0.001, 0 dB → 1.0, +24 dB → ~15.85
+/// Uses fast_pow2 (same math as db_to_lin) instead of 10^(x/20).
+#[inline(always)]
+pub fn db_to_linear(db: f64) -> f64 {
+    if db <= -60.0 {
+        0.0
+    } else {
+        db_to_lin(db)
+    }
+}
+
+/// Read "output_db" param and apply as linear gain to a stereo pair.
+#[inline(always)]
+pub fn apply_output_gain(l: f64, r: f64, params: &[(String, f32)]) -> (f64, f64) {
+    let db = param_val(params, "output_db", 0.0) as f64;
+    if db.abs() < 0.001 {
+        return (l, r); // 0 dB → unity, skip multiplication
+    }
+    let g = db_to_linear(db);
+    (l * g, r * g)
 }
 
 #[inline(always)]
@@ -558,9 +673,9 @@ static SUBTRACTIVE_PARAMS: &[ParamDesc] = &[
     ParamDesc {
         id: "gain",
         name: "Gain",
-        default: 0.8,
-        min: 0.0,
-        max: 2.0,
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
         options: None,
     },
     // ── Oscillator tuning ──
@@ -725,7 +840,7 @@ impl InstrumentModule for SubtractiveSynth {
         let amp_d = param_val(params, "amp_d", 0.1) as f64;
         let amp_s = param_val(params, "amp_s", 0.8) as f64;
         let amp_r = param_val(params, "amp_r", 0.3) as f64;
-        let gain = param_val(params, "gain", 0.8) as f64;
+        let gain = db_to_lin(param_val(params, "gain", 0.0) as f64);
         let phase_spread = param_val(params, "phase_spread", 1.0) as f64;
 
         // ── Phase spread: on first sample, lerp random phases toward 0.0 ──
@@ -736,12 +851,38 @@ impl InstrumentModule for SubtractiveSynth {
 
         // ── Oscillators with morphing ──
         let osc1_inc = voice.freq / sample_rate;
-        let osc1 = osc_morph(osc1_shape, st.phase0, osc1_inc, &mut st.noise_seed);
+        let mut osc1 = osc_morph(osc1_shape, st.phase0, osc1_inc, &mut st.noise_seed);
+        // Default HP filter on noise component to remove sub-bass crackle (~80 Hz)
+        if osc1_shape >= 3.0 {
+            let noise_frac = (osc1_shape - 3.0).min(1.0);
+            let (_lp, _bp, hp) = svf_tick(
+                osc1,
+                80.0,
+                0.0,
+                sample_rate,
+                &mut st.noise_hp_ic1,
+                &mut st.noise_hp_ic2,
+            );
+            osc1 = osc1 * (1.0 - noise_frac) + hp * noise_frac;
+        }
 
         let detune = fast_pow2((osc2_semi + osc2_fine / 100.0) / 12.0);
         let osc2_freq = voice.freq * detune;
         let osc2_inc = osc2_freq / sample_rate;
-        let osc2 = osc_morph(osc2_shape, st.phase1, osc2_inc, &mut st.noise_seed);
+        let mut osc2 = osc_morph(osc2_shape, st.phase1, osc2_inc, &mut st.noise_seed);
+        // Default HP filter on noise component to remove sub-bass crackle (~80 Hz)
+        if osc2_shape >= 3.0 {
+            let noise_frac = (osc2_shape - 3.0).min(1.0);
+            let (_lp, _bp, hp) = svf_tick(
+                osc2,
+                80.0,
+                0.0,
+                sample_rate,
+                &mut st.noise_hp_ic1b,
+                &mut st.noise_hp_ic2b,
+            );
+            osc2 = osc2 * (1.0 - noise_frac) + hp * noise_frac;
+        }
 
         st.phase0 += osc1_inc;
         if st.phase0 >= 1.0 {
@@ -977,15 +1118,23 @@ static SUPERSAW_PARAMS: &[ParamDesc] = &[
     ParamDesc {
         id: "gain",
         name: "Gain",
-        default: 0.7,
-        min: 0.0,
-        max: 2.0,
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
         options: None,
     },
     ParamDesc {
         id: "noise_gain",
         name: "Noise",
         default: 0.0,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "noise_hp",
+        name: "Noise HP",
+        default: 0.15,
         min: 0.0,
         max: 1.0,
         options: None,
@@ -1110,8 +1259,9 @@ impl InstrumentModule for SuperSawSynth {
         let osc_blend = param_val(params, "osc_blend", 0.0) as f64;
         let osc2_semi = param_val(params, "osc2_semi", 0.0) as f64;
         let osc2_fine = param_val(params, "osc2_fine", 0.0) as f64;
-        let gain = param_val(params, "gain", 0.7) as f64;
+        let gain = db_to_lin(param_val(params, "gain", 0.0) as f64);
         let noise_gain = param_val(params, "noise_gain", 0.0) as f64;
+        let noise_hp_norm = param_val(params, "noise_hp", 0.15) as f64;
         let filter_cutoff_norm = param_val(params, "filter_cutoff", 0.9) as f64;
         let filter_reso = param_val(params, "filter_reso", 0.1) as f64;
         let filter_env_amt = param_val(params, "filter_env", 0.0) as f64;
@@ -1151,14 +1301,28 @@ impl InstrumentModule for SuperSawSynth {
         let osc_l = osc1_l * (1.0 - osc_blend) + osc2_l * osc_blend;
         let osc_r = osc1_r * (1.0 - osc_blend) + osc2_r * osc_blend;
 
-        // ── White noise (mono, added equally to both channels) ──
+        // ── White noise with highpass filter ──
+        // The noise HP knob (0..1) maps to 20Hz..8000Hz cutoff.
+        // Default 0.15 ≈ 120Hz — removes low-frequency crackle while keeping brightness.
         let noise = if noise_gain > 0.001 {
             let mut s = st.noise_seed;
             s ^= s >> 12;
             s ^= s << 25;
             s ^= s >> 27;
             st.noise_seed = s;
-            (s.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+            let raw_noise =
+                (s.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+            // Apply highpass to noise to remove low-frequency crackle
+            let noise_hp_hz = 20.0 * fast_pow2(noise_hp_norm * 8.64); // 20Hz..8000Hz
+            let (_, _, hp_noise) = svf_tick(
+                raw_noise,
+                noise_hp_hz,
+                0.0,
+                sample_rate,
+                &mut st.noise_hp_ic1,
+                &mut st.noise_hp_ic2,
+            );
+            hp_noise
         } else {
             0.0
         };
@@ -1319,9 +1483,9 @@ static SAMPLER_PARAMS: &[ParamDesc] = &[
     ParamDesc {
         id: "gain",
         name: "Gain",
-        default: 0.8,
-        min: 0.0,
-        max: 1.0,
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
         options: None,
     },
 ];
@@ -1358,7 +1522,7 @@ impl InstrumentModule for Sampler {
         let amp_d = param_val(params, "amp_d", 0.05) as f64;
         let amp_s = param_val(params, "amp_s", 1.0) as f64;
         let amp_r = param_val(params, "amp_r", 0.1) as f64;
-        let gain = param_val(params, "gain", 0.8) as f64;
+        let gain = db_to_lin(param_val(params, "gain", 0.0) as f64);
 
         let total = sample_data.len();
         let _start_frame = (start_frac * (total - 1) as f64) as usize;
@@ -1526,9 +1690,9 @@ static HEAVY_PARAMS: &[ParamDesc] = &[
     ParamDesc {
         id: "gain",
         name: "Gain",
-        default: 0.8,
-        min: 0.0,
-        max: 2.0,
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
         options: None,
     },
     // ── Filter ──
@@ -1661,7 +1825,7 @@ impl InstrumentModule for HeavySynth {
         let osc_shape = param_val(params, "osc_shape", 1.0) as usize;
         let sub_level = param_val(params, "sub_level", 0.0) as f64;
         let noise_mix = param_val(params, "noise_mix", 0.0) as f64;
-        let gain = param_val(params, "gain", 0.8) as f64;
+        let gain = db_to_lin(param_val(params, "gain", 0.0) as f64);
         let filter_cutoff_norm = param_val(params, "filter_cutoff", 0.8) as f64;
         let filter_reso = param_val(params, "filter_reso", 0.0) as f64;
         let filter_env_amt = param_val(params, "filter_env", 0.0) as f64;
@@ -1701,7 +1865,18 @@ impl InstrumentModule for HeavySynth {
             s ^= s << 25;
             s ^= s >> 27;
             st.noise_seed = s;
-            (s.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+            let raw =
+                (s.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+            // Default HP filter on noise to remove sub-bass crackle (~80 Hz)
+            let (_lp, _bp, hp) = svf_tick(
+                raw,
+                80.0,
+                0.0,
+                sample_rate,
+                &mut st.noise_hp_ic1,
+                &mut st.noise_hp_ic2,
+            );
+            hp
         };
 
         // ── Mix ──
@@ -1802,14 +1977,22 @@ pub struct FxLpFilter {
     ic2_l: f64,
     ic1_r: f64,
     ic2_r: f64,
+    sm_cutoff: SmoothedParam,
+    sm_resonance: SmoothedParam,
+    sm_output: SmoothedParam,
 }
 impl FxLpFilter {
     pub fn new() -> Self {
+        // Use a default SR of 44100 for initial smoothing; the first process()
+        // call will provide the real SR, and the smoother converges within 1 ms anyway.
         Self {
             ic1_l: 0.0,
             ic2_l: 0.0,
             ic1_r: 0.0,
             ic2_r: 0.0,
+            sm_cutoff: SmoothedParam::new(1.0, 44100.0),
+            sm_resonance: SmoothedParam::new(0.0, 44100.0),
+            sm_output: SmoothedParam::new(0.0, 44100.0),
         }
     }
 }
@@ -1831,6 +2014,14 @@ static LP_FILTER_PARAMS: &[ParamDesc] = &[
         max: 1.0,
         options: None,
     },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
+        options: None,
+    },
 ];
 
 impl EffectModule for FxLpFilter {
@@ -1841,12 +2032,18 @@ impl EffectModule for FxLpFilter {
         LP_FILTER_PARAMS
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
-        let c = param_val(params, "cutoff", 1.0);
-        let r = param_val(params, "resonance", 0.0) as f64;
-        let hz = (20.0 * fast_pow2(c as f64 * 9.965784284662087)).min(sr * 0.49);
+        let c = self.sm_cutoff.tick(param_val(params, "cutoff", 1.0) as f64);
+        let r = self.sm_resonance.tick(param_val(params, "resonance", 0.0) as f64);
+        let hz = (20.0 * fast_pow2(c * 9.965784284662087)).min(sr * 0.49);
         let (lp_l, _, _) = svf_tick(left, hz, r, sr, &mut self.ic1_l, &mut self.ic2_l);
         let (lp_r, _, _) = svf_tick(right, hz, r, sr, &mut self.ic1_r, &mut self.ic2_r);
-        (lp_l, lp_r)
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        if out_db.abs() < 0.001 {
+            (lp_l, lp_r)
+        } else {
+            let g = db_to_linear(out_db);
+            (lp_l * g, lp_r * g)
+        }
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
         Box::new(FxLpFilter::new())
@@ -1860,6 +2057,9 @@ pub struct FxHpFilter {
     ic2_l: f64,
     ic1_r: f64,
     ic2_r: f64,
+    sm_cutoff: SmoothedParam,
+    sm_resonance: SmoothedParam,
+    sm_output: SmoothedParam,
 }
 impl FxHpFilter {
     pub fn new() -> Self {
@@ -1868,6 +2068,9 @@ impl FxHpFilter {
             ic2_l: 0.0,
             ic1_r: 0.0,
             ic2_r: 0.0,
+            sm_cutoff: SmoothedParam::new(0.0, 44100.0),
+            sm_resonance: SmoothedParam::new(0.0, 44100.0),
+            sm_output: SmoothedParam::new(0.0, 44100.0),
         }
     }
 }
@@ -1889,6 +2092,14 @@ static HP_FILTER_PARAMS: &[ParamDesc] = &[
         max: 1.0,
         options: None,
     },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
+        options: None,
+    },
 ];
 
 impl EffectModule for FxHpFilter {
@@ -1899,12 +2110,18 @@ impl EffectModule for FxHpFilter {
         HP_FILTER_PARAMS
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
-        let c = param_val(params, "cutoff", 0.0);
-        let r = param_val(params, "resonance", 0.0) as f64;
-        let hz = (20.0 * fast_pow2(c as f64 * 9.965784284662087)).min(sr * 0.49);
+        let c = self.sm_cutoff.tick(param_val(params, "cutoff", 0.0) as f64);
+        let r = self.sm_resonance.tick(param_val(params, "resonance", 0.0) as f64);
+        let hz = (20.0 * fast_pow2(c * 9.965784284662087)).min(sr * 0.49);
         let (_, _, hp_l) = svf_tick(left, hz, r, sr, &mut self.ic1_l, &mut self.ic2_l);
         let (_, _, hp_r) = svf_tick(right, hz, r, sr, &mut self.ic1_r, &mut self.ic2_r);
-        (hp_l, hp_r)
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        if out_db.abs() < 0.001 {
+            (hp_l, hp_r)
+        } else {
+            let g = db_to_linear(out_db);
+            (hp_l * g, hp_r * g)
+        }
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
         Box::new(FxHpFilter::new())
@@ -1917,6 +2134,10 @@ pub struct FxDelay {
     buf_l: Vec<f32>,
     buf_r: Vec<f32>,
     write_pos: usize,
+    sm_time: SmoothedParam,
+    sm_feedback: SmoothedParam,
+    sm_mix: SmoothedParam,
+    sm_output: SmoothedParam,
 }
 impl FxDelay {
     pub fn new(sr: u32) -> Self {
@@ -1925,6 +2146,10 @@ impl FxDelay {
             buf_l: vec![0.0; len],
             buf_r: vec![0.0; len],
             write_pos: 0,
+            sm_time: SmoothedParam::new(0.25, sr as f64),
+            sm_feedback: SmoothedParam::new(0.3, sr as f64),
+            sm_mix: SmoothedParam::new(0.3, sr as f64),
+            sm_output: SmoothedParam::new(0.0, sr as f64),
         }
     }
 }
@@ -1954,6 +2179,14 @@ static DELAY_PARAMS: &[ParamDesc] = &[
         max: 1.0,
         options: None,
     },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
+        options: None,
+    },
 ];
 
 impl EffectModule for FxDelay {
@@ -1964,25 +2197,34 @@ impl EffectModule for FxDelay {
         DELAY_PARAMS
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
-        let time = param_val(params, "time", 0.25) as f64;
-        let feedback = param_val(params, "feedback", 0.3) as f64;
-        let mix = param_val(params, "mix", 0.3) as f64;
+        let time = self.sm_time.tick(param_val(params, "time", 0.25) as f64);
+        let feedback = self.sm_feedback.tick(param_val(params, "feedback", 0.3) as f64);
+        let mix = self.sm_mix.tick(param_val(params, "mix", 0.3) as f64);
         let len = self.buf_l.len();
         if len == 0 {
             return (left, right);
         }
-        let ds = (time * sr) as usize;
-        let ds = ds.min(len - 1).max(1);
-        let rp = (self.write_pos + len - ds) % len;
-        let del_l = self.buf_l[rp] as f64;
-        let del_r = self.buf_r[rp] as f64;
+        // Use fractional delay with linear interpolation to avoid clicks
+        // when the delay time is modulated by automation.
+        let ds_f = (time * sr).max(1.0).min((len - 1) as f64);
+        let rp_f = self.write_pos as f64 + len as f64 - ds_f;
+        let i0 = rp_f as usize % len;
+        let i1 = (i0 + 1) % len;
+        let frac = rp_f - rp_f.floor();
+        let del_l = self.buf_l[i0] as f64 * (1.0 - frac) + self.buf_l[i1] as f64 * frac;
+        let del_r = self.buf_r[i0] as f64 * (1.0 - frac) + self.buf_r[i1] as f64 * frac;
         self.buf_l[self.write_pos] = (left + del_l * feedback) as f32;
         self.buf_r[self.write_pos] = (right + del_r * feedback) as f32;
         self.write_pos = (self.write_pos + 1) % len;
-        (
-            left * (1.0 - mix) + del_l * mix,
-            right * (1.0 - mix) + del_r * mix,
-        )
+        let out_l = left * (1.0 - mix) + del_l * mix;
+        let out_r = right * (1.0 - mix) + del_r * mix;
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        if out_db.abs() < 0.001 {
+            (out_l, out_r)
+        } else {
+            let g = db_to_linear(out_db);
+            (out_l * g, out_r * g)
+        }
     }
     fn reset(&mut self) {
         self.buf_l.fill(0.0);
@@ -1992,116 +2234,117 @@ impl EffectModule for FxDelay {
     fn fresh(&self) -> Box<dyn EffectModule> {
         Box::new(FxDelay::new((self.buf_l.len() / 2) as u32))
     }
+    fn has_tail(&self) -> bool {
+        true
+    }
 }
 
-// ── Reverb (Dragonfly Hall-style reverb) ────────────────────────────
+// ── Reverb (Dragonfly-inspired two-stage hall reverb) ───────────────
 //
-// Parameters match the Dragonfly Hall Reverb plugin:
-//   size       — room size in metres (8–32 m)
-//   width      — stereo spread (0–100 %)
-//   predelay   — predelay in ms (0–100 ms)
-//   decay      — RT60 tail length in seconds (0.1–10 s)
-//   diffuse    — allpass diffusion density (0–100 %)
-//   spin       — LFO rate in Hz (0–10 Hz)
-//   wander     — LFO depth in ms (0–40 ms)
-//   modulation — overall modulation amount (0–100 %)
-//   low_cut    — high-pass on input, Hz (200–1200 Hz)
-//   low_xover  — crossover below which decay is shortened (200–1200 Hz)
-//   low_mult   — decay multiplier for bass (0.1–2.5)
-//   high_cut   — low-pass on input, Hz (1000–20000 Hz)
-//   high_xover — crossover above which decay is shortened (1000–20000 Hz)
-//   high_mult  — decay multiplier for treble (0.1–2.5)
-//   early      — early reflections output level (0–100 %)
-//   early_send — how much early feeds into the late network (0–100 %)
-//   late       — late reverb tail output level (0–100 %)
-//   mix        — dry/wet blend (0–100 %)
+// Stage 1 — Early reflections: an 8-tap multi-delay network that simulates
+//   the initial room reflections.  The tap times are prime-number multiples of
+//   a size-scaled unit so they never alias.
+//
+// Stage 2 — Late tail: 8 parallel feedback comb filters (4 per channel, with
+//   decorrelated lengths for L vs R) followed by 4 Schroeder allpass sections.
+//   Damping is a one-pole low-pass inside every comb loop.
+//   A per-sample modulation LFO slightly varies the comb lengths to diffuse
+//   the resonances and add the classic "shimmer" typical of plate/hall units.
+//
+// Parameters:
+//   size      — room scale (0–1 → small..large; affects both early+late delays)
+//   predelay  — ms of silence before anything starts (0–100 ms)
+//   early     — level of the early reflection stage (0–1)
+//   late      — level of the late reverb tail (0–1)
+//   decay     — RT60 / tail length (0–1)
+//   diffuse   — allpass feedback (0–1) controls density of the tail
+//   damping   — high-frequency damping inside comb loops (0–1)
+//   width     — stereo spread of the output (0–1)
+//   mix       — dry/wet balance (0–1)
 
 pub struct FxReverb {
     sr: f64,
 
-    // ── Predelay line (mono) ─────────────────────────────────────────
+    // ── Predelay line ────────────────────────────────────────────────
     pre_buf: Vec<f32>,
     pre_head: usize,
 
-    // ── Input tone shaping: 1-pole HP (low_cut) and LP (high_cut) ───
-    hp_state_l: f64,
-    hp_state_r: f64,
-    lp_state_l: f64,
-    lp_state_r: f64,
-
-    // ── Early reflections (8-tap multi-delay, stereo) ────────────────
+    // ── Early reflections (8 taps, stereo) ───────────────────────────
     early_buf_l: Vec<f32>,
     early_buf_r: Vec<f32>,
     early_head: usize,
 
-    // ── Late tail: 8 comb filters (4L + 4R) ─────────────────────────
-    // Buffers are sized for max size (32 m) + max wander
+    // ── Late reverb: 8 comb filters (4L + 4R) ───────────────────────
     comb_buf_l: [Vec<f32>; 4],
     comb_buf_r: [Vec<f32>; 4],
     comb_head_l: [usize; 4],
     comb_head_r: [usize; 4],
-    // Per-band one-pole damping filters inside comb loops
-    comb_lp_l: [f64; 4], // high-frequency damping (high_mult path)
-    comb_lp_r: [f64; 4],
-    comb_hp_l: [f64; 4], // low-frequency damping (low_mult path)
-    comb_hp_r: [f64; 4],
+    comb_filt_l: [f64; 4],
+    comb_filt_r: [f64; 4],
 
-    // ── Late tail: 4 allpass sections (separate L/R) ─────────────────
+    // ── Late reverb: 4 allpass sections (L/R) ────────────────────────
     ap_buf_l: [Vec<f32>; 4],
     ap_buf_r: [Vec<f32>; 4],
     ap_head_l: [usize; 4],
     ap_head_r: [usize; 4],
 
-    // ── Spin LFO (modulates comb delay times) ────────────────────────
+    // ── Modulation LFOs ──────────────────────────────────────────────
     lfo_phase: f64,
+    lfo_wander_phase: f64,
+
+    // ── Filters ──────────────────────────────────────────────────────
+    // High cut (low-pass on wet output)
+    hc_state_l: f64,
+    hc_state_r: f64,
+    // Low cut (high-pass on wet output)
+    lc_state_l: f64,
+    lc_state_r: f64,
+    // Crossover shelving states for frequency-dependent decay
+    hx_state_l: [f64; 4],
+    hx_state_r: [f64; 4],
+    lx_state_l: [f64; 4],
+    lx_state_r: [f64; 4],
+
+    // ── Smoothed automation params ───────────────────────────────────
+    sm_mix: SmoothedParam,
+    sm_decay: SmoothedParam,
+    sm_output: SmoothedParam,
 }
 
 impl FxReverb {
-    // Early reflection tap primes (relative to size-scaled unit delay)
-    const EARLY_PRIMES: [f64; 8] = [2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0];
+    const EARLY_TAP_PRIMES: [f64; 8] = [2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0];
 
-    // Comb lengths in ms — two slightly offset sets for L/R decorrelation.
-    // These match Freeverb3 Hibiki scale points used in Dragonfly.
+    // Comb delays in ms — two decorrelated sets for L/R stereo imaging
     const COMB_MS_L: [f64; 4] = [29.13, 34.07, 38.93, 43.11];
     const COMB_MS_R: [f64; 4] = [30.61, 35.29, 40.37, 44.71];
 
-    // Allpass delay times in ms
-    const AP_MS: [f64; 4] = [12.61, 10.0, 7.73, 5.0];
+    // Allpass delays in ms
+    const AP_MS_L: [f64; 4] = [5.02, 1.68, 4.01, 1.24];
+    const AP_MS_R: [f64; 4] = [5.31, 1.83, 3.78, 1.41];
 
     pub fn new(sr: u32) -> Self {
-        let sr_f = sr as f64;
-        let ms_to_samp = |ms: f64| -> usize { ((sr_f * ms / 1000.0) as usize + 4).max(8) };
+        let sr = sr as f64;
+        let max_ms = |ms: f64| -> usize { ((sr * ms / 1000.0) as usize + 4).max(8) };
 
-        // Predelay: 0..100 ms
-        let pre_len = ms_to_samp(100.0);
+        // Predelay: up to 100 ms
+        let pre_len = max_ms(110.0);
+        // Early: max tap = prime[7] * unit at max size
+        let early_len = max_ms(30.0 * 19.0); // ~570 ms max
 
-        // Early reflections: max tap = prime[7] * unit_ms_max
-        // unit_ms at max size (32 m): let's say unit_ms_max = 32.0 ms
-        // max tap = 19 * 32 = 608 ms — allocate a bit more
-        let early_len = ms_to_samp(700.0);
-
-        // Comb buffers: base_ms * size_factor_max + wander_max + headroom
-        // size_factor_max = 32/8 = 4.0 (size 8..32 m, normalised to base at 8 m)
-        // wander_max = 40 ms; headroom = 4 ms
+        // Comb buffers: size can scale up to 4x, plus LFO wander headroom up to 40ms
         let comb_l: [Vec<f32>; 4] =
-            std::array::from_fn(|i| vec![0.0; ms_to_samp(Self::COMB_MS_L[i] * 4.5 + 44.0)]);
+            std::array::from_fn(|i| vec![0.0; max_ms(Self::COMB_MS_L[i] * 5.0 + 50.0)]);
         let comb_r: [Vec<f32>; 4] =
-            std::array::from_fn(|i| vec![0.0; ms_to_samp(Self::COMB_MS_R[i] * 4.5 + 44.0)]);
-
-        // Allpass buffers: ap_ms * size_factor_max + wander headroom
+            std::array::from_fn(|i| vec![0.0; max_ms(Self::COMB_MS_R[i] * 5.0 + 50.0)]);
         let ap_l: [Vec<f32>; 4] =
-            std::array::from_fn(|i| vec![0.0; ms_to_samp(Self::AP_MS[i] * 4.5 + 44.0)]);
+            std::array::from_fn(|i| vec![0.0; max_ms(Self::AP_MS_L[i] * 5.0 + 2.0)]);
         let ap_r: [Vec<f32>; 4] =
-            std::array::from_fn(|i| vec![0.0; ms_to_samp(Self::AP_MS[i] * 4.5 + 44.0)]);
+            std::array::from_fn(|i| vec![0.0; max_ms(Self::AP_MS_R[i] * 5.0 + 2.0)]);
 
         Self {
-            sr: sr_f,
+            sr,
             pre_buf: vec![0.0; pre_len],
             pre_head: 0,
-            hp_state_l: 0.0,
-            hp_state_r: 0.0,
-            lp_state_l: 0.0,
-            lp_state_r: 0.0,
             early_buf_l: vec![0.0; early_len],
             early_buf_r: vec![0.0; early_len],
             early_head: 0,
@@ -2109,19 +2352,28 @@ impl FxReverb {
             comb_buf_r: comb_r,
             comb_head_l: [0; 4],
             comb_head_r: [0; 4],
-            comb_lp_l: [0.0; 4],
-            comb_lp_r: [0.0; 4],
-            comb_hp_l: [0.0; 4],
-            comb_hp_r: [0.0; 4],
+            comb_filt_l: [0.0; 4],
+            comb_filt_r: [0.0; 4],
             ap_buf_l: ap_l,
             ap_buf_r: ap_r,
             ap_head_l: [0; 4],
             ap_head_r: [0; 4],
             lfo_phase: 0.0,
+            lfo_wander_phase: 0.0,
+            hc_state_l: 0.0,
+            hc_state_r: 0.0,
+            lc_state_l: 0.0,
+            lc_state_r: 0.0,
+            hx_state_l: [0.0; 4],
+            hx_state_r: [0.0; 4],
+            lx_state_l: [0.0; 4],
+            lx_state_r: [0.0; 4],
+            sm_mix: SmoothedParam::new(50.0, sr),
+            sm_decay: SmoothedParam::new(1.6, sr),
+            sm_output: SmoothedParam::new(0.0, sr),
         }
     }
 
-    /// Linearly interpolated read from a circular buffer.
     #[inline]
     fn read_interp(buf: &[f32], head: usize, offset_samples: f64) -> f64 {
         let len = buf.len();
@@ -2132,211 +2384,220 @@ impl FxReverb {
         buf[i0] as f64 * (1.0 - frac) + buf[i1] as f64 * frac
     }
 
-    /// 1-pole high-pass: y[n] = x[n] - x[n-1] + c * y[n-1]   (c ≈ e^{-2π fc/sr})
+    /// One-pole low-pass coefficient from cutoff frequency
     #[inline]
-    fn hp_tick(state: &mut f64, input: f64, coeff: f64) -> f64 {
-        let prev = *state;
-        *state = input;
-        input - prev + coeff * (*state - input + prev * 0.0) // simplified: use biquad-free 1-pole
+    fn lp_coeff(freq: f64, sr: f64) -> f64 {
+        let w = (std::f64::consts::TAU * freq / sr).min(0.99);
+        w / (1.0 + w)
     }
 
-    /// 1-pole low-pass: y[n] = (1-c)*x[n] + c*y[n-1]
+    /// One-pole high-pass: returns (output, new_state)
     #[inline]
-    fn lp_tick(state: &mut f64, input: f64, coeff: f64) -> f64 {
-        *state = (1.0 - coeff) * input + coeff * *state;
-        *state
+    fn hp_tick(input: f64, state: f64, freq: f64, sr: f64) -> (f64, f64) {
+        let a = Self::lp_coeff(freq, sr);
+        let new_state = state + a * (input - state);
+        (input - new_state, new_state)
     }
 
-    /// One-pole HP coefficient from Hz.
-    #[inline]
-    fn hp_coeff(hz: f64, sr: f64) -> f64 {
-        let w = 2.0 * std::f64::consts::PI * hz / sr;
-        // bilinear approx: c = (1 - tan(w/2)) / (1 + tan(w/2))
-        let t = (w * 0.5).tan();
-        ((1.0 - t) / (1.0 + t)).clamp(0.0, 0.9999)
-    }
-
-    /// One-pole LP coefficient from Hz.
-    #[inline]
-    fn lp_coeff(hz: f64, sr: f64) -> f64 {
-        let w = 2.0 * std::f64::consts::PI * hz / sr;
-        (-w).exp().clamp(0.0, 0.9999)
-    }
-
-    /// Early reflections: 8-tap multi-delay with stereo decorrelation.
-    fn process_early(&mut self, input: f64, size_m: f64) -> (f64, f64) {
+    fn process_early(&mut self, input: f64, size: f64) -> (f64, f64) {
         let len = self.early_buf_l.len();
         if len == 0 {
             return (input, input);
         }
         self.early_buf_l[self.early_head] = input as f32;
-        // R write offset by 1 sample for decorrelation
         self.early_buf_r[(self.early_head + 1) % len] = input as f32;
         self.early_head = (self.early_head + 1) % len;
 
-        // Unit delay: proportional to room size (4..32 ms range)
-        let unit_ms = size_m * 1.0; // 1 ms per metre is a reasonable ER spacing
+        // size 0..60 maps to unit delay 4..30 ms
+        let unit_ms = 4.0 + (size / 60.0).clamp(0.0, 1.0) * 26.0;
         let unit_samples = unit_ms * self.sr / 1000.0;
 
         let mut out_l = 0.0_f64;
         let mut out_r = 0.0_f64;
-        for (i, &prime) in Self::EARLY_PRIMES.iter().enumerate() {
+        for (i, &prime) in Self::EARLY_TAP_PRIMES.iter().enumerate() {
             let tap = prime * unit_samples;
-            if tap < 1.0 || tap >= len as f64 {
+            if tap >= len as f64 {
                 continue;
             }
-            let gain = 1.0 / (i as f64 + 2.0).sqrt();
+            let gain = 1.0 / (i as f64 + 2.0);
             let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
             out_l += sign * gain * Self::read_interp(&self.early_buf_l, self.early_head, tap);
-            out_r += sign * gain * Self::read_interp(&self.early_buf_r, self.early_head, tap + 0.7);
+            out_r += sign * gain * Self::read_interp(&self.early_buf_r, self.early_head, tap + 0.5);
         }
-        let n = Self::EARLY_PRIMES.len() as f64;
+        let n = Self::EARLY_TAP_PRIMES.len() as f64;
         (out_l / n, out_r / n)
     }
 
-    /// Late reverb tail: 4+4 comb filters + 4 allpass per channel.
-    #[allow(clippy::too_many_arguments)]
     fn process_late(
         &mut self,
         input: f64,
-        size_m: f64,
-        decay_s: f64,
-        diffuse: f64,   // 0..1
-        lfo_mod: f64,   // ±1 LFO value
-        wander_ms: f64, // max wander depth in ms
-        // Per-band decay multipliers (applied to feedback per band)
-        low_xover_hz: f64,
-        low_mult: f64,
-        high_xover_hz: f64,
+        size: f64,
+        decay: f64,
+        diffuse: f64,
+        high_xover: f64,
         high_mult: f64,
+        low_xover: f64,
+        low_mult: f64,
+        lfo_mod: f64,
+        wander_samples: f64,
     ) -> (f64, f64) {
-        // Size scale: 8 m = 1.0x, 32 m = 4.0x
-        let size_factor = (size_m / 8.0).clamp(0.5, 4.0);
+        // RT60 in seconds: decay param is already in seconds (0.1 .. 10.0)
+        let rt60 = decay.clamp(0.1, 10.0);
 
-        // LP/HP coefficients for per-band decay shaping inside comb loops
-        let lp_c = Self::lp_coeff(high_xover_hz, self.sr); // damp highs
-        let hp_c = Self::hp_coeff(low_xover_hz, self.sr); // damp lows
+        // Size factor: size 0..60 m → delay scale 0.5x .. 3.0x
+        let size_factor = 0.5 + (size / 60.0).clamp(0.0, 1.0) * 2.5;
 
         let mut sum_l = 0.0_f64;
         let mut sum_r = 0.0_f64;
 
-        macro_rules! process_combs {
-            ($buf:expr, $head:expr, $lp:expr, $hp:expr,
-             $ms_table:expr, $lfo_phase_offset:expr, $sum:expr) => {
-                for i in 0..4 {
-                    let comb_ms = $ms_table[i] * size_factor;
-                    let comb_s = comb_ms / 1000.0;
+        // ── 4 comb filters for L ──
+        for i in 0..4 {
+            let comb_ms = Self::COMB_MS_L[i] * size_factor;
+            let comb_s = comb_ms / 1000.0;
+            // Base feedback from RT60
+            let fb_base = (10.0_f64).powf(-3.0 * comb_s / rt60).clamp(0.0, 0.9995);
 
-                    // Mid-band RT60 feedback
-                    let fb_mid = (10.0_f64)
-                        .powf(-3.0 * comb_s / decay_s.max(0.01))
-                        .clamp(0.0, 0.9995);
-                    // High-band feedback (shortened by high_mult < 1 typical)
-                    let fb_high = (10.0_f64)
-                        .powf(-3.0 * comb_s / (decay_s * high_mult).max(0.01))
-                        .clamp(0.0, 0.9995);
-                    // Low-band feedback
-                    let fb_low = (10.0_f64)
-                        .powf(-3.0 * comb_s / (decay_s * low_mult).max(0.01))
-                        .clamp(0.0, 0.9995);
+            // LFO modulation: spin + wander create subtle delay time variation
+            let lfo_offset = lfo_mod * (1.0 + wander_samples * 0.5) * (i as f64 * 1.3 + 0.1).sin();
+            let delay_samples = (comb_ms * self.sr / 1000.0 + lfo_offset)
+                .clamp(1.0, (self.comb_buf_l[i].len() - 2) as f64);
+            let len = self.comb_buf_l[i].len();
+            if len == 0 {
+                continue;
+            }
+            let delayed =
+                Self::read_interp(&self.comb_buf_l[i], self.comb_head_l[i], delay_samples);
 
-                    // LFO modulation of delay time
-                    let phase_i = ($lfo_phase_offset + i as f64 * 0.25).rem_euclid(1.0);
-                    let lfo_val = fast_sin_phase(phase_i) * lfo_mod;
-                    let lfo_samp = lfo_val * wander_ms * self.sr / 1000.0;
-                    let delay_samples = (comb_ms * self.sr / 1000.0 + lfo_samp)
-                        .clamp(1.0, ($buf[i].len() - 2) as f64);
+            // Frequency-dependent decay via crossover shelving
+            // High frequency: apply high_mult to feedback above high_xover
+            let hx_a = Self::lp_coeff(high_xover, self.sr);
+            self.hx_state_l[i] += hx_a * (delayed - self.hx_state_l[i]);
+            let low_band = self.hx_state_l[i];
+            let high_band = delayed - low_band;
 
-                    let len = $buf[i].len();
-                    if len == 0 {
-                        continue;
-                    }
+            // Low frequency: apply low_mult to feedback below low_xover
+            let lx_a = Self::lp_coeff(low_xover, self.sr);
+            self.lx_state_l[i] += lx_a * (low_band - self.lx_state_l[i]);
+            let very_low = self.lx_state_l[i];
+            let mid_band = low_band - very_low;
 
-                    let delayed = Self::read_interp(&$buf[i], $head[i], delay_samples);
+            // Recombine with multiplied feedback per band
+            let fb_low = fb_base * low_mult.clamp(0.2, 2.5);
+            let fb_high = fb_base * high_mult.clamp(0.2, 2.5);
+            let fb_mid = fb_base;
+            let filtered = very_low * fb_low + mid_band * fb_mid + high_band * fb_high;
 
-                    // Multi-band feedback: LP separates highs, HP separates lows
-                    let high_comp = Self::lp_tick(&mut $lp[i], delayed, lp_c);
-                    let low_comp = delayed - Self::lp_tick(&mut $hp[i], delayed, hp_c);
-                    let mid_comp = delayed - high_comp - low_comp;
+            // Standard damping one-pole
+            let damping = 1.0 - high_mult.clamp(0.2, 2.5).min(1.0) * 0.3;
+            self.comb_filt_l[i] =
+                filtered * (1.0 - damping * 0.4) + self.comb_filt_l[i] * (damping * 0.4);
 
-                    let fed = input + mid_comp * fb_mid + high_comp * fb_high + low_comp * fb_low;
-
-                    $buf[i][$head[i]] = fed.clamp(-4.0, 4.0) as f32;
-                    $head[i] = ($head[i] + 1) % len;
-                    $sum += delayed;
-                }
-            };
+            let new_val = input + self.comb_filt_l[i];
+            self.comb_buf_l[i][self.comb_head_l[i]] = new_val as f32;
+            self.comb_head_l[i] = (self.comb_head_l[i] + 1) % len;
+            sum_l += delayed;
         }
 
-        process_combs!(
-            self.comb_buf_l,
-            self.comb_head_l,
-            self.comb_lp_l,
-            self.comb_hp_l,
-            Self::COMB_MS_L,
-            self.lfo_phase,
-            sum_l
-        );
-        process_combs!(
-            self.comb_buf_r,
-            self.comb_head_r,
-            self.comb_lp_r,
-            self.comb_hp_r,
-            Self::COMB_MS_R,
-            self.lfo_phase + 0.5,
-            sum_r
-        );
+        // ── 4 comb filters for R ──
+        for i in 0..4 {
+            let comb_ms = Self::COMB_MS_R[i] * size_factor;
+            let comb_s = comb_ms / 1000.0;
+            let fb_base = (10.0_f64).powf(-3.0 * comb_s / rt60).clamp(0.0, 0.9995);
+
+            let lfo_offset =
+                lfo_mod * (1.0 + wander_samples * 0.5) * ((i as f64 + 0.5) * 1.7 + 0.2).sin();
+            let delay_samples = (comb_ms * self.sr / 1000.0 + lfo_offset)
+                .clamp(1.0, (self.comb_buf_r[i].len() - 2) as f64);
+            let len = self.comb_buf_r[i].len();
+            if len == 0 {
+                continue;
+            }
+            let delayed =
+                Self::read_interp(&self.comb_buf_r[i], self.comb_head_r[i], delay_samples);
+
+            let hx_a = Self::lp_coeff(high_xover, self.sr);
+            self.hx_state_r[i] += hx_a * (delayed - self.hx_state_r[i]);
+            let low_band = self.hx_state_r[i];
+            let high_band = delayed - low_band;
+
+            let lx_a = Self::lp_coeff(low_xover, self.sr);
+            self.lx_state_r[i] += lx_a * (low_band - self.lx_state_r[i]);
+            let very_low = self.lx_state_r[i];
+            let mid_band = low_band - very_low;
+
+            let fb_low = fb_base * low_mult.clamp(0.2, 2.5);
+            let fb_high = fb_base * high_mult.clamp(0.2, 2.5);
+            let fb_mid = fb_base;
+            let filtered = very_low * fb_low + mid_band * fb_mid + high_band * fb_high;
+
+            let damping = 1.0 - high_mult.clamp(0.2, 2.5).min(1.0) * 0.3;
+            self.comb_filt_r[i] =
+                filtered * (1.0 - damping * 0.4) + self.comb_filt_r[i] * (damping * 0.4);
+
+            let new_val = input + self.comb_filt_r[i];
+            self.comb_buf_r[i][self.comb_head_r[i]] = new_val as f32;
+            self.comb_head_r[i] = (self.comb_head_r[i] + 1) % len;
+            sum_r += delayed;
+        }
 
         sum_l *= 0.25;
         sum_r *= 0.25;
 
-        // 4 allpass sections per channel (Schroeder diffusion)
-        let ap_fb = (0.25 + diffuse * 0.45).clamp(0.0, 0.7);
+        // ── 4 allpass sections (L and R independently) ──
+        let ap_fb = 0.3 + (diffuse / 100.0).clamp(0.0, 1.0) * 0.4;
         for i in 0..4 {
-            let ap_ms = Self::AP_MS[i] * size_factor;
-            let ap_samp =
-                (ap_ms * self.sr / 1000.0).clamp(1.0, (self.ap_buf_l[i].len() - 2) as f64);
-
+            // Left
             let len_l = self.ap_buf_l[i].len();
-            let len_r = self.ap_buf_r[i].len();
-            if len_l == 0 || len_r == 0 {
-                continue;
+            if len_l > 0 {
+                let h_l = self.ap_head_l[i];
+                let delayed_l = self.ap_buf_l[i][h_l] as f64;
+                let new_l = sum_l + delayed_l * ap_fb;
+                self.ap_buf_l[i][h_l] = new_l as f32;
+                sum_l = delayed_l - new_l * ap_fb;
+                self.ap_head_l[i] = (h_l + 1) % len_l;
             }
-
-            // L allpass
-            let delayed_l = Self::read_interp(&self.ap_buf_l[i], self.ap_head_l[i], ap_samp);
-            let new_l = sum_l + delayed_l * ap_fb;
-            self.ap_buf_l[i][self.ap_head_l[i]] = new_l.clamp(-4.0, 4.0) as f32;
-            sum_l = delayed_l - new_l * ap_fb;
-            self.ap_head_l[i] = (self.ap_head_l[i] + 1) % len_l;
-
-            // R allpass (slightly different delay for decorrelation)
-            let ap_samp_r = (ap_samp + 0.37).clamp(1.0, (len_r - 2) as f64);
-            let delayed_r = Self::read_interp(&self.ap_buf_r[i], self.ap_head_r[i], ap_samp_r);
-            let new_r = sum_r + delayed_r * ap_fb;
-            self.ap_buf_r[i][self.ap_head_r[i]] = new_r.clamp(-4.0, 4.0) as f32;
-            sum_r = delayed_r - new_r * ap_fb;
-            self.ap_head_r[i] = (self.ap_head_r[i] + 1) % len_r;
+            // Right
+            let len_r = self.ap_buf_r[i].len();
+            if len_r > 0 {
+                let h_r = self.ap_head_r[i];
+                let delayed_r = self.ap_buf_r[i][h_r] as f64;
+                let new_r = sum_r + delayed_r * ap_fb;
+                self.ap_buf_r[i][h_r] = new_r as f32;
+                sum_r = delayed_r - new_r * ap_fb;
+                self.ap_head_r[i] = (h_r + 1) % len_r;
+            }
         }
 
         (sum_l, sum_r)
     }
 }
 
+// ── Dragonfly Hall Reverb parameter set ──────────────────────────────
+// Matches the full Dragonfly Hall Reverb parameter surface:
+// Size, Width, Predelay, Decay, Diffuse, Modulation, Spin, Wander,
+// HighCut, HighXover, HighMult, LowCut, LowXover, LowMult,
+// Dry, Early, EarlySend, Late
 static REVERB_PARAMS: &[ParamDesc] = &[
-    // ── Levels ──────────────────────────────────────────────────────
     ParamDesc {
         id: "mix",
         name: "Mix",
-        default: 30.0,
+        default: 70.0,
+        min: 0.0,
+        max: 100.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "dry",
+        name: "Dry",
+        default: 80.0,
         min: 0.0,
         max: 100.0,
         options: None,
     },
     ParamDesc {
         id: "early",
-        name: "Early Level",
-        default: 50.0,
+        name: "Early",
+        default: 25.0,
         min: 0.0,
         max: 100.0,
         options: None,
@@ -2344,26 +2605,25 @@ static REVERB_PARAMS: &[ParamDesc] = &[
     ParamDesc {
         id: "early_send",
         name: "Early Send",
-        default: 20.0,
+        default: 30.0,
         min: 0.0,
         max: 100.0,
         options: None,
     },
     ParamDesc {
         id: "late",
-        name: "Late Level",
-        default: 70.0,
+        name: "Late",
+        default: 40.0,
         min: 0.0,
         max: 100.0,
         options: None,
     },
-    // ── Room shape ──────────────────────────────────────────────────
     ParamDesc {
         id: "size",
         name: "Size",
-        default: 12.0,
+        default: 24.0,
         min: 8.0,
-        max: 32.0,
+        max: 60.0,
         options: None,
     },
     ParamDesc {
@@ -2377,16 +2637,15 @@ static REVERB_PARAMS: &[ParamDesc] = &[
     ParamDesc {
         id: "predelay",
         name: "Predelay",
-        default: 0.0,
+        default: 14.0,
         min: 0.0,
         max: 100.0,
         options: None,
     },
-    // ── Tail character ──────────────────────────────────────────────
     ParamDesc {
         id: "decay",
         name: "Decay",
-        default: 2.0,
+        default: 3.0,
         min: 0.1,
         max: 10.0,
         options: None,
@@ -2394,84 +2653,89 @@ static REVERB_PARAMS: &[ParamDesc] = &[
     ParamDesc {
         id: "diffuse",
         name: "Diffuse",
-        default: 70.0,
+        default: 80.0,
         min: 0.0,
         max: 100.0,
-        options: None,
-    },
-    // ── Modulation ──────────────────────────────────────────────────
-    ParamDesc {
-        id: "spin",
-        name: "Spin",
-        default: 1.0,
-        min: 0.0,
-        max: 10.0,
-        options: None,
-    },
-    ParamDesc {
-        id: "wander",
-        name: "Wander",
-        default: 8.0,
-        min: 0.0,
-        max: 40.0,
         options: None,
     },
     ParamDesc {
         id: "modulation",
         name: "Modulation",
-        default: 50.0,
+        default: 10.0,
         min: 0.0,
         max: 100.0,
         options: None,
     },
-    // ── High-band shaping ───────────────────────────────────────────
+    ParamDesc {
+        id: "spin",
+        name: "Spin",
+        default: 0.40,
+        min: 0.0,
+        max: 5.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "wander",
+        name: "Wander",
+        default: 12.0,
+        min: 0.0,
+        max: 40.0,
+        options: None,
+    },
     ParamDesc {
         id: "high_cut",
         name: "High Cut",
-        default: 20000.0,
+        default: 16000.0,
         min: 1000.0,
-        max: 20000.0,
+        max: 16000.0,
         options: None,
     },
     ParamDesc {
         id: "high_xover",
         name: "High Xover",
-        default: 5000.0,
+        default: 5600.0,
         min: 1000.0,
-        max: 20000.0,
+        max: 16000.0,
         options: None,
     },
     ParamDesc {
         id: "high_mult",
         name: "High Mult",
         default: 0.5,
-        min: 0.1,
+        min: 0.2,
         max: 2.5,
         options: None,
     },
-    // ── Low-band shaping ────────────────────────────────────────────
     ParamDesc {
         id: "low_cut",
         name: "Low Cut",
-        default: 200.0,
-        min: 20.0,
-        max: 1200.0,
+        default: 0.0,
+        min: 0.0,
+        max: 200.0,
         options: None,
     },
     ParamDesc {
         id: "low_xover",
         name: "Low Xover",
-        default: 600.0,
-        min: 200.0,
-        max: 1200.0,
+        default: 500.0,
+        min: 50.0,
+        max: 1000.0,
         options: None,
     },
     ParamDesc {
         id: "low_mult",
         name: "Low Mult",
-        default: 1.5,
-        min: 0.1,
+        default: 1.0,
+        min: 0.5,
         max: 2.5,
+        options: None,
+    },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
         options: None,
     },
 ];
@@ -2483,61 +2747,48 @@ impl EffectModule for FxReverb {
     fn params(&self) -> &'static [ParamDesc] {
         REVERB_PARAMS
     }
-
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
         if (self.sr - sr).abs() > 1.0 {
             self.sr = sr;
         }
 
-        // ── Read all parameters ──────────────────────────────────────
-        let mix = param_val(params, "mix", 30.0) as f64 / 100.0; // 0..1
-        let early_level = param_val(params, "early", 50.0) as f64 / 100.0;
-        let early_send = param_val(params, "early_send", 20.0) as f64 / 100.0;
-        let late_level = param_val(params, "late", 70.0) as f64 / 100.0;
-        let size_m = param_val(params, "size", 24.0) as f64; // 8..32 m
-        let width = param_val(params, "width", 100.0) as f64 / 100.0; // 0..1
-        let predelay_ms = param_val(params, "predelay", 0.0) as f64; // ms
-        let decay_s = param_val(params, "decay", 2.0) as f64; // seconds
-        let diffuse = param_val(params, "diffuse", 70.0) as f64 / 100.0; // 0..1
-        let spin_hz = param_val(params, "spin", 1.0) as f64; // Hz
-        let wander_ms = param_val(params, "wander", 8.0) as f64; // ms
-        let modulation = param_val(params, "modulation", 50.0) as f64 / 100.0; // 0..1
-        let high_cut_hz = param_val(params, "high_cut", 20000.0) as f64;
-        let high_xover_hz = param_val(params, "high_xover", 5000.0) as f64;
-        let high_mult = param_val(params, "high_mult", 0.5) as f64;
-        let low_cut_hz = param_val(params, "low_cut", 200.0) as f64;
-        let low_xover_hz = param_val(params, "low_xover", 600.0) as f64;
-        let low_mult = param_val(params, "low_mult", 1.5) as f64;
+        // ── Read all Dragonfly-style parameters ──
+        let mix_pct = self.sm_mix.tick(param_val(params, "mix", 50.0) as f64); // 0..100 %
+        let dry_pct = param_val(params, "dry", 80.0) as f64; // 0..100 %
+        let early_pct = param_val(params, "early", 10.0) as f64; // 0..100 %
+        let early_send = param_val(params, "early_send", 20.0) as f64; // 0..100 %
+        let late_pct = param_val(params, "late", 20.0) as f64; // 0..100 %
+        let size = param_val(params, "size", 24.0) as f64; // 8..60 m
+        let width = param_val(params, "width", 100.0) as f64; // 0..100 %
+        let predelay = param_val(params, "predelay", 14.0) as f64; // 0..100 ms
+        let decay = self.sm_decay.tick(param_val(params, "decay", 1.6) as f64); // 0.1..10 s
+        let diffuse = param_val(params, "diffuse", 80.0) as f64; // 0..100 %
+        let modulation = param_val(params, "modulation", 10.0) as f64; // 0..100 %
+        let spin = param_val(params, "spin", 0.40) as f64; // 0..5 Hz
+        let wander = param_val(params, "wander", 12.0) as f64; // 0..40 ms
+        let high_cut = param_val(params, "high_cut", 16000.0) as f64; // 1000..16000 Hz
+        let high_xover = param_val(params, "high_xover", 5600.0) as f64; // 1000..16000 Hz
+        let high_mult = param_val(params, "high_mult", 0.5) as f64; // 0.2..2.5
+        let low_cut = param_val(params, "low_cut", 0.0) as f64; // 0..200 Hz
+        let low_xover = param_val(params, "low_xover", 500.0) as f64; // 50..1000 Hz
+        let low_mult = param_val(params, "low_mult", 1.0) as f64; // 0.5..2.5
 
-        // ── Input tone shaping ───────────────────────────────────────
-        // High-pass (low_cut) to remove sub-bass from reverb tail
-        let hp_c = Self::hp_coeff(low_cut_hz, sr);
-        // Simple 1-pole HP: y[n] = x[n] - x_prev + hp_c * y_prev
-        let process_hp = |state_l: &mut f64, state_r: &mut f64, l: f64, r: f64| -> (f64, f64) {
-            let yl = l - *state_l + hp_c * *state_l;
-            let yr = r - *state_r + hp_c * *state_r;
-            // Actually store prev_input for DC-blocking style HP
-            *state_l = l;
-            *state_r = r;
-            (yl, yr)
-        };
-        let (hp_l, hp_r) = process_hp(&mut self.hp_state_l, &mut self.hp_state_r, left, right);
+        // Convert percentages to linear gains
+        let _dry_gain = dry_pct / 100.0; // kept for internal use; mix knob controls wet/dry
+        let early_gain = early_pct / 100.0;
+        let early_send_gain = early_send / 100.0;
+        let late_gain = late_pct / 100.0;
+        let width_factor = width / 100.0;
+        let mod_depth = modulation / 100.0;
 
-        // Low-pass (high_cut) to remove extreme highs from reverb tail
-        let lp_c = Self::lp_coeff(high_cut_hz, sr);
-        self.lp_state_l = (1.0 - lp_c) * hp_l + lp_c * self.lp_state_l;
-        self.lp_state_r = (1.0 - lp_c) * hp_r + lp_c * self.lp_state_r;
-        let shaped_l = self.lp_state_l;
-        let shaped_r = self.lp_state_r;
+        let mono_in = (left + right) * 0.5;
 
-        let mono_in = (shaped_l + shaped_r) * 0.5;
-
-        // ── Predelay ─────────────────────────────────────────────────
+        // ── Predelay ──
         let pre_len = self.pre_buf.len();
         let pre_delayed = if pre_len > 1 {
             self.pre_buf[self.pre_head] = mono_in as f32;
             self.pre_head = (self.pre_head + 1) % pre_len;
-            let pre_samples = (predelay_ms * sr / 1000.0 + 1.0).clamp(1.0, (pre_len - 1) as f64);
+            let pre_samples = (predelay * sr / 1000.0 + 1.0).clamp(1.0, (pre_len - 1) as f64);
             let rp =
                 (self.pre_head as f64 + pre_len as f64 - pre_samples).rem_euclid(pre_len as f64);
             let i0 = rp as usize % pre_len;
@@ -2548,55 +2799,89 @@ impl EffectModule for FxReverb {
             mono_in
         };
 
-        // ── Spin LFO ─────────────────────────────────────────────────
-        self.lfo_phase += spin_hz / sr;
+        // ── Modulation LFOs ──
+        // Spin controls LFO rate; Wander controls a secondary slower LFO depth
+        self.lfo_phase += spin / sr;
         if self.lfo_phase >= 1.0 {
             self.lfo_phase -= 1.0;
         }
-        let lfo_mod = fast_sin_phase(self.lfo_phase) * modulation;
+        let lfo_mod = fast_sin_phase(self.lfo_phase) * mod_depth;
 
-        // ── Early reflections ─────────────────────────────────────────
-        let (early_l, early_r) = if early_level > 0.001 || early_send > 0.001 {
-            self.process_early(pre_delayed, size_m)
+        // Wander: secondary slow LFO that adds extra delay time variation
+        self.lfo_wander_phase += (spin * 0.23) / sr; // slower than main spin
+        if self.lfo_wander_phase >= 1.0 {
+            self.lfo_wander_phase -= 1.0;
+        }
+        let wander_samples =
+            fast_sin_phase(self.lfo_wander_phase) * (wander * sr / 1000.0) * mod_depth;
+
+        // ── Early reflections ──
+        let (early_l, early_r) = if early_gain > 0.001 || early_send_gain > 0.001 {
+            self.process_early(pre_delayed, size)
         } else {
             (0.0, 0.0)
         };
 
-        // ── Late tail ─────────────────────────────────────────────────
-        // Feed: predelayed mono + early_send fraction of early output
-        let late_in = pre_delayed + (early_l + early_r) * 0.5 * early_send;
-        let (late_l, late_r) = if late_level > 0.001 {
+        // ── Late tail ──
+        // Feed: predelayed signal + early reflections scaled by early_send
+        let late_in = pre_delayed + (early_l + early_r) * 0.5 * early_send_gain;
+        let (late_l, late_r) = if late_gain > 0.001 {
             self.process_late(
                 late_in,
-                size_m,
-                decay_s,
+                size,
+                decay,
                 diffuse,
-                lfo_mod,
-                wander_ms,
-                low_xover_hz,
-                low_mult,
-                high_xover_hz,
+                high_xover,
                 high_mult,
+                low_xover,
+                low_mult,
+                lfo_mod,
+                wander_samples,
             )
         } else {
             (0.0, 0.0)
         };
 
-        // ── Mix early + late ──────────────────────────────────────────
-        let wet_l = early_l * early_level + late_l * late_level;
-        let wet_r = early_r * early_level + late_r * late_level;
+        // ── Mix early + late ──
+        let mut wet_l = early_l * early_gain + late_l * late_gain;
+        let mut wet_r = early_r * early_gain + late_r * late_gain;
 
-        // ── Stereo width (mid/side) ───────────────────────────────────
+        // ── High cut filter (low-pass on wet output) ──
+        if high_cut < 15900.0 {
+            let hc_a = Self::lp_coeff(high_cut, sr);
+            self.hc_state_l += hc_a * (wet_l - self.hc_state_l);
+            self.hc_state_r += hc_a * (wet_r - self.hc_state_r);
+            wet_l = self.hc_state_l;
+            wet_r = self.hc_state_r;
+        }
+
+        // ── Low cut filter (high-pass on wet output) ──
+        if low_cut > 1.0 {
+            let (out_l, ns_l) = Self::hp_tick(wet_l, self.lc_state_l, low_cut, sr);
+            let (out_r, ns_r) = Self::hp_tick(wet_r, self.lc_state_r, low_cut, sr);
+            self.lc_state_l = ns_l;
+            self.lc_state_r = ns_r;
+            wet_l = out_l;
+            wet_r = out_r;
+        }
+
+        // ── Width (mid/side) ──
         let mid = (wet_l + wet_r) * 0.5;
         let side = (wet_l - wet_r) * 0.5;
-        let w_l = mid + side * width;
-        let w_r = mid - side * width;
+        let w_l = mid + side * width_factor;
+        let w_r = mid - side * width_factor;
 
-        // ── Dry/wet blend ─────────────────────────────────────────────
-        (
-            left * (1.0 - mix) + w_l * mix,
-            right * (1.0 - mix) + w_r * mix,
-        )
+        // ── Mix knob: 0% = full dry, 100% = full wet ──
+        // The dry/early/late knobs control internal reverb component balance.
+        // The mix knob is the master wet/dry blend that users actually reach for.
+        let mix_amt = mix_pct / 100.0;
+        let dry_amt = 1.0 - mix_amt;
+        let out_l = left * dry_amt + w_l * mix_amt;
+        let out_r = right * dry_amt + w_r * mix_amt;
+
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_gain = db_to_lin(out_db);
+        (out_l * out_gain, out_r * out_gain)
     }
 
     fn reset(&mut self) {
@@ -2609,11 +2894,6 @@ impl EffectModule for FxReverb {
         for b in &mut self.early_buf_r {
             *b = 0.0;
         }
-        self.hp_state_l = 0.0;
-        self.hp_state_r = 0.0;
-        self.lp_state_l = 0.0;
-        self.lp_state_r = 0.0;
-        self.lfo_phase = 0.0;
         for i in 0..4 {
             for b in &mut self.comb_buf_l[i] {
                 *b = 0.0;
@@ -2621,21 +2901,32 @@ impl EffectModule for FxReverb {
             for b in &mut self.comb_buf_r[i] {
                 *b = 0.0;
             }
-            self.comb_lp_l[i] = 0.0;
-            self.comb_lp_r[i] = 0.0;
-            self.comb_hp_l[i] = 0.0;
-            self.comb_hp_r[i] = 0.0;
+            self.comb_filt_l[i] = 0.0;
+            self.comb_filt_r[i] = 0.0;
             for b in &mut self.ap_buf_l[i] {
                 *b = 0.0;
             }
             for b in &mut self.ap_buf_r[i] {
                 *b = 0.0;
             }
+            self.hx_state_l[i] = 0.0;
+            self.hx_state_r[i] = 0.0;
+            self.lx_state_l[i] = 0.0;
+            self.lx_state_r[i] = 0.0;
         }
+        self.lfo_phase = 0.0;
+        self.lfo_wander_phase = 0.0;
+        self.hc_state_l = 0.0;
+        self.hc_state_r = 0.0;
+        self.lc_state_l = 0.0;
+        self.lc_state_r = 0.0;
     }
 
     fn fresh(&self) -> Box<dyn EffectModule> {
         Box::new(FxReverb::new(self.sr as u32))
+    }
+    fn has_tail(&self) -> bool {
+        true
     }
 }
 
@@ -2646,6 +2937,10 @@ pub struct FxChorus {
     buf_r: Vec<f32>,
     write_pos: usize,
     phase: f64,
+    sm_rate: SmoothedParam,
+    sm_depth: SmoothedParam,
+    sm_mix: SmoothedParam,
+    sm_output: SmoothedParam,
 }
 impl FxChorus {
     pub fn new(sr: u32) -> Self {
@@ -2654,6 +2949,10 @@ impl FxChorus {
             buf_r: vec![0.0; sr as usize],
             write_pos: 0,
             phase: 0.0,
+            sm_rate: SmoothedParam::new(0.5, sr as f64),
+            sm_depth: SmoothedParam::new(0.005, sr as f64),
+            sm_mix: SmoothedParam::new(0.5, sr as f64),
+            sm_output: SmoothedParam::new(0.0, sr as f64),
         }
     }
 }
@@ -2683,6 +2982,14 @@ static CHORUS_PARAMS: &[ParamDesc] = &[
         max: 1.0,
         options: None,
     },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
+        options: None,
+    },
 ];
 
 impl EffectModule for FxChorus {
@@ -2693,9 +3000,9 @@ impl EffectModule for FxChorus {
         CHORUS_PARAMS
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
-        let rate = param_val(params, "rate", 0.5) as f64;
-        let depth = param_val(params, "depth", 0.005) as f64;
-        let mix = param_val(params, "mix", 0.5) as f64;
+        let rate = self.sm_rate.tick(param_val(params, "rate", 0.5) as f64);
+        let depth = self.sm_depth.tick(param_val(params, "depth", 0.005) as f64);
+        let mix = self.sm_mix.tick(param_val(params, "mix", 0.5) as f64);
         let len = self.buf_l.len();
         if len == 0 {
             return (left, right);
@@ -2721,10 +3028,15 @@ impl EffectModule for FxChorus {
         let i1_r = (i0_r + 1) % len;
         let f_r = rp_r - rp_r.floor();
         let del_r = self.buf_r[i0_r] as f64 * (1.0 - f_r) + self.buf_r[i1_r] as f64 * f_r;
-        (
-            left * (1.0 - mix) + del_l * mix,
-            right * (1.0 - mix) + del_r * mix,
-        )
+        let out_l = left * (1.0 - mix) + del_l * mix;
+        let out_r = right * (1.0 - mix) + del_r * mix;
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        if out_db.abs() < 0.001 {
+            (out_l, out_r)
+        } else {
+            let g = db_to_linear(out_db);
+            (out_l * g, out_r * g)
+        }
     }
     fn reset(&mut self) {
         self.buf_l.fill(0.0);
@@ -2735,11 +3047,28 @@ impl EffectModule for FxChorus {
     fn fresh(&self) -> Box<dyn EffectModule> {
         Box::new(FxChorus::new(self.buf_l.len() as u32))
     }
+    fn has_tail(&self) -> bool {
+        true
+    }
 }
 
 // ── Distortion ──────────────────────────────────────────────────────
 
-pub struct FxDistortion;
+pub struct FxDistortion {
+    sm_drive: SmoothedParam,
+    sm_mix: SmoothedParam,
+    sm_output: SmoothedParam,
+}
+
+impl FxDistortion {
+    pub fn new() -> Self {
+        Self {
+            sm_drive: SmoothedParam::new(0.5, 44100.0),
+            sm_mix: SmoothedParam::new(1.0, 44100.0),
+            sm_output: SmoothedParam::new(0.0, 44100.0),
+        }
+    }
+}
 
 static DISTORTION_PARAMS: &[ParamDesc] = &[
     ParamDesc {
@@ -2764,6 +3093,14 @@ static DISTORTION_PARAMS: &[ParamDesc] = &[
         default: 1.0,
         min: 0.0,
         max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
         options: None,
     },
 ];
@@ -2802,32 +3139,95 @@ impl EffectModule for FxDistortion {
         DISTORTION_PARAMS
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], _sr: f64) -> (f64, f64) {
-        let drive = param_val(params, "drive", 0.5) as f64;
+        let drive = self.sm_drive.tick(param_val(params, "drive", 0.5) as f64);
         let dtype = param_val(params, "type", 0.0) as usize;
-        let mix = param_val(params, "mix", 1.0) as f64;
+        let mix = self.sm_mix.tick(param_val(params, "mix", 1.0) as f64);
         if drive < 0.001 {
             return (left, right);
         }
         let dist_l = distort_sample(left, drive, dtype);
         let dist_r = distort_sample(right, drive, dtype);
-        (
-            left * (1.0 - mix) + dist_l * mix,
-            right * (1.0 - mix) + dist_r * mix,
-        )
+        let out_l = left * (1.0 - mix) + dist_l * mix;
+        let out_r = right * (1.0 - mix) + dist_r * mix;
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        if out_db.abs() < 0.001 {
+            (out_l, out_r)
+        } else {
+            let g = db_to_linear(out_db);
+            (out_l * g, out_r * g)
+        }
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
-        Box::new(FxDistortion)
+        Box::new(FxDistortion::new())
     }
 }
 
 // ── Compressor ──────────────────────────────────────────────────────
+//
+// Proper downward compressor modelled after the LSP algorithm:
+//   • Exponential attack/release envelope follower in log (dB) domain
+//   • Peak hold before release begins
+//   • Soft-knee in log domain using quadratic Hermite interpolation
+//   • Separate attack/release thresholds (release can trail lower)
+//   • Makeup gain in dB
+//   • Sidechain key input
 
 pub struct FxCompressor {
-    env: f64,
+    /// Current envelope level in dB (log domain follower)
+    env_db: f64,
+    /// Peak hold value in dB
+    peak_db: f64,
+    /// Hold counter (samples remaining at peak)
+    hold_counter: u32,
+    /// Last computed gain reduction (dB, ≤ 0), stored for GR meter display
+    last_gr_db: f32,
+    sm_threshold: SmoothedParam,
+    sm_ratio: SmoothedParam,
+    sm_knee: SmoothedParam,
+    sm_makeup: SmoothedParam,
+    sm_output: SmoothedParam,
 }
+
 impl FxCompressor {
     pub fn new() -> Self {
-        Self { env: 0.0 }
+        Self {
+            env_db: -120.0,
+            peak_db: -120.0,
+            hold_counter: 0,
+            last_gr_db: 0.0,
+            sm_threshold: SmoothedParam::new(-18.0, 44100.0),
+            sm_ratio: SmoothedParam::new(4.0, 44100.0),
+            sm_knee: SmoothedParam::new(6.0, 44100.0),
+            sm_makeup: SmoothedParam::new(0.0, 44100.0),
+            sm_output: SmoothedParam::new(0.0, 44100.0),
+        }
+    }
+
+    /// Compute downward compression gain reduction in dB for a given input level.
+    /// Uses a soft knee interpolated around the threshold.
+    ///
+    /// - `in_db`: input level in dB
+    /// - `thresh_db`: threshold in dBFS
+    /// - `ratio`: compression ratio (>1.0, e.g. 4.0 = 4:1)
+    /// - `knee_db`: knee width in dB (0 = hard knee)
+    ///
+    /// Returns the gain adjustment in dB (≤ 0.0 for compression).
+    fn compute_gr_db(in_db: f64, thresh_db: f64, ratio: f64, knee_db: f64) -> f64 {
+        let slope = 1.0 - 1.0 / ratio; // 0.75 for 4:1
+        let half_knee = knee_db * 0.5;
+        let over = in_db - thresh_db;
+        if over <= -half_knee {
+            // Below knee: no reduction
+            0.0
+        } else if over >= half_knee {
+            // Above knee: full ratio
+            -slope * over
+        } else {
+            // In the knee: quadratic interpolation
+            let x = over + half_knee; // 0..knee_db
+            let t = x / knee_db; // 0..1
+            -slope * knee_db * t * t * 0.5
+        }
     }
 }
 
@@ -2835,41 +3235,65 @@ static COMPRESSOR_PARAMS: &[ParamDesc] = &[
     ParamDesc {
         id: "threshold",
         name: "Threshold",
-        default: 0.5,
-        min: 0.0,
-        max: 1.0,
+        default: -18.0,
+        min: -60.0,
+        max: 0.0,
         options: None,
     },
     ParamDesc {
         id: "ratio",
         name: "Ratio",
-        default: 0.3,
+        default: 4.0,
+        min: 1.0,
+        max: 20.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "knee",
+        name: "Knee",
+        default: 6.0,
         min: 0.0,
-        max: 1.0,
+        max: 24.0,
         options: None,
     },
     ParamDesc {
         id: "attack",
         name: "Attack",
-        default: 0.01,
-        min: 0.0,
-        max: 1.0,
+        default: 2.0,
+        min: 0.1,
+        max: 100.0,
         options: None,
     },
     ParamDesc {
         id: "release",
         name: "Release",
-        default: 0.1,
+        default: 50.0,
+        min: 1.0,
+        max: 800.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "hold",
+        name: "Hold",
+        default: 0.0,
         min: 0.0,
-        max: 1.0,
+        max: 500.0,
         options: None,
     },
     ParamDesc {
         id: "makeup",
         name: "Makeup",
         default: 0.0,
-        min: 0.0,
-        max: 1.0,
+        min: -24.0,
+        max: 24.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
         options: None,
     },
 ];
@@ -2893,51 +3317,72 @@ impl EffectModule for FxCompressor {
         params: &[(String, f32)],
         sr: f64,
     ) -> (f64, f64) {
-        let threshold = param_val(params, "threshold", 0.5) as f64;
-        let ratio = param_val(params, "ratio", 0.3) as f64;
-        // Attack/release stored as 0–1 knob values; map to log-scale seconds.
-        // attack 0..1 → ~0.3ms .. 300ms (log)
-        // release 0..1 → ~5ms .. 2000ms (log)
-        let attack_knob = param_val(params, "attack", 0.01) as f64;
-        let release_knob = param_val(params, "release", 0.1) as f64;
-        let attack = 0.0003 * fast_pow2(attack_knob * 9.965784284662087); // 0.3ms–300ms (log2(1000)≈9.966)
-        let release = 0.005 * fast_pow2(release_knob * 8.643856189774724); // 5ms–2000ms (log2(400)≈8.644)
-        let makeup = param_val(params, "makeup", 0.0) as f64;
-        let thresh_db = -60.0 + threshold * 60.0;
-        let ratio_val = 1.0 + ratio * 19.0;
-        let makeup_db = makeup * 24.0;
-        // Key signal: from sidechain source (or self if no sidechain)
-        let target = key_l.abs().max(key_r.abs());
-        let coeff = if target > self.env {
-            fast_exp(-1.0 / (attack.max(0.001) * sr))
-        } else {
-            fast_exp(-1.0 / (release.max(0.001) * sr))
-        };
-        self.env = coeff * self.env + (1.0 - coeff) * target;
-        let env_db = if self.env > 1e-10 {
-            20.0 * fast_log10(self.env)
+        // — Parameters (smoothed to prevent clicks during automation) —
+        let thresh_db = self.sm_threshold.tick(param_val(params, "threshold", -18.0) as f64);
+        let ratio = self.sm_ratio.tick(param_val(params, "ratio", 4.0) as f64);
+        let knee_db = self.sm_knee.tick(param_val(params, "knee", 6.0) as f64);
+        // Attack/release in milliseconds → per-sample coefficients (1-pole IIR)
+        let attack_ms = (param_val(params, "attack", 5.0) as f64).max(0.1);
+        let release_ms = (param_val(params, "release", 100.0) as f64).max(1.0);
+        let hold_ms = param_val(params, "hold", 0.0) as f64;
+        let makeup_db = self.sm_makeup.tick(param_val(params, "makeup", 0.0) as f64);
+
+        // LSP-style: tau = 1 - exp(ln(1 - 1/sqrt(2)) / (ms_to_samples))
+        // Simplified: standard one-pole: coeff = exp(-1 / (ms * sr / 1000))
+        let attack_coeff = fast_exp(-1.0 / (attack_ms * sr / 1000.0));
+        let release_coeff = fast_exp(-1.0 / (release_ms * sr / 1000.0));
+        let hold_samples = (hold_ms * sr / 1000.0) as u32;
+
+        // — Key signal: take the louder of L/R —
+        let key = key_l.abs().max(key_r.abs());
+        // Convert to dB (floor at -120 dB)
+        let key_db = if key > 1e-10 {
+            20.0 * fast_log10(key)
         } else {
             -120.0
         };
-        let gain_db = if env_db > thresh_db {
-            let over = env_db - thresh_db;
-            -(over - over / ratio_val)
+
+        // — Envelope follower (log domain, attack/release with hold) —
+        if key_db > self.env_db {
+            // Attack: signal rising
+            self.env_db = attack_coeff * self.env_db + (1.0 - attack_coeff) * key_db;
+            if self.env_db >= self.peak_db {
+                self.peak_db = self.env_db;
+                self.hold_counter = hold_samples;
+            }
         } else {
-            0.0
-        };
-        let lin = db_to_lin(gain_db + makeup_db);
-        (left * lin, right * lin)
+            // Release: signal falling
+            if self.hold_counter > 0 {
+                self.hold_counter -= 1;
+                // During hold, keep envelope at peak
+                self.env_db = self.peak_db;
+            } else {
+                self.env_db = release_coeff * self.env_db + (1.0 - release_coeff) * key_db;
+                self.peak_db = self.env_db;
+            }
+        }
+
+        // — Compute gain reduction —
+        let gr_db = Self::compute_gr_db(self.env_db, thresh_db, ratio, knee_db);
+        self.last_gr_db = gr_db as f32;
+
+        // — Apply gain (GR + makeup) —
+        let total_db = gr_db + makeup_db;
+        let lin = db_to_lin(total_db);
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let (ol, or) = (left * lin, right * lin);
+        if out_db.abs() < 0.001 {
+            (ol, or)
+        } else {
+            let g = db_to_linear(out_db);
+            (ol * g, or * g)
+        }
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
         Box::new(FxCompressor::new())
     }
     fn gain_reduction_db(&self) -> f32 {
-        // Compressor GR: env tracks the signal level in linear domain.
-        // We can't recompute exact GR without params, so we store a
-        // rough indicator. The actual GR is computed in process() and
-        // would need an extra field to store. For now, return 0.0 and
-        // let the visualization estimate GR from pre/post RMS.
-        0.0
+        self.last_gr_db
     }
 }
 // Brick-wall limiter: applies input gain, then hard-clips at ceiling.
@@ -2961,6 +3406,9 @@ pub struct FxLimiter {
     lookahead: usize,
     /// Smoothed envelope (log-domain) for release
     env: f64,
+    sm_gain: SmoothedParam,
+    sm_ceiling: SmoothedParam,
+    sm_output: SmoothedParam,
 }
 
 impl FxLimiter {
@@ -2972,6 +3420,9 @@ impl FxLimiter {
             write_pos: 0,
             lookahead: 0,
             env: 1.0, // 1.0 = no gain reduction (NOT 0.0 which would silence everything)
+            sm_gain: SmoothedParam::new(0.0, 44100.0),
+            sm_ceiling: SmoothedParam::new(0.0, 44100.0),
+            sm_output: SmoothedParam::new(0.0, 44100.0),
         }
     }
 
@@ -3014,6 +3465,14 @@ static LIMITER_PARAMS: &[ParamDesc] = &[
         max: 1.0,
         options: None,
     },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
+        options: None,
+    },
 ];
 
 impl EffectModule for FxLimiter {
@@ -3026,8 +3485,8 @@ impl EffectModule for FxLimiter {
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
         self.ensure_buffers(sr);
 
-        let gain_db = param_val(params, "gain_db", 0.0) as f64;
-        let ceiling_db = param_val(params, "ceiling_db", 0.0) as f64;
+        let gain_db = self.sm_gain.tick(param_val(params, "gain_db", 0.0) as f64);
+        let ceiling_db = self.sm_ceiling.tick(param_val(params, "ceiling_db", 0.0) as f64);
         let release_knob = param_val(params, "release", 0.05) as f64;
 
         let input_gain = db_to_lin(gain_db);
@@ -3093,7 +3552,13 @@ impl EffectModule for FxLimiter {
         // Apply gain reduction and hard-clip as safety net
         let ol = (dl * gr).clamp(-ceiling_lin, ceiling_lin);
         let or_ = (dr * gr).clamp(-ceiling_lin, ceiling_lin);
-        (ol, or_)
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        if out_db.abs() < 0.001 {
+            (ol, or_)
+        } else {
+            let g = db_to_linear(out_db);
+            (ol * g, or_ * g)
+        }
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
         Box::new(FxLimiter::new())
@@ -3119,6 +3584,12 @@ pub struct FxEq {
     lo_ic2_r: f64,
     hi_ic1_r: f64,
     hi_ic2_r: f64,
+    sm_lo_gain: SmoothedParam,
+    sm_mid_gain: SmoothedParam,
+    sm_hi_gain: SmoothedParam,
+    sm_lo_freq: SmoothedParam,
+    sm_hi_freq: SmoothedParam,
+    sm_output: SmoothedParam,
 }
 impl FxEq {
     pub fn new() -> Self {
@@ -3131,6 +3602,12 @@ impl FxEq {
             lo_ic2_r: 0.0,
             hi_ic1_r: 0.0,
             hi_ic2_r: 0.0,
+            sm_lo_gain: SmoothedParam::new(0.0, 44100.0),
+            sm_mid_gain: SmoothedParam::new(0.0, 44100.0),
+            sm_hi_gain: SmoothedParam::new(0.0, 44100.0),
+            sm_lo_freq: SmoothedParam::new(200.0, 44100.0),
+            sm_hi_freq: SmoothedParam::new(4000.0, 44100.0),
+            sm_output: SmoothedParam::new(0.0, 44100.0),
         }
     }
 }
@@ -3176,6 +3653,14 @@ static EQ_PARAMS: &[ParamDesc] = &[
         max: 16000.0,
         options: None,
     },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
+        options: None,
+    },
 ];
 
 impl EffectModule for FxEq {
@@ -3186,11 +3671,11 @@ impl EffectModule for FxEq {
         EQ_PARAMS
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
-        let lo_g = param_val(params, "lo_gain", 0.0) as f64;
-        let mid_g = param_val(params, "mid_gain", 0.0) as f64;
-        let hi_g = param_val(params, "hi_gain", 0.0) as f64;
-        let lo_f = (param_val(params, "lo_freq", 200.0) as f64).clamp(20.0, sr * 0.49);
-        let hi_f = (param_val(params, "hi_freq", 4000.0) as f64).clamp(20.0, sr * 0.49);
+        let lo_g = self.sm_lo_gain.tick(param_val(params, "lo_gain", 0.0) as f64);
+        let mid_g = self.sm_mid_gain.tick(param_val(params, "mid_gain", 0.0) as f64);
+        let hi_g = self.sm_hi_gain.tick(param_val(params, "hi_gain", 0.0) as f64);
+        let lo_f = self.sm_lo_freq.tick(param_val(params, "lo_freq", 200.0) as f64).clamp(20.0, sr * 0.49);
+        let hi_f = self.sm_hi_freq.tick(param_val(params, "hi_freq", 4000.0) as f64).clamp(20.0, sr * 0.49);
         let lo_gain = db_to_lin(lo_g);
         let mid_gain = db_to_lin(mid_g);
         let hi_gain = db_to_lin(hi_g);
@@ -3204,7 +3689,13 @@ impl EffectModule for FxEq {
         let (_, _, hi_r) = svf_tick(right, hi_f, 0.5, sr, &mut self.hi_ic1_r, &mut self.hi_ic2_r);
         let mid_r = right - lo_r - hi_r;
         let out_r = lo_r * lo_gain + mid_r * mid_gain + hi_r * hi_gain;
-        (out_l, out_r)
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        if out_db.abs() < 0.001 {
+            (out_l, out_r)
+        } else {
+            let g = db_to_linear(out_db);
+            (out_l * g, out_r * g)
+        }
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
         Box::new(FxEq::new())
@@ -3213,7 +3704,17 @@ impl EffectModule for FxEq {
 
 // ── Gain ─────────────────────────────────────────────────────────────
 
-pub struct FxGain;
+pub struct FxGain {
+    sm_gain: SmoothedParam,
+}
+
+impl FxGain {
+    pub fn new() -> Self {
+        Self {
+            sm_gain: SmoothedParam::new(0.0, 44100.0),
+        }
+    }
+}
 
 static GAIN_PARAMS: &[ParamDesc] = &[ParamDesc {
     id: "gain_db",
@@ -3232,18 +3733,32 @@ impl EffectModule for FxGain {
         GAIN_PARAMS
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], _sr: f64) -> (f64, f64) {
-        let db = param_val(params, "gain_db", 0.0) as f64;
+        let db = self.sm_gain.tick(param_val(params, "gain_db", 0.0) as f64);
         let g = db_to_lin(db);
         (left * g, right * g)
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
-        Box::new(FxGain)
+        Box::new(FxGain::new())
     }
 }
 
 // ── Utility (Gain + Pan + Phase Invert + DC Offset) ─────────────────
 
-pub struct FxUtility;
+pub struct FxUtility {
+    sm_gain: SmoothedParam,
+    sm_pan: SmoothedParam,
+    sm_dc: SmoothedParam,
+}
+
+impl FxUtility {
+    pub fn new() -> Self {
+        Self {
+            sm_gain: SmoothedParam::new(0.0, 44100.0),
+            sm_pan: SmoothedParam::new(0.0, 44100.0),
+            sm_dc: SmoothedParam::new(0.0, 44100.0),
+        }
+    }
+}
 
 static UTILITY_PARAMS: &[ParamDesc] = &[
     ParamDesc {
@@ -3288,10 +3803,10 @@ impl EffectModule for FxUtility {
         UTILITY_PARAMS
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], _sr: f64) -> (f64, f64) {
-        let db = param_val(params, "gain_db", 0.0) as f64;
-        let pan = param_val(params, "pan", 0.0) as f64;
+        let db = self.sm_gain.tick(param_val(params, "gain_db", 0.0) as f64);
+        let pan = self.sm_pan.tick(param_val(params, "pan", 0.0) as f64);
         let phase_inv = param_val(params, "phase", 0.0);
-        let dc = param_val(params, "dc_offset", 0.0) as f64;
+        let dc = self.sm_dc.tick(param_val(params, "dc_offset", 0.0) as f64);
         let gain = db_to_lin(db);
         let polarity = if phase_inv > 0.5 { -1.0 } else { 1.0 };
 
@@ -3306,7 +3821,206 @@ impl EffectModule for FxUtility {
         (out_l, out_r)
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
-        Box::new(FxUtility)
+        Box::new(FxUtility::new())
+    }
+}
+
+// ── Autoduck (tempo-synced volume ducking) ──────────────────────────
+
+/// Free-running ducking effect.
+/// Repeats a duck envelope every `period` ms.
+/// Envelope shape: attack → hold → release → idle (duck off).
+/// RULE: All continuous params use SmoothedParam to prevent clicks/pops during automation.
+pub struct FxAutoduck {
+    phase: f64, // 0..1 normalised position within the period
+    sm_duck: SmoothedParam,
+    sm_attack: SmoothedParam,
+    sm_hold: SmoothedParam,
+    sm_release: SmoothedParam,
+    sm_period: SmoothedParam,
+    sm_shift: SmoothedParam,
+    sm_curve: SmoothedParam,
+    sm_output: SmoothedParam,
+}
+
+impl FxAutoduck {
+    pub fn new() -> Self {
+        let sr = 44100.0;
+        Self {
+            phase: 0.0,
+            sm_duck: SmoothedParam::new(-12.0, sr),
+            sm_attack: SmoothedParam::new(5.0, sr),
+            sm_hold: SmoothedParam::new(50.0, sr),
+            sm_release: SmoothedParam::new(100.0, sr),
+            sm_period: SmoothedParam::new(500.0, sr),
+            sm_shift: SmoothedParam::new(0.0, sr),
+            sm_curve: SmoothedParam::new(50.0, sr),
+            sm_output: SmoothedParam::new(0.0, sr),
+        }
+    }
+}
+
+static AUTODUCK_PARAMS: &[ParamDesc] = &[
+    ParamDesc {
+        id: "duck_db",
+        name: "Duck",
+        default: -12.0,
+        min: -60.0,
+        max: 0.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "attack",
+        name: "Attack",
+        default: 5.0,
+        min: 0.1,
+        max: 200.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "hold",
+        name: "Hold",
+        default: 50.0,
+        min: 0.0,
+        max: 500.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "release",
+        name: "Release",
+        default: 100.0,
+        min: 1.0,
+        max: 1000.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "period",
+        name: "Period",
+        default: 500.0,
+        min: 50.0,
+        max: 4000.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "shift",
+        name: "Shift",
+        default: 0.0,
+        min: 0.0,
+        max: 100.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "curve",
+        name: "Curve",
+        default: 50.0,
+        min: 0.0,
+        max: 100.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "output_db",
+        name: "Output",
+        default: 0.0,
+        min: -60.0,
+        max: 24.0,
+        options: None,
+    },
+];
+
+impl EffectModule for FxAutoduck {
+    fn name(&self) -> &'static str {
+        "Autoduck"
+    }
+    fn params(&self) -> &'static [ParamDesc] {
+        AUTODUCK_PARAMS
+    }
+    fn process(
+        &mut self,
+        left: f64,
+        right: f64,
+        params: &[(String, f32)],
+        sr: f64,
+    ) -> (f64, f64) {
+        let duck_db = self.sm_duck.tick(param_val(params, "duck_db", -12.0) as f64);
+        let attack_ms = self.sm_attack.tick(param_val(params, "attack", 5.0) as f64).max(0.1);
+        let hold_ms = self.sm_hold.tick(param_val(params, "hold", 50.0) as f64).max(0.0);
+        let release_ms = self.sm_release.tick(param_val(params, "release", 100.0) as f64).max(1.0);
+        let period_ms = self.sm_period.tick(param_val(params, "period", 500.0) as f64).max(1.0);
+        let shift_pct = self.sm_shift.tick(param_val(params, "shift", 0.0) as f64);
+        let curve_pct = self.sm_curve.tick(param_val(params, "curve", 50.0) as f64);
+        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+
+        // Advance phase (0..1 within the period)
+        let phase_inc = 1000.0 / (period_ms * sr);
+        self.phase += phase_inc;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+
+        // Apply shift (wraps around)
+        let shifted = (self.phase + shift_pct / 100.0) % 1.0;
+
+        // Convert envelope segment boundaries to normalised phase values
+        let total_env_ms = attack_ms + hold_ms + release_ms;
+        let env_fraction = (total_env_ms / period_ms).min(1.0);
+
+        let attack_end = (attack_ms / period_ms).min(1.0);
+        let hold_end = ((attack_ms + hold_ms) / period_ms).min(1.0);
+        let release_end = env_fraction;
+
+        // Compute duck envelope: 0.0 = no ducking, 1.0 = full ducking
+        let raw_env = if shifted < attack_end {
+            // Attack: ramp from 0 to 1 (duck going down)
+            if attack_end > 1e-9 {
+                shifted / attack_end
+            } else {
+                1.0
+            }
+        } else if shifted < hold_end {
+            // Hold: full ducking
+            1.0
+        } else if shifted < release_end {
+            // Release: ramp from 1 to 0 (duck coming back up)
+            let rel_phase = (shifted - hold_end) / (release_end - hold_end).max(1e-9);
+            1.0 - rel_phase
+        } else {
+            // Idle: no ducking
+            0.0
+        };
+
+        // Apply curve shaping: curve_pct=50 is linear, <50 = exponential, >50 = log
+        let curve_norm = curve_pct / 100.0; // 0..1
+        let shaped = if (curve_norm - 0.5).abs() < 0.01 {
+            raw_env // linear
+        } else if curve_norm < 0.5 {
+            // Exponential curve (sharper)
+            let exp = 1.0 + (0.5 - curve_norm) * 6.0; // 1..4
+            raw_env.powf(exp)
+        } else {
+            // Logarithmic curve (softer)
+            let exp = 1.0 / (1.0 + (curve_norm - 0.5) * 6.0); // 1..0.25
+            raw_env.powf(exp)
+        };
+
+        // Convert duck amount to gain
+        let duck_gain = db_to_lin(duck_db * shaped);
+
+        let dl = left * duck_gain;
+        let dr = right * duck_gain;
+
+        // Output gain
+        if out_db.abs() < 0.001 {
+            (dl, dr)
+        } else {
+            let g = db_to_lin(out_db);
+            (dl * g, dr * g)
+        }
+    }
+    fn reset(&mut self) {
+        self.phase = 0.0;
+    }
+    fn fresh(&self) -> Box<dyn EffectModule> {
+        Box::new(FxAutoduck::new())
     }
 }
 
@@ -3331,12 +4045,13 @@ pub fn create_effect(name: &str, sr: u32) -> Option<Box<dyn EffectModule>> {
         "Delay" => Some(Box::new(FxDelay::new(sr))),
         "Reverb" => Some(Box::new(FxReverb::new(sr))),
         "Chorus" => Some(Box::new(FxChorus::new(sr))),
-        "Distortion" => Some(Box::new(FxDistortion)),
+        "Distortion" => Some(Box::new(FxDistortion::new())),
         "Compressor" => Some(Box::new(FxCompressor::new())),
         "EQ" => Some(Box::new(FxEq::new())),
-        "Gain" => Some(Box::new(FxGain)),
-        "Utility" => Some(Box::new(FxUtility)),
+        "Gain" => Some(Box::new(FxGain::new())),
+        "Utility" => Some(Box::new(FxUtility::new())),
         "Limiter" => Some(Box::new(FxLimiter::new())),
+        "Autoduck" => Some(Box::new(FxAutoduck::new())),
         _ => None,
     }
 }
@@ -3359,6 +4074,7 @@ pub fn is_effect(name: &str) -> bool {
             | "Gain"
             | "Utility"
             | "Limiter"
+            | "Autoduck"
     )
 }
 
@@ -3383,6 +4099,7 @@ pub fn get_param_descs(name: &str) -> &'static [ParamDesc] {
         "Gain" => GAIN_PARAMS,
         "Utility" => UTILITY_PARAMS,
         "Limiter" => LIMITER_PARAMS,
+        "Autoduck" => AUTODUCK_PARAMS,
         _ => &[],
     }
 }

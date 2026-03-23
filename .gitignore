@@ -1,1 +1,25 @@
+# Build output
 /target
+/dist
+
+# Session and project files
+*.eden.json
+eden_session.json
+
+# Audio files
+*.wav
+*.ogg
+
+# Backup / patch artifacts
+*.bak
+*.rej
+*.patch
+*.orig
+
+# Scripts
+*.py
+
+# Editor
+*.swp
+*.swo
+*~

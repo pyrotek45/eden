@@ -187,9 +187,16 @@ fn main() {
         }
     };
 
-    let default_save = "eden_session.json";
-    if std::path::Path::new(default_save).exists() {
-        match state.load_project(default_save) {
+    // Default session file — named after the project if one exists, else fallback
+    let default_save_fallback = "eden_session.eden.json";
+    // Try to load any previously saved session (check fallback name first, then project-named)
+    let default_save = if std::path::Path::new(default_save_fallback).exists() {
+        default_save_fallback.to_string()
+    } else {
+        default_save_fallback.to_string()
+    };
+    if std::path::Path::new(&default_save).exists() {
+        match state.load_project(&default_save) {
             Ok(()) => {
                 println!("[session] Loaded {}", default_save);
                 // Keep mode as ProjectManager so the startup screen shows
@@ -365,11 +372,15 @@ fn main() {
                                         // Push current UI position to audio thread before starting
                                         state.seek_pending = true;
                                     } else {
-                                        // Stopping playback
+                                        // Stopping playback — let effect tails (reverb, delay)
+                                        // ring out naturally. Don't seek/reset effects.
                                         if state.auto_return {
                                             state.project.transport.position =
                                                 state.pre_play_position;
-                                            state.seek_pending = true;
+                                            // NOTE: intentionally NOT setting seek_pending here.
+                                            // seek_pending would call fx.reset() and kill the
+                                            // reverb/delay tail. Instead, the position is updated
+                                            // visually but the audio thread keeps draining effects.
                                         }
                                     }
                                     state.project.transport.playing =
@@ -396,10 +407,15 @@ fn main() {
                             Keycode::Num2 => state.mode = AppMode::Mixer,
                             Keycode::Num3 => state.mode = AppMode::Edit,
                             Keycode::S if input.ctrl() => {
-                                let save_path = state
-                                    .last_save_path
-                                    .clone()
-                                    .unwrap_or_else(|| default_save.to_string());
+                                let save_path = state.last_save_path.clone().unwrap_or_else(|| {
+                                    let name = state.project.name.trim().to_string();
+                                    let safe = if name.is_empty() {
+                                        "untitled".to_string()
+                                    } else {
+                                        name
+                                    };
+                                    format!("{}.eden.json", safe)
+                                });
                                 match state.save_project(&save_path) {
                                     Ok(()) => {
                                         state.push_status(format!("Saved to {}", save_path));
@@ -447,6 +463,7 @@ fn main() {
                                         }
                                     }
                                 }
+                                input.consume_key(Keycode::Up);
                             }
                             Keycode::Down
                                 if input.shift()
@@ -463,6 +480,7 @@ fn main() {
                                         }
                                     }
                                 }
+                                input.consume_key(Keycode::Down);
                             }
                             Keycode::Plus | Keycode::Equals => {
                                 state.arrangement.zoom_x =
@@ -562,6 +580,8 @@ fn main() {
                                     }
                                     _ => {}
                                 }
+                                input.consume_key(Keycode::Delete);
+                                input.consume_key(Keycode::Backspace);
                             }
                             Keycode::C if input.ctrl() => {
                                 // Copy selected clips to clipboard
@@ -1043,7 +1063,7 @@ fn main() {
                         }
                     }
                 } else {
-                    match crate::audio::load_wav(path) {
+                    match crate::audio::load_audio(path) {
                         Ok((samples, sr)) => {
                             println!(
                                 "[preview] Loaded {} samples at {}Hz from {:?}",
@@ -1302,7 +1322,7 @@ fn main() {
                                 // Load and cache sampler data
                                 if !audio_sample_cache.contains_key(sample_path) {
                                     let path = std::path::Path::new(sample_path);
-                                    match audio::load_wav(path) {
+                                    match audio::load_audio(path) {
                                         Ok((samples, sr)) => {
                                             audio_sample_cache.insert(
                                                 sample_path.clone(),
@@ -1366,7 +1386,7 @@ fn main() {
                             // Load sample data if not cached
                             if !audio_sample_cache.contains_key(&ac.source_file) {
                                 let path = std::path::Path::new(&ac.source_file);
-                                match audio::load_wav(path) {
+                                match audio::load_audio(path) {
                                     Ok((samples, sr)) => {
                                         audio_sample_cache.insert(
                                             ac.source_file.clone(),
@@ -1604,7 +1624,7 @@ fn main() {
                     "{}/{}_autosave_{}.eden.json",
                     save_dir, clean_name, timestamp
                 );
-                match state.save_project(&autosave_path) {
+                match state.autosave_project(&autosave_path) {
                     Ok(()) => state.push_status(format!("Autosaved: {}", autosave_path)),
                     Err(e) => state.push_status(format!("Autosave failed: {}", e)),
                 }
@@ -1621,8 +1641,17 @@ fn main() {
     }
 
     if state.dirty {
-        let _ = state.save_project(default_save);
-        println!("[session] Auto-saved on exit");
+        let exit_path = state.last_save_path.clone().unwrap_or_else(|| {
+            let name = state.project.name.trim().to_string();
+            let safe = if name.is_empty() {
+                "untitled".to_string()
+            } else {
+                name
+            };
+            format!("{}.eden.json", safe)
+        });
+        let _ = state.save_project(&exit_path);
+        println!("[session] Auto-saved on exit to {}", exit_path);
     }
 
     // Save user config on exit
