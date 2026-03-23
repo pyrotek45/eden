@@ -2390,7 +2390,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
             let clip_y = y + 2;
             let clip_h = (track_height - 4).max(4);
-            let header_h = 14; // clip title bar height
+            let header_h = 20; // clip title bar height (clickable select/drag zone)
 
             let clip_hover = input.mouse_in_rect(cx, clip_y, cw.max(4), clip_h)
                 && input.mouse_y < top + state.track_area_height()
@@ -2447,38 +2447,6 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             let hdr_b = type_base[2].saturating_sub(15);
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(hdr_r, hdr_g, hdr_b, 220));
             let _ = canvas.fill_rect(Rect::new(cx, clip_y, cw.max(4) as u32, header_h as u32));
-
-            // ── Clone-zone indicator: subtle >> marks on right side of header ──
-            // Show always so users can discover the zone, brighter when hovered.
-            if cw > 30 {
-                let header_hover_zone = clip_hit_test(input, cx, clip_y, cw, clip_h, header_h);
-                let in_header_zone =
-                    header_hover_zone == ClipHitZone::Header && topmost_hovered_ci == Some(ci);
-                let arrow_alpha = if in_header_zone { 220u8 } else { 80u8 };
-                let arrow_col = sdl2::pixels::Color::RGBA(255, 255, 255, arrow_alpha);
-                canvas.set_draw_color(arrow_col);
-                // Draw two small ">>" chevrons near right of header
-                let ax = cx + cw - 16;
-                let ay = clip_y + header_h / 2 - 2;
-                // First chevron ">"
-                let _ = canvas.draw_line(
-                    sdl2::rect::Point::new(ax, ay),
-                    sdl2::rect::Point::new(ax + 3, ay + 2),
-                );
-                let _ = canvas.draw_line(
-                    sdl2::rect::Point::new(ax + 3, ay + 2),
-                    sdl2::rect::Point::new(ax, ay + 4),
-                );
-                // Second chevron ">"
-                let _ = canvas.draw_line(
-                    sdl2::rect::Point::new(ax + 5, ay),
-                    sdl2::rect::Point::new(ax + 8, ay + 2),
-                );
-                let _ = canvas.draw_line(
-                    sdl2::rect::Point::new(ax + 8, ay + 2),
-                    sdl2::rect::Point::new(ax + 5, ay + 4),
-                );
-            }
 
             // ── Clip type badge (tiny colored block on left) ──
             let badge_color = match &state.project.tracks[track_idx].clips[ci] {
@@ -2789,75 +2757,83 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 && topmost_hovered_ci == Some(ci)
             {
                 let zone = hover_zone;
-                if input.shift() {
-                    // Shift+click on any clip zone: toggle clip in multi-select
-                    if state.selected_clips.contains(&(track_id, ci)) {
-                        state.selected_clips.remove(&(track_id, ci));
-                    } else {
-                        state.selected_clips.insert((track_id, ci));
+                match zone {
+                    ClipHitZone::LeftHandle => {
+                        input.active_widget = WidgetId::ClipLeftHandle(track_id, ci);
+                        input.drag_widget = WidgetId::ClipLeftHandle(track_id, ci);
+                        // drag_start_value  = original clip end beat (fixed anchor)
+                        // drag_start_value2 = original clip start (for undo)
+                        input.drag_start_value = clip_start + clip_len;
+                        input.drag_start_value2 = clip_start;
+                        // Store original audio offset for left-edge audio clip resize
+                        if let crate::models::Clip::Audio(ref ac) =
+                            state.project.tracks[track_idx].clips[ci]
+                        {
+                            state.drag_audio_offset_orig = ac.offset;
+                        } else {
+                            state.drag_audio_offset_orig = 0.0;
+                        }
+                        // Snapshot original starts for all selected clips (for multi-resize)
+                        state.drag_original_positions.clear();
+                        for &(t_id, c_idx) in &state.selected_clips {
+                            if let Some(tr) = state.project.tracks.iter().find(|t| t.id == t_id) {
+                                if let Some(c) = tr.clips.get(c_idx) {
+                                    state
+                                        .drag_original_positions
+                                        .insert((t_id, c_idx), c.start_time());
+                                }
+                            }
+                        }
                     }
-                    state.selected_clip = Some((track_id, ci));
-                } else {
-                    match zone {
-                        ClipHitZone::LeftHandle => {
-                            input.active_widget = WidgetId::ClipLeftHandle(track_id, ci);
-                            input.drag_widget = WidgetId::ClipLeftHandle(track_id, ci);
-                            // drag_start_value  = original clip end beat (fixed anchor)
-                            // drag_start_value2 = original clip start (for undo)
-                            input.drag_start_value = clip_start + clip_len;
-                            input.drag_start_value2 = clip_start;
-                            // Store original audio offset for left-edge audio clip resize
-                            if let crate::models::Clip::Audio(ref ac) =
-                                state.project.tracks[track_idx].clips[ci]
-                            {
-                                state.drag_audio_offset_orig = ac.offset;
-                            } else {
-                                state.drag_audio_offset_orig = 0.0;
-                            }
-                            // Snapshot original starts for all selected clips (for multi-resize)
-                            state.drag_original_positions.clear();
-                            for &(t_id, c_idx) in &state.selected_clips {
-                                if let Some(tr) = state.project.tracks.iter().find(|t| t.id == t_id)
-                                {
-                                    if let Some(c) = tr.clips.get(c_idx) {
-                                        state
-                                            .drag_original_positions
-                                            .insert((t_id, c_idx), c.start_time());
-                                    }
+                    ClipHitZone::RightHandle => {
+                        input.active_widget = WidgetId::ClipRightHandle(track_id, ci);
+                        input.drag_widget = WidgetId::ClipRightHandle(track_id, ci);
+                        // drag_start_value  = original clip length
+                        // drag_start_value2 = original clip start (unchanged, for undo)
+                        input.drag_start_value = clip_len;
+                        input.drag_start_value2 = clip_start;
+                        // Store original audio offset for right-edge extend-past-end
+                        if let crate::models::Clip::Audio(ref ac) =
+                            state.project.tracks[track_idx].clips[ci]
+                        {
+                            state.drag_audio_offset_orig = ac.offset;
+                        } else {
+                            state.drag_audio_offset_orig = 0.0;
+                        }
+                        // Snapshot original lengths for all selected clips (for multi-resize)
+                        state.drag_original_positions.clear();
+                        for &(t_id, c_idx) in &state.selected_clips {
+                            if let Some(tr) = state.project.tracks.iter().find(|t| t.id == t_id) {
+                                if let Some(c) = tr.clips.get(c_idx) {
+                                    state
+                                        .drag_original_positions
+                                        .insert((t_id, c_idx), c.length());
                                 }
                             }
                         }
-                        ClipHitZone::RightHandle => {
-                            input.active_widget = WidgetId::ClipRightHandle(track_id, ci);
-                            input.drag_widget = WidgetId::ClipRightHandle(track_id, ci);
-                            // drag_start_value  = original clip length
-                            // drag_start_value2 = original clip start (unchanged, for undo)
-                            input.drag_start_value = clip_len;
-                            input.drag_start_value2 = clip_start;
-                            // Store original audio offset for right-edge extend-past-end
-                            if let crate::models::Clip::Audio(ref ac) =
-                                state.project.tracks[track_idx].clips[ci]
-                            {
-                                state.drag_audio_offset_orig = ac.offset;
+                    }
+                    ClipHitZone::Header => {
+                        // Header = select + move drag zone (the only clickable part of the clip)
+                        if input.shift() {
+                            // Shift+click header: toggle in multi-select
+                            if state.selected_clips.contains(&(track_id, ci)) {
+                                state.selected_clips.remove(&(track_id, ci));
                             } else {
-                                state.drag_audio_offset_orig = 0.0;
+                                state.selected_clips.insert((track_id, ci));
                             }
-                            // Snapshot original lengths for all selected clips (for multi-resize)
-                            state.drag_original_positions.clear();
-                            for &(t_id, c_idx) in &state.selected_clips {
-                                if let Some(tr) = state.project.tracks.iter().find(|t| t.id == t_id)
-                                {
-                                    if let Some(c) = tr.clips.get(c_idx) {
-                                        state
-                                            .drag_original_positions
-                                            .insert((t_id, c_idx), c.length());
-                                    }
-                                }
+                            state.selected_clip = Some((track_id, ci));
+                            input.consumed = true;
+                        } else if input.ctrl() || input.alt() {
+                            // Ctrl+click header = add to selection only, no drag
+                            if state.selected_clips.contains(&(track_id, ci)) {
+                                state.selected_clips.remove(&(track_id, ci));
+                            } else {
+                                state.selected_clips.insert((track_id, ci));
                             }
-                        }
-                        ClipHitZone::Header => {
-                            // Header = clone-drag zone (always, no Ctrl needed)
-                            // Select the clip if not already selected
+                            state.selected_clip = Some((track_id, ci));
+                            input.consumed = true;
+                        } else {
+                            // Plain click: select this clip (deselect others if not already selected)
                             if !state.selected_clips.contains(&(track_id, ci)) {
                                 state.selected_clips.clear();
                                 state.selected_clips.insert((track_id, ci));
@@ -2868,17 +2844,51 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             state.selected_tracks.insert(track_id);
 
                             if input.click_type == Some(crate::input::ClickType::Double) {
-                                // Double-click header = rename (handled above in the text-field block)
+                                // Double-click header → open editor for this clip
+                                state.bottom_panel_tab = BottomPanelTab::PianoRoll;
+                                if !state.bottom_panel_open {
+                                    state.bottom_panel_open = true;
+                                    state.bottom_panel_height = 320;
+                                }
+                                // Center piano roll on note density for MIDI clips
+                                if let crate::models::Clip::Midi(m) = &state
+                                    .project
+                                    .tracks
+                                    .iter()
+                                    .find(|t| t.id == track_id)
+                                    .and_then(|t| t.clips.get(ci))
+                                    .cloned()
+                                    .unwrap_or(crate::models::Clip::Midi(crate::models::MidiClip {
+                                        name: String::new(),
+                                        color: [0; 4],
+                                        start_time: 0.0,
+                                        length: 1.0,
+                                        notes: vec![],
+                                    }))
+                                {
+                                    state.piano_roll_scroll_x = 0.0;
+                                    if !m.notes.is_empty() {
+                                        let avg_pitch: f64 =
+                                            m.notes.iter().map(|n| n.pitch as f64).sum::<f64>()
+                                                / m.notes.len() as f64;
+                                        const NOTE_H: i32 = 12;
+                                        let row_y = (127.0 - avg_pitch) as i32 * NOTE_H;
+                                        let panel_h = state.bottom_panel_effective_h();
+                                        let visible_h = (panel_h - 20 - 68 - 10).max(40);
+                                        let center_y = row_y - visible_h / 2;
+                                        state.piano_roll_scroll_y = center_y.max(0);
+                                    }
+                                }
                                 input.active_widget = WidgetId::ClipBody(track_id, ci);
                             } else {
-                                // Single click/drag from header = clone drag
-                                state.clip_drag_is_copy = true;
+                                // Normal drag-move
+                                state.clip_drag_is_copy = false;
                                 state.clip_drag_copy = None;
                                 input.active_widget = WidgetId::ClipBody(track_id, ci);
                                 input.drag_widget = WidgetId::ClipBody(track_id, ci);
                                 input.drag_start_value = clip_start;
 
-                                // Snapshot original positions
+                                // Snapshot original positions for all selected clips
                                 state.drag_original_positions.clear();
                                 for &(tid, cidx) in &state.selected_clips {
                                     if let Some(track) =
@@ -2893,99 +2903,10 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                                 }
                             }
                         }
-                        ClipHitZone::Body | ClipHitZone::None => {
-                            if input.ctrl() || input.alt() {
-                                // Ctrl+click body = add to selection only; no drag, no clone.
-                                // Rubber-band will handle drag selection from here.
-                                if state.selected_clips.contains(&(track_id, ci)) {
-                                    state.selected_clips.remove(&(track_id, ci));
-                                } else {
-                                    state.selected_clips.insert((track_id, ci));
-                                }
-                                state.selected_clip = Some((track_id, ci));
-                                // Mark consumed so rubber-band doesn't immediately start
-                                input.consumed = true;
-                            } else {
-                                // If they clicked an unselected clip, select ONLY it
-                                if !state.selected_clips.contains(&(track_id, ci)) {
-                                    state.selected_clips.clear();
-                                    state.selected_clips.insert((track_id, ci));
-                                }
-                                state.selected_clip = Some((track_id, ci));
-                                state.selected_track = Some(track_id);
-                                state.selected_tracks.clear();
-                                state.selected_tracks.insert(track_id);
-
-                                // Double-click → open edit panel for this clip (correct type)
-                                if input.click_type == Some(crate::input::ClickType::Double) {
-                                    // Always show the EDIT tab — it routes internally to the right editor
-                                    state.bottom_panel_tab = BottomPanelTab::PianoRoll;
-                                    if !state.bottom_panel_open {
-                                        state.bottom_panel_open = true;
-                                        state.bottom_panel_height = 320;
-                                    }
-                                    // Center piano roll on note density for MIDI clips
-                                    if let crate::models::Clip::Midi(m) = &state
-                                        .project
-                                        .tracks
-                                        .iter()
-                                        .find(|t| t.id == track_id)
-                                        .and_then(|t| t.clips.get(ci))
-                                        .cloned()
-                                        .unwrap_or(crate::models::Clip::Midi(
-                                            crate::models::MidiClip {
-                                                name: String::new(),
-                                                color: [0; 4],
-                                                start_time: 0.0,
-                                                length: 1.0,
-                                                notes: vec![],
-                                            },
-                                        ))
-                                    {
-                                        // Reset horizontal scroll to beginning of clip (clip-relative view)
-                                        state.piano_roll_scroll_x = 0.0;
-                                        if !m.notes.is_empty() {
-                                            let avg_pitch: f64 =
-                                                m.notes.iter().map(|n| n.pitch as f64).sum::<f64>()
-                                                    / m.notes.len() as f64;
-                                            // In piano roll: NOTE_H=12, TOTAL=128 pitches
-                                            // Row for pitch p = (127 - p) * NOTE_H
-                                            // Center the view so avg_pitch is in the middle of the visible area
-                                            const NOTE_H: i32 = 12;
-                                            let row_y = (127.0 - avg_pitch) as i32 * NOTE_H;
-                                            let panel_h = state.bottom_panel_effective_h();
-                                            let visible_h = (panel_h - 20 - 68 - 10).max(40); // approx grid height
-                                            let center_y = row_y - visible_h / 2;
-                                            state.piano_roll_scroll_y = center_y.max(0);
-                                        }
-                                    }
-                                    // Don't start a drag on double-click, but mark widget
-                                    // so the deselect logic doesn't clear selected_clip
-                                    input.active_widget = WidgetId::ClipBody(track_id, ci);
-                                } else {
-                                    // Normal drag-move
-                                    state.clip_drag_is_copy = false;
-                                    state.clip_drag_copy = None;
-                                    input.active_widget = WidgetId::ClipBody(track_id, ci);
-                                    input.drag_widget = WidgetId::ClipBody(track_id, ci);
-                                    input.drag_start_value = clip_start;
-                                }
-
-                                // Snapshot original positions for ALL selected clips
-                                state.drag_original_positions.clear();
-                                for &(tid, cidx) in &state.selected_clips {
-                                    if let Some(track) =
-                                        state.project.tracks.iter().find(|t| t.id == tid)
-                                    {
-                                        if let Some(c) = track.clips.get(cidx) {
-                                            state
-                                                .drag_original_positions
-                                                .insert((tid, cidx), c.start_time());
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    }
+                    ClipHitZone::Body | ClipHitZone::None => {
+                        // Body is pass-through — rubber-band and background clicks
+                        // work normally. Do not consume the click.
                     }
                 }
             }
