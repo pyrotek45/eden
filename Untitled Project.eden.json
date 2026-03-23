@@ -1,0 +1,228 @@
+{
+  "name": "Untitled Project",
+  "sample_rate": 44100,
+  "tracks": [
+    {
+      "id": 1,
+      "name": "Synth Lead",
+      "track_type": "Midi",
+      "volume": 0.8,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "clips": [
+        {
+          "Midi": {
+            "notes": [
+              {
+                "pitch": 60,
+                "velocity": 100,
+                "start": 0.0,
+                "length": 1.0
+              },
+              {
+                "pitch": 64,
+                "velocity": 90,
+                "start": 1.0,
+                "length": 1.0
+              },
+              {
+                "pitch": 67,
+                "velocity": 95,
+                "start": 2.0,
+                "length": 1.0
+              },
+              {
+                "pitch": 72,
+                "velocity": 100,
+                "start": 3.0,
+                "length": 2.0
+              }
+            ],
+            "start_time": 0.0,
+            "length": 8.0,
+            "name": "Intro",
+            "color": [
+              100,
+              160,
+              255,
+              200
+            ]
+          }
+        }
+      ],
+      "color": [
+        100,
+        160,
+        255,
+        200
+      ],
+      "height": 80,
+      "rack": [],
+      "instrument_idx": 0,
+      "sampler_file": null,
+      "automation_enabled": true
+    },
+    {
+      "id": 2,
+      "name": "Bass",
+      "track_type": "Midi",
+      "volume": 0.8,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "clips": [
+        {
+          "Midi": {
+            "notes": [
+              {
+                "pitch": 36,
+                "velocity": 110,
+                "start": 0.0,
+                "length": 2.0
+              },
+              {
+                "pitch": 36,
+                "velocity": 110,
+                "start": 2.0,
+                "length": 2.0
+              },
+              {
+                "pitch": 31,
+                "velocity": 100,
+                "start": 4.0,
+                "length": 4.0
+              }
+            ],
+            "start_time": 0.0,
+            "length": 8.0,
+            "name": "Bass Line",
+            "color": [
+              80,
+              200,
+              120,
+              200
+            ]
+          }
+        }
+      ],
+      "color": [
+        80,
+        200,
+        120,
+        200
+      ],
+      "height": 80,
+      "rack": [],
+      "instrument_idx": 0,
+      "sampler_file": null,
+      "automation_enabled": true
+    },
+    {
+      "id": 3,
+      "name": "Drums",
+      "track_type": "Audio",
+      "volume": 0.8,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "clips": [
+        {
+          "Audio": {
+            "source_file": "drums.wav",
+            "start_time": 0.0,
+            "offset": 0.0,
+            "length": 16.0,
+            "gain": 1.0,
+            "name": "Drum Loop",
+            "color": [
+              220,
+              140,
+              60,
+              200
+            ]
+          }
+        }
+      ],
+      "color": [
+        220,
+        140,
+        60,
+        200
+      ],
+      "height": 80,
+      "rack": [],
+      "instrument_idx": 0,
+      "sampler_file": null,
+      "automation_enabled": true
+    },
+    {
+      "id": 4,
+      "name": "Filter Auto",
+      "track_type": "Automation",
+      "volume": 0.8,
+      "pan": 0.0,
+      "mute": false,
+      "solo": false,
+      "clips": [
+        {
+          "Automation": {
+            "points": [
+              {
+                "time": 0.0,
+                "value": 0.2
+              },
+              {
+                "time": 4.0,
+                "value": 0.8
+              },
+              {
+                "time": 8.0,
+                "value": 0.2
+              }
+            ],
+            "start_time": 0.0,
+            "length": 8.0,
+            "target_param": "filter_cutoff",
+            "name": "Filter Sweep",
+            "color": [
+              220,
+              180,
+              80,
+              200
+            ]
+          }
+        }
+      ],
+      "color": [
+        220,
+        180,
+        80,
+        200
+      ],
+      "height": 80,
+      "rack": [],
+      "instrument_idx": 0,
+      "sampler_file": null,
+      "automation_enabled": true
+    }
+  ],
+  "tempo_map": {
+    "changes": [
+      {
+        "beat": 0.0,
+        "bpm": 128.0
+      }
+    ]
+  },
+  "transport": {
+    "playing": false,
+    "recording": false,
+    "position": 0.0,
+    "loop_enabled": false,
+    "loop_region": {
+      "start": 0.0,
+      "end": 8.0
+    }
+  }
+}

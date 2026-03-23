@@ -1,0 +1,10 @@
+--- src/views.rs
++++ src/views.rs
+@@ -1604,6 +1604,7 @@
+ ) {
+     // Layer 0 — background elements
++    println!("Drawing arrangement... window: {}x{}", state.window_width, state.window_height);
+     draw_transport(canvas, input, state);
+ 
+ 
+ 

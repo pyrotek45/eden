@@ -1,0 +1,134 @@
+// Eden DAW — Application state
+// Holds everything the app needs: project, UI state, mode, view params.
+
+use crate::commands::CommandManager;
+use crate::models::*;
+use crate::theme::Theme;
+
+use serde::{Deserialize, Serialize};
+
+/// Which main view is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppMode {
+    Arrangement,
+    Mixer,
+    PianoRoll,
+    InstrumentRack,
+}
+
+/// Viewport / scroll state for the arrangement timeline.
+#[derive(Debug, Clone)]
+pub struct ArrangementView {
+    pub scroll_x: f64,    // in beats
+    pub scroll_y: i32,    // in pixels
+    pub zoom_x: f64,      // pixels per beat
+    pub zoom_y: f64,      // vertical scale
+    pub track_header_width: i32,
+}
+
+impl Default for ArrangementView {
+    fn default() -> Self {
+        Self {
+            scroll_x: 0.0,
+            scroll_y: 0,
+            zoom_x: 40.0,   // 40px per beat
+            zoom_y: 1.0,
+            track_header_width: 180,
+        }
+    }
+}
+
+/// Full application state. NOT serialized (project is serialized separately).
+pub struct AppState {
+    pub project: Project,
+    pub commands: CommandManager,
+    pub theme: Theme,
+    pub mode: AppMode,
+    pub arrangement: ArrangementView,
+    pub selected_track: Option<u32>,
+    pub selected_clip: Option<(u32, usize)>, // (track_id, clip_index)
+    pub window_width: u32,
+    pub window_height: u32,
+    pub running: bool,
+    pub last_save_path: Option<String>,
+    pub dirty: bool, // unsaved changes
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        Self {
+            project: Project::demo(),
+            commands: CommandManager::new(200),
+            theme: Theme::dark(),
+            mode: AppMode::Arrangement,
+            arrangement: ArrangementView::default(),
+            selected_track: None,
+            selected_clip: None,
+            window_width: 1280,
+            window_height: 800,
+            running: true,
+            last_save_path: None,
+            dirty: false,
+        }
+    }
+
+    /// Save project to JSON file.
+    pub fn save_project(&mut self, path: &str) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(&self.project)
+            .map_err(|e| format!("Serialize error: {}", e))?;
+        std::fs::write(path, json)
+            .map_err(|e| format!("Write error: {}", e))?;
+        self.last_save_path = Some(path.to_string());
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Load project from JSON file.
+    pub fn load_project(&mut self, path: &str) -> Result<(), String> {
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| format!("Read error: {}", e))?;
+        let project: Project = serde_json::from_str(&data)
+            .map_err(|e| format!("Deserialize error: {}", e))?;
+        self.project = project;
+        self.last_save_path = Some(path.to_string());
+        self.dirty = false;
+        self.selected_track = None;
+        self.selected_clip = None;
+        Ok(())
+    }
+
+    /// Quick save (re-use last path or default).
+    pub fn quick_save(&mut self) -> Result<(), String> {
+        let path = self.last_save_path.clone()
+            .unwrap_or_else(|| format!("{}.eden.json", self.project.name));
+        self.save_project(&path)
+    }
+
+    /// Cycle through available themes.
+    pub fn next_theme(&mut self) {
+        self.theme = match self.theme.name.as_str() {
+            "Dark" => Theme::light(),
+            "Light" => Theme::midnight(),
+            _ => Theme::dark(),
+        };
+    }
+
+    // ── Layout helpers ───────────────────────────────────────────────
+
+    pub fn transport_bar_height(&self) -> i32 { 48 }
+    pub fn loop_ruler_height(&self) -> i32 { 20 }
+    pub fn timeline_ruler_height(&self) -> i32 { 24 }
+    pub fn mode_tab_height(&self) -> i32 { 28 }
+
+    /// Y offset where the track area begins.
+    pub fn track_area_top(&self) -> i32 {
+        self.transport_bar_height()
+            + self.loop_ruler_height()
+            + self.timeline_ruler_height()
+            + self.mode_tab_height()
+    }
+
+    pub fn track_area_height(&self) -> i32 {
+        self.window_height as i32 - self.track_area_top()
+    }
+}

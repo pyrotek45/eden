@@ -1,0 +1,211 @@
+// Eden DAW — Main entry point
+// SDL2 window, event loop, audio engine, everything wired together.
+#![allow(dead_code)]
+
+mod audio;
+mod commands;
+mod input;
+mod models;
+mod render;
+mod state;
+mod theme;
+mod views;
+mod widgets;
+
+use sdl2::event::Event;
+use sdl2::keyboard::Keycode;
+
+use crate::audio::start_audio_engine;
+use crate::input::InputState;
+use crate::state::*;
+
+fn main() {
+    // ── SDL2 init ────────────────────────────────────────────────────
+    let sdl = sdl2::init().expect("Failed to init SDL2");
+    let video = sdl.video().expect("Failed to init SDL2 video");
+
+    let window = video
+        .window("Eden DAW", 1280, 800)
+        .position_centered()
+        .resizable()
+        .build()
+        .expect("Failed to create window");
+
+    let mut canvas = window
+        .into_canvas()
+        .accelerated()
+        .present_vsync()
+        .build()
+        .expect("Failed to create canvas");
+
+    let mut event_pump = sdl.event_pump().expect("Failed to get event pump");
+    let timer = sdl.timer().expect("Failed to get timer");
+
+    // ── Application state ────────────────────────────────────────────
+    let mut state = AppState::new();
+    let mut input = InputState::default();
+
+    // ── Audio engine ─────────────────────────────────────────────────
+    let audio_shared = match start_audio_engine() {
+        Ok(s) => {
+            println!("[audio] Engine started");
+            Some(s)
+        }
+        Err(e) => {
+            eprintln!("[audio] Failed to start: {}", e);
+            None
+        }
+    };
+
+    // ── Load session if file exists ──────────────────────────────────
+    let default_save = "eden_session.json";
+    if std::path::Path::new(default_save).exists() {
+        match state.load_project(default_save) {
+            Ok(()) => println!("[session] Loaded {}", default_save),
+            Err(e) => eprintln!("[session] Load error: {}", e),
+        }
+    }
+
+    // ── Main loop ────────────────────────────────────────────────────
+    let mut last_tick = timer.ticks();
+
+    while state.running {
+        let now = timer.ticks();
+        let _dt = (now - last_tick) as f64 / 1000.0;
+        last_tick = now;
+
+        input.begin_frame();
+
+        // ── Events ───────────────────────────────────────────────────
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit { .. } => {
+                    state.running = false;
+                }
+                Event::Window { win_event, .. } => {
+                    if let sdl2::event::WindowEvent::Resized(w, h) = win_event {
+                        state.window_width = w as u32;
+                        state.window_height = h as u32;
+                    }
+                }
+                Event::MouseMotion { x, y, .. } => {
+                    input.on_mouse_move(x, y);
+                }
+                Event::MouseButtonDown { x, y, mouse_btn, .. } => {
+                    input.on_mouse_down(x, y, mouse_btn, now as u64);
+                }
+                Event::MouseButtonUp { x, y, mouse_btn, .. } => {
+                    input.on_mouse_up(x, y, mouse_btn);
+                }
+                Event::MouseWheel { x, y, .. } => {
+                    input.on_scroll(x, y);
+                }
+                Event::KeyDown { keycode: Some(key), keymod, .. } => {
+                    input.key_mod = keymod;
+                    input.keys_pressed.push(key);
+
+                    match key {
+                        Keycode::Space => {
+                            state.project.transport.playing = !state.project.transport.playing;
+                        }
+                        Keycode::Return => {
+                            state.project.transport.position = 0.0;
+                        }
+                        Keycode::L => {
+                            state.project.transport.loop_enabled = !state.project.transport.loop_enabled;
+                        }
+                        Keycode::Num1 => state.mode = AppMode::Arrangement,
+                        Keycode::Num2 => state.mode = AppMode::Mixer,
+                        Keycode::Num3 => state.mode = AppMode::PianoRoll,
+                        Keycode::Num4 => state.mode = AppMode::InstrumentRack,
+                        Keycode::S if keymod.contains(sdl2::keyboard::Mod::LCTRLMOD) => {
+                            match state.save_project(default_save) {
+                                Ok(()) => println!("[session] Saved to {}", default_save),
+                                Err(e) => eprintln!("[session] Save error: {}", e),
+                            }
+                        }
+                        Keycode::Z if keymod.contains(sdl2::keyboard::Mod::LCTRLMOD) => {
+                            if keymod.contains(sdl2::keyboard::Mod::LSHIFTMOD) {
+                                state.commands.redo(&mut state.project);
+                            } else {
+                                state.commands.undo(&mut state.project);
+                            }
+                        }
+                        Keycode::T => {
+                            state.next_theme();
+                        }
+                        Keycode::Plus | Keycode::Equals => {
+                            state.arrangement.zoom_x = (state.arrangement.zoom_x * 1.2).min(200.0);
+                        }
+                        Keycode::Minus => {
+                            state.arrangement.zoom_x = (state.arrangement.zoom_x / 1.2).max(5.0);
+                        }
+                        _ => {}
+                    }
+                }
+                Event::KeyUp { keymod, .. } => {
+                    input.key_mod = keymod;
+                }
+                _ => {}
+            }
+        }
+
+        input.end_frame();
+
+        // ── Update transport position ────────────────────────────────
+        if state.project.transport.playing {
+            let bpm = state.project.tempo_map.bpm_at(state.project.transport.position);
+            let beats_per_sec = bpm / 60.0;
+            state.project.transport.position += beats_per_sec * _dt;
+
+            if state.project.transport.loop_enabled {
+                if state.project.transport.position >= state.project.transport.loop_region.end {
+                    state.project.transport.position = state.project.transport.loop_region.start;
+                }
+            }
+        }
+
+        // ── Sync audio state ─────────────────────────────────────────
+        if let Some(ref shared) = audio_shared {
+            if let Ok(mut audio) = shared.lock() {
+                audio.playing = state.project.transport.playing;
+                audio.bpm = state.project.tempo_map.bpm_at(0.0);
+                audio.position_beats = state.project.transport.position;
+                audio.loop_enabled = state.project.transport.loop_enabled;
+                audio.loop_start = state.project.transport.loop_region.start;
+                audio.loop_end = state.project.transport.loop_region.end;
+
+                // Sync track info
+                audio.tracks.clear();
+                for track in &state.project.tracks {
+                    // For demo: use a frequency based on track index
+                    let base_freq = match track.track_type {
+                        models::TrackType::Midi => 220.0 * (track.id as f32),
+                        models::TrackType::Audio => 0.0,
+                        models::TrackType::Automation => 0.0,
+                    };
+                    audio.tracks.push((base_freq, track.volume, track.mute, track.solo));
+                }
+            }
+        }
+
+        // ── Render ───────────────────────────────────────────────────
+        canvas.set_draw_color(theme::Theme::c(state.theme.bg_dark));
+        canvas.clear();
+
+        match state.mode {
+            AppMode::Arrangement => views::draw_arrangement(&mut canvas, &mut input, &mut state),
+            AppMode::Mixer => views::draw_mixer(&mut canvas, &mut input, &mut state),
+            AppMode::PianoRoll => views::draw_piano_roll(&mut canvas, &mut input, &mut state),
+            AppMode::InstrumentRack => views::draw_instrument_rack(&mut canvas, &mut input, &mut state),
+        }
+
+        canvas.present();
+    }
+
+    // ── Save on exit ─────────────────────────────────────────────────
+    if state.dirty {
+        let _ = state.save_project(default_save);
+        println!("[session] Auto-saved on exit");
+    }
+}

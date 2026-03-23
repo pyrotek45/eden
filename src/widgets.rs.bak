@@ -1,0 +1,437 @@
+// Eden DAW — Widget system
+// Immediate-mode-style widgets: Knob, Slider, Button
+// All rendering uses SDL2 primitives + the Theme.
+
+use sdl2::gfx::primitives::DrawRenderer;
+use sdl2::rect::Rect;
+use sdl2::render::Canvas;
+use sdl2::video::Window;
+
+use crate::input::{InputState, WidgetId};
+use crate::theme::Theme;
+
+// ── Helper ───────────────────────────────────────────────────────────
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn inv_lerp(a: f32, b: f32, v: f32) -> f32 {
+    if (b - a).abs() < 1e-9 { 0.0 } else { (v - a) / (b - a) }
+}
+
+// ── Knob ─────────────────────────────────────────────────────────────
+
+pub struct KnobParams {
+    pub id: WidgetId,
+    pub x: i32,
+    pub y: i32,
+    pub radius: i32,
+    pub min: f32,
+    pub max: f32,
+    pub sensitivity: f32,
+    pub label: Option<String>,
+}
+
+impl Default for KnobParams {
+    fn default() -> Self {
+        Self {
+            id: WidgetId::None,
+            x: 0,
+            y: 0,
+            radius: 20,
+            min: 0.0,
+            max: 1.0,
+            sensitivity: 0.005,
+            label: None,
+        }
+    }
+}
+
+/// Draw a knob and handle interaction. Returns true if value changed.
+pub fn knob(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    theme: &Theme,
+    params: &KnobParams,
+    value: &mut f32,
+) -> bool {
+    let cx = params.x as i16;
+    let cy = params.y as i16;
+    let r = params.radius as i16;
+    let hover = input.mouse_in_rect(
+        params.x - params.radius,
+        params.y - params.radius,
+        params.radius * 2,
+        params.radius * 2,
+    );
+
+    let mut changed = false;
+
+    // ── Interaction ──
+    if hover && input.mouse_pressed {
+        input.active_widget = params.id;
+        input.drag_widget = params.id;
+        input.drag_start_value = *value as f64;
+    }
+
+    if input.active_widget == params.id && input.mouse_down {
+        let delta = -input.mouse_dy as f32 * params.sensitivity;
+        *value = (*value + delta * (params.max - params.min)).clamp(params.min, params.max);
+        if delta.abs() > 0.0 {
+            changed = true;
+        }
+    }
+
+    if hover {
+        input.hot_widget = params.id;
+    }
+
+    // ── Render ──
+    let is_active = input.active_widget == params.id;
+    let is_hot = hover;
+
+    // Outer ring
+    let bg = if is_active {
+        Theme::c(theme.accent_active)
+    } else if is_hot {
+        Theme::c(theme.accent_hover)
+    } else {
+        Theme::c(theme.knob_bg)
+    };
+
+    let _ = canvas.filled_circle(cx, cy, r, bg);
+    let _ = canvas.aa_circle(cx, cy, r, Theme::c(theme.panel_border));
+
+    // Inner circle
+    let inner_r = (r as f32 * 0.7) as i16;
+    let _ = canvas.filled_circle(cx, cy, inner_r, Theme::c(theme.knob_fg));
+
+    // Value arc indicator
+    let t = inv_lerp(params.min, params.max, *value);
+    // Angle: 135° (bottom-left) to 405° (bottom-right), i.e. 270° sweep
+    let start_angle = 135.0_f64;
+    let end_angle = start_angle + (t as f64) * 270.0;
+    let indicator_r = (r as f32 * 0.85) as f64;
+
+    // Draw arc segments
+    let steps = 30;
+    let step_angle = (end_angle - start_angle) / steps as f64;
+    for i in 0..steps {
+        let a1 = (start_angle + i as f64 * step_angle).to_radians();
+        let a2 = (start_angle + (i + 1) as f64 * step_angle).to_radians();
+        let x1 = cx as f64 + a1.cos() * indicator_r;
+        let y1 = cy as f64 + a1.sin() * indicator_r;
+        let x2 = cx as f64 + a2.cos() * indicator_r;
+        let y2 = cy as f64 + a2.sin() * indicator_r;
+        let _ = canvas.aa_line(x1 as i16, y1 as i16, x2 as i16, y2 as i16, Theme::c(theme.knob_indicator));
+    }
+
+    // Pointer line
+    let pointer_angle = (start_angle + t as f64 * 270.0).to_radians();
+    let px = cx as f64 + pointer_angle.cos() * (inner_r as f64 - 2.0);
+    let py = cy as f64 + pointer_angle.sin() * (inner_r as f64 - 2.0);
+    let _ = canvas.aa_line(cx, cy, px as i16, py as i16, Theme::c(theme.knob_indicator));
+
+    changed
+}
+
+// ── Slider ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SliderOrientation {
+    Horizontal,
+    Vertical,
+}
+
+pub struct SliderParams {
+    pub id: WidgetId,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub min: f32,
+    pub max: f32,
+    pub orientation: SliderOrientation,
+    pub label: Option<String>,
+}
+
+impl Default for SliderParams {
+    fn default() -> Self {
+        Self {
+            id: WidgetId::None,
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 20,
+            min: 0.0,
+            max: 1.0,
+            orientation: SliderOrientation::Horizontal,
+            label: None,
+        }
+    }
+}
+
+/// Draw a slider and handle interaction. Returns true if value changed.
+pub fn slider(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    theme: &Theme,
+    params: &SliderParams,
+    value: &mut f32,
+) -> bool {
+    let hover = input.mouse_in_rect(params.x, params.y, params.width, params.height);
+    let mut changed = false;
+
+    // ── Interaction ──
+    if hover && input.mouse_pressed {
+        input.active_widget = params.id;
+        input.drag_widget = params.id;
+        input.drag_start_value = *value as f64;
+    }
+
+    if input.active_widget == params.id && input.mouse_down {
+        let t = match params.orientation {
+            SliderOrientation::Horizontal => {
+                ((input.mouse_x - params.x) as f32 / params.width as f32).clamp(0.0, 1.0)
+            }
+            SliderOrientation::Vertical => {
+                (1.0 - (input.mouse_y - params.y) as f32 / params.height as f32).clamp(0.0, 1.0)
+            }
+        };
+        let new_val = lerp(params.min, params.max, t);
+        if (new_val - *value).abs() > 1e-6 {
+            *value = new_val;
+            changed = true;
+        }
+    }
+
+    if hover {
+        input.hot_widget = params.id;
+    }
+
+    // ── Render ──
+    let is_active = input.active_widget == params.id;
+    let is_hot = hover;
+
+    // Background track
+    let bg = if is_active {
+        Theme::c(theme.bg_light)
+    } else {
+        Theme::c(theme.slider_bg)
+    };
+    canvas.set_draw_color(bg);
+    let _ = canvas.fill_rect(Rect::new(params.x, params.y, params.width as u32, params.height as u32));
+
+    // Fill
+    let t = inv_lerp(params.min, params.max, *value);
+    let fill_color = Theme::c(theme.slider_fill);
+    canvas.set_draw_color(fill_color);
+
+    match params.orientation {
+        SliderOrientation::Horizontal => {
+            let fill_w = (t * params.width as f32) as u32;
+            let _ = canvas.fill_rect(Rect::new(params.x, params.y, fill_w, params.height as u32));
+
+            // Thumb
+            let thumb_x = params.x + (t * params.width as f32) as i32 - 3;
+            let thumb_color = if is_active || is_hot {
+                Theme::c(theme.accent)
+            } else {
+                Theme::c(theme.slider_thumb)
+            };
+            canvas.set_draw_color(thumb_color);
+            let _ = canvas.fill_rect(Rect::new(thumb_x, params.y - 2, 6, params.height as u32 + 4));
+        }
+        SliderOrientation::Vertical => {
+            let fill_h = (t * params.height as f32) as u32;
+            let fill_y = params.y + params.height - fill_h as i32;
+            let _ = canvas.fill_rect(Rect::new(params.x, fill_y, params.width as u32, fill_h));
+
+            // Thumb
+            let thumb_y = fill_y - 3;
+            let thumb_color = if is_active || is_hot {
+                Theme::c(theme.accent)
+            } else {
+                Theme::c(theme.slider_thumb)
+            };
+            canvas.set_draw_color(thumb_color);
+            let _ = canvas.fill_rect(Rect::new(params.x - 2, thumb_y, params.width as u32 + 4, 6));
+        }
+    }
+
+    // Border
+    let border = if is_hot {
+        Theme::c(theme.accent)
+    } else {
+        Theme::c(theme.panel_border)
+    };
+    canvas.set_draw_color(border);
+    let _ = canvas.draw_rect(Rect::new(params.x, params.y, params.width as u32, params.height as u32));
+
+    changed
+}
+
+// ── Button ───────────────────────────────────────────────────────────
+
+pub struct ButtonParams {
+    pub id: WidgetId,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub label: String,
+    pub toggled: bool,
+}
+
+impl Default for ButtonParams {
+    fn default() -> Self {
+        Self {
+            id: WidgetId::None,
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 24,
+            label: String::new(),
+            toggled: false,
+        }
+    }
+}
+
+/// Draw a button. Returns true if it was clicked this frame.
+pub fn button(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    theme: &Theme,
+    params: &ButtonParams,
+) -> bool {
+    let hover = input.mouse_in_rect(params.x, params.y, params.width, params.height);
+    let mut clicked = false;
+
+    if hover && input.mouse_pressed {
+        input.active_widget = params.id;
+    }
+
+    if hover && input.mouse_released && input.active_widget == params.id {
+        clicked = true;
+    }
+
+    if hover {
+        input.hot_widget = params.id;
+    }
+
+    // ── Render ──
+    let is_active = input.active_widget == params.id && input.mouse_down && hover;
+    let is_hot = hover;
+
+    let bg = if params.toggled {
+        Theme::c(theme.accent_active)
+    } else if is_active {
+        Theme::c(theme.button_active)
+    } else if is_hot {
+        Theme::c(theme.button_hover)
+    } else {
+        Theme::c(theme.button_bg)
+    };
+
+    canvas.set_draw_color(bg);
+    let _ = canvas.fill_rect(Rect::new(params.x, params.y, params.width as u32, params.height as u32));
+
+    // Border
+    let border = if params.toggled || is_active {
+        Theme::c(theme.accent)
+    } else if is_hot {
+        Theme::c(theme.accent_hover)
+    } else {
+        Theme::c(theme.panel_border)
+    };
+    canvas.set_draw_color(border);
+    let _ = canvas.draw_rect(Rect::new(params.x, params.y, params.width as u32, params.height as u32));
+
+    // Simple text rendering: draw label as small centered block
+    // (Real text would need SDL2_ttf; for now we use a centered rectangle as placeholder)
+    let text_color = if params.toggled {
+        Theme::c(theme.bg_dark)
+    } else {
+        Theme::c(theme.button_text)
+    };
+
+    // Draw a small marker to indicate the label (placeholder for real text)
+    if !params.label.is_empty() {
+        let char_w = 6;
+        let text_w = (params.label.len() as i32 * char_w).min(params.width - 4);
+        let tx = params.x + (params.width - text_w) / 2;
+        let ty = params.y + params.height / 2;
+        canvas.set_draw_color(text_color);
+        let _ = canvas.draw_line(
+            sdl2::rect::Point::new(tx, ty),
+            sdl2::rect::Point::new(tx + text_w, ty),
+        );
+    }
+
+    clicked
+}
+
+// ── Small Toggle (Mute / Solo style) ─────────────────────────────────
+
+pub fn toggle_button(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    theme: &Theme,
+    x: i32,
+    y: i32,
+    size: i32,
+    on_color: [u8; 4],
+    toggled: bool,
+    id: WidgetId,
+) -> bool {
+    let hover = input.mouse_in_rect(x, y, size, size);
+    let mut clicked = false;
+
+    if hover && input.mouse_pressed {
+        input.active_widget = id;
+    }
+    if hover && input.mouse_released && input.active_widget == id {
+        clicked = true;
+    }
+    if hover {
+        input.hot_widget = id;
+    }
+
+    let bg = if toggled {
+        Theme::c(on_color)
+    } else if hover {
+        Theme::c(theme.button_hover)
+    } else {
+        Theme::c(theme.button_bg)
+    };
+
+    canvas.set_draw_color(bg);
+    let _ = canvas.fill_rect(Rect::new(x, y, size as u32, size as u32));
+
+    canvas.set_draw_color(Theme::c(theme.panel_border));
+    let _ = canvas.draw_rect(Rect::new(x, y, size as u32, size as u32));
+
+    clicked
+}
+
+// ── Value display (horizontal bar under a knob/slider label) ─────────
+
+pub fn value_bar(
+    canvas: &mut Canvas<Window>,
+    theme: &Theme,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    t: f32, // 0..1
+) {
+    // Background
+    canvas.set_draw_color(Theme::c(theme.slider_bg));
+    let _ = canvas.fill_rect(Rect::new(x, y, width as u32, height as u32));
+
+    // Fill
+    let fill_w = (t.clamp(0.0, 1.0) * width as f32) as u32;
+    canvas.set_draw_color(Theme::c(theme.slider_fill));
+    let _ = canvas.fill_rect(Rect::new(x, y, fill_w, height as u32));
+}
