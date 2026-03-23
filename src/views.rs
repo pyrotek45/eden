@@ -4471,7 +4471,7 @@ pub fn draw_bottom_panel(
         } else if !state.bottom_panel_open {
             // Closed + single-click → open halfway
             input.consumed = true;
-            state.bottom_panel_height = 280;
+            state.bottom_panel_height = 400;
             state.bottom_panel_open = true;
         }
     }
@@ -15142,6 +15142,47 @@ fn draw_piano_roll_impl(
                     }
                 }
             }
+
+            // Audition the dragged pitch when it changes
+            if state.piano_roll_audition_on_draw {
+                // Pick one representative pitch (lowest selected note's new pitch)
+                let new_pitch = origins
+                    .values()
+                    .map(|&(_, orig_p)| ((orig_p as i32 + dy_semi).clamp(0, 127)) as u8)
+                    .min();
+                if let Some(new_pitch) = new_pitch {
+                    let last_pitch = state
+                        .preview_notes
+                        .iter()
+                        .find(|&&(t, _, _)| {
+                            t == state
+                                .project
+                                .tracks
+                                .iter()
+                                .position(|tr| tr.id == track_id)
+                                .unwrap_or(usize::MAX)
+                        })
+                        .map(|&(_, p, _)| p);
+                    if last_pitch != Some(new_pitch) {
+                        if let Some(ti) =
+                            state.project.tracks.iter().position(|t| t.id == track_id)
+                        {
+                            // Stop old preview pitch
+                            for &(_, p, _) in state
+                                .preview_notes
+                                .iter()
+                                .filter(|&&(t, _, _)| t == ti)
+                                .collect::<Vec<_>>()
+                            {
+                                state.piano_note_off_queue.push(p);
+                            }
+                            state.preview_notes.retain(|&(t, _, _)| t != ti);
+                            // Trigger new pitch
+                            state.preview_notes.push((ti, new_pitch, 100));
+                        }
+                    }
+                }
+            }
         }
         if input.mouse_released {
             if state.piano_roll_clone_drag {
@@ -15215,6 +15256,18 @@ fn draw_piano_roll_impl(
             }
             state.piano_roll_moving = false;
             state.piano_roll_move_origins.clear();
+            // Stop any preview notes triggered during drag
+            if let Some(ti) = state.project.tracks.iter().position(|t| t.id == track_id) {
+                for &(_, p, _) in state
+                    .preview_notes
+                    .iter()
+                    .filter(|&&(t, _, _)| t == ti)
+                    .collect::<Vec<_>>()
+                {
+                    state.piano_note_off_queue.push(p);
+                }
+                state.preview_notes.retain(|&(t, _, _)| t != ti);
+            }
         }
     }
 

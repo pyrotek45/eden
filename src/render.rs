@@ -22,6 +22,28 @@ use crate::modules::{
 };
 use std::sync::Arc;
 
+// ── Chord voicing helper ────────────────────────────────────────────────────
+//
+// Adjusts an interval semitone based on voicing mode:
+//   0 = close (no adjustment — all notes within one octave)
+//   1 = open  (upper notes raised by one octave)
+//   2 = spread (higher notes spread across two octaves)
+//
+// `interval_idx` is the 0-based index in the chord intervals array.
+// Returns the absolute MIDI pitch delta from base_pitch.
+fn apply_chord_voicing(base_pitch: u8, interval: i32, interval_idx: usize, voicing: i32) -> i32 {
+    let octave_shift = match voicing {
+        // Close: keep everything within one octave — no change
+        0 => 0,
+        // Open: raise alternating upper voices by an octave
+        1 => if interval_idx % 2 == 1 { 12 } else { 0 },
+        // Spread: raise each successive upper voice by an octave
+        2 => (interval_idx as i32) * 12,
+        _ => 0,
+    };
+    base_pitch as i32 + interval + octave_shift
+}
+
 // ── Automation evaluation (MUST mirror main.rs apply-automation logic) ─────
 //
 // Given the project and a beat position, returns a map of
@@ -199,6 +221,21 @@ pub fn render_to_buffer(
             })
             .collect();
 
+        // Collect MIDI effect slots from rack (same as main.rs)
+        let midi_effect_slots: Vec<(String, Vec<(String, f32)>)> = track
+            .rack
+            .iter()
+            .filter(|slot| slot.enabled && crate::modules::is_midi_effect(&slot.plugin_name))
+            .map(|slot| {
+                let params: Vec<(String, f32)> = slot
+                    .params
+                    .iter()
+                    .map(|p| (p.id.clone(), p.value))
+                    .collect();
+                (slot.plugin_name.clone(), params)
+            })
+            .collect();
+
         render_tracks.push(AudioTrack {
             volume: track.volume,
             pan: track.pan,
@@ -210,7 +247,7 @@ pub fn render_to_buffer(
             instrument_module,
             instrument_params,
             effect_slots,
-            midi_effect_slots: Vec::new(),
+            midi_effect_slots,
             effect_sidechain_track,
             extra: ModuleExtra::default(),
         });
@@ -297,14 +334,98 @@ pub fn render_to_buffer(
                 for note in &clip.notes {
                     let note_end = note.start_beats + note.length_beats;
                     if prev < note.start_beats && clip_pos >= note.start_beats {
-                        let freq = midi_to_freq(note.pitch);
-                        let vel = note.velocity as f32 / 127.0 * track.volume;
-                        let voice = ModuleVoice::new(freq, vel, ti, note.pitch);
-                        track_voices[ti].push(voice);
+                        // Apply MIDI effects (mirrors audio.rs exactly)
+                        let mut note_events: Vec<(u8, f32)> = {
+                            let vel = note.velocity as f32 / 127.0 * track.volume;
+                            vec![(note.pitch, vel)]
+                        };
+                        let has_arp = track
+                            .midi_effect_slots
+                            .iter()
+                            .any(|(n, _)| n == "Arpeggiator");
+                        for (effect_name, params) in &track.midi_effect_slots {
+                            let get = |k: &str| -> f32 {
+                                params
+                                    .iter()
+                                    .find(|(id, _)| id == k)
+                                    .map(|(_, v)| *v)
+                                    .unwrap_or(0.0)
+                            };
+                            match effect_name.as_str() {
+                                "Transpose" => {
+                                    let semitones = get("semitones") as i32;
+                                    let octave = get("octave") as i32;
+                                    let shift = semitones + octave * 12;
+                                    note_events = note_events
+                                        .into_iter()
+                                        .map(|(p, v)| {
+                                            ((p as i32 + shift).clamp(0, 127) as u8, v)
+                                        })
+                                        .collect();
+                                }
+                                "Velocity" => {
+                                    let amount = get("amount");
+                                    let curve = get("curve");
+                                    let min_vel = get("min_vel") / 127.0;
+                                    let max_vel = get("max_vel") / 127.0;
+                                    note_events = note_events
+                                        .into_iter()
+                                        .map(|(p, v)| {
+                                            let curved = if curve > 0.5 {
+                                                v.powf(1.0 / (curve * 2.0).max(0.01))
+                                            } else {
+                                                v.powf((1.0 - curve) * 2.0)
+                                            };
+                                            let new_v = (curved + amount).clamp(min_vel, max_vel);
+                                            (p, new_v * track.volume)
+                                        })
+                                        .collect();
+                                }
+                                "Chord" => {
+                                    let chord_type = get("type") as i32;
+                                    let voicing = get("voicing") as i32;
+                                    let intervals: &[i32] = match chord_type {
+                                        0 => &[4i32, 7],
+                                        1 => &[3i32, 7],
+                                        2 => &[4i32, 7, 10],
+                                        3 => &[3i32, 7, 10],
+                                        4 => &[5i32, 7],
+                                        5 => &[3i32, 6],
+                                        _ => &[4i32, 7],
+                                    };
+                                    let mut expanded = note_events.clone();
+                                    for &(base_p, base_v) in &note_events {
+                                        for (idx, &interval) in intervals.iter().enumerate() {
+                                            let adjusted = apply_chord_voicing(
+                                                base_p, interval, idx, voicing,
+                                            );
+                                            let new_p = (adjusted).clamp(0, 127) as u8;
+                                            expanded.push((new_p, base_v));
+                                        }
+                                    }
+                                    note_events = expanded;
+                                }
+                                "Arpeggiator" => {
+                                    note_events.clear();
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !has_arp {
+                            for (pitch, vel) in note_events {
+                                if !track_voices[ti].iter().any(|v| v.pitch == pitch && !v.released)
+                                {
+                                    let freq = midi_to_freq(pitch);
+                                    let mut voice = ModuleVoice::new(freq, vel, ti, pitch);
+                                    voice.original_pitch = note.pitch; // for note-off tracking
+                                    track_voices[ti].push(voice);
+                                }
+                            }
+                        }
                     }
                     if prev < note_end && clip_pos >= note_end {
                         for v in track_voices[ti].iter_mut() {
-                            if v.pitch == note.pitch && !v.released {
+                            if v.original_pitch == note.pitch && !v.released {
                                 v.released = true;
                                 break;
                             }
@@ -325,7 +446,7 @@ pub fn render_to_buffer(
                     }
                     let clip_pos = pos_beats - clip.start_beats;
                     for note in &clip.notes {
-                        if note.pitch == v.pitch
+                        if note.pitch == v.original_pitch
                             && clip_pos >= note.start_beats
                             && clip_pos < note.start_beats + note.length_beats
                         {
@@ -644,6 +765,21 @@ pub fn render_to_wav_with_progress(
             })
             .collect();
 
+        // Collect MIDI effect slots from rack (mirrors main.rs exactly)
+        let midi_effect_slots: Vec<(String, Vec<(String, f32)>)> = track
+            .rack
+            .iter()
+            .filter(|slot| slot.enabled && crate::modules::is_midi_effect(&slot.plugin_name))
+            .map(|slot| {
+                let params: Vec<(String, f32)> = slot
+                    .params
+                    .iter()
+                    .map(|p| (p.id.clone(), p.value))
+                    .collect();
+                (slot.plugin_name.clone(), params)
+            })
+            .collect();
+
         render_tracks.push(AudioTrack {
             volume: track.volume,
             pan: track.pan,
@@ -655,7 +791,7 @@ pub fn render_to_wav_with_progress(
             instrument_module,
             instrument_params,
             effect_slots,
-            midi_effect_slots: Vec::new(),
+            midi_effect_slots,
             effect_sidechain_track,
             extra,
         });
@@ -845,18 +981,107 @@ pub fn render_to_wav_with_progress(
                 for note in &clip.notes {
                     let note_end = note.start_beats + note.length_beats;
 
-                    // Trigger new voice at note start
+                    // Trigger new voice at note start — apply MIDI effects first
                     if prev < note.start_beats && clip_pos >= note.start_beats {
-                        let freq = midi_to_freq(note.pitch);
-                        let vel = note.velocity as f32 / 127.0 * track.volume;
-                        let voice = ModuleVoice::new(freq, vel, ti, note.pitch);
-                        track_voices[ti].push(voice);
+                        let mut note_events: Vec<(u8, f32)> = {
+                            let vel = note.velocity as f32 / 127.0 * track.volume;
+                            vec![(note.pitch, vel)]
+                        };
+                        let has_arp = track
+                            .midi_effect_slots
+                            .iter()
+                            .any(|(n, _)| n == "Arpeggiator");
+                        for (effect_name, params) in &track.midi_effect_slots {
+                            let get = |k: &str| -> f32 {
+                                params
+                                    .iter()
+                                    .find(|(id, _)| id == k)
+                                    .map(|(_, v)| *v)
+                                    .unwrap_or(0.0)
+                            };
+                            match effect_name.as_str() {
+                                "Transpose" => {
+                                    let semitones = get("semitones") as i32;
+                                    let octave = get("octave") as i32;
+                                    let shift = semitones + octave * 12;
+                                    note_events = note_events
+                                        .into_iter()
+                                        .map(|(p, v)| {
+                                            ((p as i32 + shift).clamp(0, 127) as u8, v)
+                                        })
+                                        .collect();
+                                }
+                                "Velocity" => {
+                                    let amount = get("amount");
+                                    let curve = get("curve");
+                                    let min_vel = get("min_vel") / 127.0;
+                                    let max_vel = get("max_vel") / 127.0;
+                                    note_events = note_events
+                                        .into_iter()
+                                        .map(|(p, v)| {
+                                            let curved = if curve > 0.5 {
+                                                v.powf(1.0 / (curve * 2.0).max(0.01))
+                                            } else {
+                                                v.powf((1.0 - curve) * 2.0)
+                                            };
+                                            let new_v =
+                                                (curved + amount).clamp(min_vel, max_vel);
+                                            (p, new_v * track.volume)
+                                        })
+                                        .collect();
+                                }
+                                "Chord" => {
+                                    let chord_type = get("type") as i32;
+                                    let voicing = get("voicing") as i32;
+                                    let intervals: &[i32] = match chord_type {
+                                        0 => &[4i32, 7],
+                                        1 => &[3i32, 7],
+                                        2 => &[4i32, 7, 10],
+                                        3 => &[3i32, 7, 10],
+                                        4 => &[5i32, 7],
+                                        5 => &[3i32, 6],
+                                        _ => &[4i32, 7],
+                                    };
+                                    let mut expanded = note_events.clone();
+                                    for &(base_p, base_v) in &note_events {
+                                        for (idx, &interval) in intervals.iter().enumerate() {
+                                            let abs_pitch = apply_chord_voicing(
+                                                base_p, interval, idx, voicing,
+                                            );
+                                            let new_p = abs_pitch.clamp(0, 127) as u8;
+                                            expanded.push((new_p, base_v));
+                                        }
+                                    }
+                                    note_events = expanded;
+                                }
+                                "Arpeggiator" => {
+                                    // Arpeggiator in render — play notes sequentially.
+                                    // For simplicity, just pass notes through without arp
+                                    // (arp requires per-step state across samples).
+                                    note_events.clear();
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !has_arp {
+                            for (pitch, vel) in note_events {
+                                if !track_voices[ti]
+                                    .iter()
+                                    .any(|v| v.pitch == pitch && !v.released)
+                                {
+                                    let freq = midi_to_freq(pitch);
+                                    let mut voice = ModuleVoice::new(freq, vel, ti, pitch);
+                                    voice.original_pitch = note.pitch; // for note-off tracking
+                                    track_voices[ti].push(voice);
+                                }
+                            }
+                        }
                     }
 
                     // Release voice at note end (set released=true for ADSR tail)
                     if prev < note_end && clip_pos >= note_end {
                         for v in track_voices[ti].iter_mut() {
-                            if v.pitch == note.pitch && !v.released {
+                            if v.original_pitch == note.pitch && !v.released {
                                 v.released = true;
                                 break;
                             }
@@ -882,7 +1107,7 @@ pub fn render_to_wav_with_progress(
                     }
                     let clip_pos = pos_beats - clip.start_beats;
                     for note in &clip.notes {
-                        if note.pitch == v.pitch
+                        if note.pitch == v.original_pitch
                             && clip_pos >= note.start_beats
                             && clip_pos < note.start_beats + note.length_beats
                         {

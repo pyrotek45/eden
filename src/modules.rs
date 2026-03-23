@@ -26,6 +26,8 @@ pub struct ModuleVoice {
     pub track_idx: usize,
     pub released: bool,
     pub pitch: u8,
+    /// The original (pre-MIDI-effect) MIDI pitch used for note-off matching.
+    pub original_pitch: u8,
     /// Opaque per-voice state owned by the instrument module.
     /// Each instrument stores its own voice-local data here.
     pub state: VoiceState,
@@ -140,6 +142,7 @@ impl ModuleVoice {
             track_idx,
             released: false,
             pitch,
+            original_pitch: pitch,
             state: VoiceState::default(),
             preview_samples_remaining: None,
         }

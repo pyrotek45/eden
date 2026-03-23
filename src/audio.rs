@@ -498,6 +498,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 }
                                 "Chord" => {
                                     let chord_type = get("type") as i32;
+                                    let voicing = get("voicing") as i32;
                                     let intervals: &[i32] = match chord_type {
                                         0 => &[4i32, 7],
                                         1 => &[3i32, 7],
@@ -509,9 +510,15 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     };
                                     let mut expanded = note_events.clone();
                                     for &(base_p, base_v) in &note_events {
-                                        for &interval in intervals {
-                                            let new_p =
-                                                (base_p as i32 + interval).clamp(0, 127) as u8;
+                                        for (idx, &interval) in intervals.iter().enumerate() {
+                                            let octave_shift = match voicing {
+                                                0 => 0,                      // close
+                                                1 => if idx % 2 == 1 { 12 } else { 0 }, // open
+                                                2 => (idx as i32) * 12,     // spread
+                                                _ => 0,
+                                            };
+                                            let new_p = (base_p as i32 + interval + octave_shift)
+                                                .clamp(0, 127) as u8;
                                             expanded.push((new_p, base_v));
                                         }
                                     }
@@ -1041,6 +1048,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                             "Chord" => {
                                                 // chord_type: 0=maj,1=min,2=7th,3=min7,4=sus4,5=dim
                                                 let chord_type = get("type") as i32;
+                                                let voicing = get("voicing") as i32;
                                                 let intervals: &[i32] = match chord_type {
                                                     0 => &[4i32, 7],     // major
                                                     1 => &[3i32, 7],     // minor
@@ -1052,8 +1060,14 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                                 };
                                                 let mut expanded = note_events.clone();
                                                 for &(base_p, base_v) in &note_events {
-                                                    for &interval in intervals {
-                                                        let new_p = (base_p as i32 + interval)
+                                                    for (idx, &interval) in intervals.iter().enumerate() {
+                                                        let octave_shift = match voicing {
+                                                            0 => 0,                      // close
+                                                            1 => if idx % 2 == 1 { 12 } else { 0 }, // open
+                                                            2 => (idx as i32) * 12,     // spread
+                                                            _ => 0,
+                                                        };
+                                                        let new_p = (base_p as i32 + interval + octave_shift)
                                                             .clamp(0, 127)
                                                             as u8;
                                                         expanded.push((new_p, base_v));

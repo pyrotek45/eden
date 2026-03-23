@@ -5977,4 +5977,103 @@ mod tests {
             max_jump
         );
     }
+
+    // ── MIDI effects tests ────────────────────────────────────────────
+
+    /// Chord effect should produce a different waveform than a single note.
+    #[test]
+    fn test_midi_chord_produces_more_energy() {
+        let baseline = render_to_buffer(&make_render_project(vec![]), 44100, 1.0);
+        let chord_slot = RackSlot::chord(101); // default: major chord, close voicing
+        let with_chord = render_to_buffer(&make_render_project(vec![chord_slot]), 44100, 1.0);
+
+        // Both should have signal
+        let note_start = (44100.0 * 0.01) as usize;
+        let note_end   = (44100.0 * 0.4)  as usize;
+        let base_rms  = rms(&baseline,   note_start, note_end);
+        let chord_rms = rms(&with_chord, note_start, note_end);
+
+        assert!(base_rms  > 1e-6, "Baseline should have signal: rms={}", base_rms);
+        assert!(chord_rms > 1e-6, "Chord should have signal: rms={}", chord_rms);
+
+        // The waveforms should differ (chord has additional pitches)
+        let same = baseline[note_start..note_end]
+            .iter()
+            .zip(&with_chord[note_start..note_end])
+            .all(|((bl, br), (cl, cr))| (bl - cl).abs() < 1e-9 && (br - cr).abs() < 1e-9);
+        assert!(!same, "Chord should produce a different waveform than single note");
+    }
+
+    /// Transpose effect should produce a different waveform than baseline.
+    #[test]
+    fn test_midi_transpose_changes_output() {
+        let baseline = render_to_buffer(&make_render_project(vec![]), 44100, 1.0);
+
+        // Transpose up 12 semitones (octave) — same note family but higher octave
+        let mut slot = RackSlot::transpose(101);
+        slot.params[0].value = 12.0; // semitones = 12
+        let transposed = render_to_buffer(&make_render_project(vec![slot]), 44100, 1.0);
+
+        // Both should have signal
+        let s = (44100.0 * 0.02) as usize;
+        let e = (44100.0 * 0.4)  as usize;
+        assert!(rms(&baseline,   s, e) > 1e-6, "Baseline should have signal");
+        assert!(rms(&transposed, s, e) > 1e-6, "Transposed should have signal");
+
+        // The waveforms should differ (different frequency)
+        let same = baseline[s..e]
+            .iter()
+            .zip(&transposed[s..e])
+            .all(|((bl, br), (tl, tr))| (bl - tl).abs() < 1e-9 && (br - tr).abs() < 1e-9);
+        assert!(!same, "Transpose should produce a different waveform");
+    }
+
+    /// Velocity effect with amount=-1.0 should reduce signal level.
+    #[test]
+    fn test_midi_velocity_amount_reduces_level() {
+        let baseline = render_to_buffer(&make_render_project(vec![]), 44100, 1.0);
+
+        // Set amount=-1.0 which drives velocity to min_vel (1/127 ≈ silent)
+        let mut slot = RackSlot::velocity(101);
+        slot.params[0].value = -1.0; // amount
+        slot.params[2].value = 1.0;  // min_vel = 1  (very quiet)
+        slot.params[3].value = 127.0;
+        let quieted = render_to_buffer(&make_render_project(vec![slot]), 44100, 1.0);
+
+        let s = (44100.0 * 0.02) as usize;
+        let e = (44100.0 * 0.4)  as usize;
+        let base_rms  = rms(&baseline, s, e);
+        let quiet_rms = rms(&quieted,  s, e);
+
+        assert!(base_rms > 1e-6, "Baseline should have signal: rms={}", base_rms);
+        assert!(
+            quiet_rms < base_rms * 0.9,
+            "Velocity=min should be quieter: quiet_rms={} base_rms={}",
+            quiet_rms,
+            base_rms
+        );
+    }
+
+    /// Open voicing should produce a different waveform than close voicing.
+    #[test]
+    fn test_midi_chord_voicing_open_differs_from_close() {
+        let mut close_slot = RackSlot::chord(101);
+        close_slot.params[1].value = 0.0; // voicing = close
+        let with_close = render_to_buffer(&make_render_project(vec![close_slot]), 44100, 1.0);
+
+        let mut open_slot = RackSlot::chord(102);
+        open_slot.params[1].value = 1.0; // voicing = open
+        let with_open = render_to_buffer(&make_render_project(vec![open_slot]), 44100, 1.0);
+
+        let s = (44100.0 * 0.02) as usize;
+        let e = (44100.0 * 0.4)  as usize;
+        assert!(rms(&with_close, s, e) > 1e-6, "Close voicing should have signal");
+        assert!(rms(&with_open,  s, e) > 1e-6, "Open voicing should have signal");
+
+        let same = with_close[s..e]
+            .iter()
+            .zip(&with_open[s..e])
+            .all(|((cl, cr), (ol, or))| (cl - ol).abs() < 1e-9 && (cr - or).abs() < 1e-9);
+        assert!(!same, "Open voicing should produce a different waveform than close voicing");
+    }
 }
