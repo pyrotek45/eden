@@ -561,7 +561,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // but still process sample preview, note preview voices,
                     // and drain any remaining effect tails.
                     let frames = data.len() / channels;
-                    let mut frame_samples = vec![0.0_f32; frames];
+                    // Stereo preview frame buffer: (left, right)
+                    let mut frame_samples = vec![(0.0_f32, 0.0_f32); frames];
 
                     // ── Preview sample playback (plays even when transport is stopped) ──
                     let mut preview_pos_local = snap.preview_pos;
@@ -573,7 +574,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 break;
                             }
                             let preview_sample = snap.preview_samples[src_idx] * snap.master_volume;
-                            *s = preview_sample.clamp(-1.0, 1.0);
+                            let ps = preview_sample.clamp(-1.0, 1.0);
+                            // Preview samples are mono — write equally to both channels
+                            s.0 = ps;
+                            s.1 = ps;
                             preview_pos_local += 1;
                         }
                     }
@@ -697,17 +701,41 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 preview_rms_accum[ti] += post_mono * post_mono;
                             }
                         }
-                        // Mix all tracks to mono for preview output
-                        let mut mono = 0.0_f64;
+                        // Mix all tracks to stereo with equal-power panning
+                        let mut mix_l = 0.0_f64;
+                        let mut mix_r = 0.0_f64;
                         for (ti, track) in snap.tracks.iter().enumerate() {
                             if ti >= num_tracks {
                                 break;
                             }
                             let (tl, tr) = per_track_sample[ti];
-                            mono += (tl + tr) * 0.5 * track.volume as f64;
+                            let theta = ((track.pan as f64) + 1.0) * 0.5
+                                * std::f64::consts::FRAC_PI_2;
+                            let pan_l = crate::modules::fast_cos(theta);
+                            let pan_r = crate::modules::fast_sin(theta);
+                            mix_l += tl * pan_l * track.volume as f64;
+                            mix_r += tr * pan_r * track.volume as f64;
                         }
-                        frame_samples[fi] +=
-                            (mono * snap.master_volume as f64).clamp(-1.0, 1.0) as f32;
+                        // Apply master rack effects to preview stereo mix
+                        for (fi, (_, fx_params)) in snap.master_effects.iter().enumerate() {
+                            if fi < master_effects.len() {
+                                let (ml, mr) = master_effects[fi].1.process_sidechain(
+                                    mix_l,
+                                    mix_r,
+                                    mix_l,
+                                    mix_r,
+                                    fx_params,
+                                    sample_rate,
+                                );
+                                mix_l = ml;
+                                mix_r = mr;
+                            }
+                        }
+                        let mv = snap.master_volume as f64;
+                        frame_samples[fi].0 =
+                            (frame_samples[fi].0 as f64 + mix_l * mv).clamp(-1.0, 1.0) as f32;
+                        frame_samples[fi].1 =
+                            (frame_samples[fi].1 as f64 + mix_r * mv).clamp(-1.0, 1.0) as f32;
                     }
                     // Remove dead voices
                     voices.retain(|v| !voice_is_done(v));
@@ -729,15 +757,22 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                     }
 
-                    // Expand to channels + write back
+                    // Expand to channels + write back (stereo)
                     for (fi, frame) in data.chunks_mut(channels).enumerate() {
-                        let s = if fi < frame_samples.len() {
+                        let (l, r) = if fi < frame_samples.len() {
                             frame_samples[fi]
                         } else {
-                            0.0
+                            (0.0, 0.0)
                         };
-                        for ch in frame.iter_mut() {
-                            *ch = s;
+                        if channels >= 2 {
+                            frame[0] = l;
+                            frame[1] = r;
+                            for ch in frame.iter_mut().skip(2) {
+                                *ch = 0.0;
+                            }
+                        } else {
+                            // Mono output: downmix
+                            frame[0] = (l + r) * 0.5;
                         }
                     }
 
@@ -783,11 +818,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 }
                             }
                         }
-                        // Update oscilloscope even when stopped
+                        // Update oscilloscope even when stopped (use L channel for display)
                         let osc_len = s.oscilloscope.len();
-                        for &sample in &frame_samples {
+                        for &(l, _r) in &frame_samples {
                             let w = s.osc_write % osc_len;
-                            s.oscilloscope[w] = sample;
+                            s.oscilloscope[w] = l;
                             s.osc_write += 1;
                         }
                         s.osc_write %= osc_len;

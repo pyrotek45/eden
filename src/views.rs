@@ -4390,10 +4390,16 @@ pub fn draw_bottom_panel(
     canvas.set_draw_color(handle_bg);
     let _ = canvas.fill_rect(Rect::new(0, panel_y, w as u32, handle_h as u32));
 
-    // Grip dots in center of handle
+    // Grip dots in center of handle — highlight zone when hovered for double-click
     {
         let gx = w / 2 - 20;
-        canvas.set_draw_color(Theme::c(state.theme.text_dim));
+        let dots_hover = input.mouse_in_rect(w / 2 - 30, panel_y, 60, handle_h);
+        let dot_color = if dots_hover {
+            Theme::c(state.theme.accent)
+        } else {
+            Theme::c(state.theme.text_dim)
+        };
+        canvas.set_draw_color(dot_color);
         for i in 0..5 {
             let _ = canvas.fill_rect(Rect::new(gx + i * 10, panel_y + handle_h / 2 - 1, 3, 3));
         }
@@ -4443,7 +4449,34 @@ pub fn draw_bottom_panel(
     let num_tabs = 4i32;
     let tabs_total_w = num_tabs * (tab_w + 3);
     let in_tab_area = input.mouse_in_rect(tab_start_x, panel_y, tabs_total_w, handle_h);
-    if handle_hover && !close_area && !in_tab_area && input.mouse_pressed {
+
+    // Double-click on dots zone: maximize / restore / close / open
+    let dots_zone = input.mouse_in_rect(w / 2 - 30, panel_y, 60, handle_h);
+    if dots_zone && input.mouse_pressed && !input.consumed {
+        if input.click_type == Some(crate::input::ClickType::Double) {
+            input.consumed = true;
+            if state.bottom_panel_open {
+                if state.bottom_panel_height >= state.bottom_panel_max_h() - 2 {
+                    // Already maximized → close
+                    state.bottom_panel_open = false;
+                } else {
+                    // Open → maximize to top
+                    state.bottom_panel_height = state.bottom_panel_max_h();
+                }
+            } else {
+                // Closed + double-click → open fully
+                state.bottom_panel_height = state.bottom_panel_max_h();
+                state.bottom_panel_open = true;
+            }
+        } else if !state.bottom_panel_open {
+            // Closed + single-click → open halfway
+            input.consumed = true;
+            state.bottom_panel_height = 280;
+            state.bottom_panel_open = true;
+        }
+    }
+
+    if handle_hover && !close_area && !in_tab_area && !dots_zone && input.mouse_pressed {
         state.bottom_panel_dragging = true;
     }
     if state.bottom_panel_dragging && input.mouse_down {
@@ -4497,6 +4530,12 @@ pub fn draw_bottom_panel(
                 state.bottom_panel_height = 280;
             }
         }
+    }
+
+    // Consume any unhandled press on the handle so it never bleeds through
+    // to the loop ruler behind it when the panel is dragged up over the ruler.
+    if handle_hover && input.mouse_pressed && !input.consumed {
+        input.consumed = true;
     }
 
     // ── Panel content ──
@@ -5143,11 +5182,11 @@ fn draw_instrument_rack(
             &state.theme,
             &ButtonParams {
                 id: toggle_id,
-                x: sx + slot_w - 54,
+                x: sx + slot_w - 58,
                 y: sy + 3,
-                width: 24,
+                width: 28,
                 height: 14,
-                label: if slot_enabled { "ON" } else { "off" }.into(),
+                label: if slot_enabled { "ON" } else { "OFF" }.into(),
                 toggled: slot_enabled,
                 icon: ButtonIcon::None,
                 hint: Some("Toggle effect on/off".into()),
@@ -7154,11 +7193,11 @@ fn draw_master_rack(
             &state.theme,
             &ButtonParams {
                 id: toggle_id,
-                x: sx + slot_w - 54,
+                x: sx + slot_w - 58,
                 y: sy + 3,
-                width: 24,
+                width: 28,
                 height: 14,
-                label: if slot_enabled { "ON" } else { "off" }.into(),
+                label: if slot_enabled { "ON" } else { "OFF" }.into(),
                 toggled: slot_enabled,
                 icon: ButtonIcon::None,
                 hint: Some("Toggle effect on/off".into()),
@@ -10586,8 +10625,23 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
     // Layer 0 — background elements (blocked when any overlay is active)
     draw_transport(canvas, bg!(input), state);
-    draw_loop_ruler(canvas, bg!(input), state);
-    draw_timeline_ruler(canvas, bg!(input), state);
+    // Block loop/timeline ruler input if the mouse is over the bottom panel handle,
+    // so the handle intercepts clicks before the ruler does.
+    {
+        let total_h = state.window_height as i32;
+        let panel_h = state.bottom_panel_effective_h();
+        let panel_y = total_h - panel_h;
+        let handle_h = state.bottom_panel_handle_h();
+        let w = state.window_width as i32;
+        let over_handle = input.mouse_in_rect(0, panel_y, w, handle_h + 4);
+        if over_handle {
+            draw_loop_ruler(canvas, &mut dead_input, state);
+            draw_timeline_ruler(canvas, &mut dead_input, state);
+        } else {
+            draw_loop_ruler(canvas, bg!(input), state);
+            draw_timeline_ruler(canvas, bg!(input), state);
+        }
+    }
     draw_mode_tabs(canvas, bg!(input), state);
     if state.sample_browser_open {
         draw_left_panel(canvas, bg!(input), state);
@@ -10601,8 +10655,8 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     // Re-draw rulers on top so they layer over the scrollbar that extends upward
     canvas.set_viewport(None);
     canvas.set_clip_rect(None);
-    draw_loop_ruler(canvas, bg!(input), state);
-    draw_timeline_ruler(canvas, bg!(input), state);
+    draw_loop_ruler(canvas, &mut dead_input, state);
+    draw_timeline_ruler(canvas, &mut dead_input, state);
 
     // ── Drag-drop handlers (background layer only) ────────────────────────────
     if layer == crate::state::UiLayer::Base {
