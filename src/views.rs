@@ -3576,9 +3576,16 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
     // Update rubberband extent while dragging
     if input.drag_widget == WidgetId::Rubberband && input.mouse_down {
+        // Compute clamp bounds before taking the mutable borrow on state.rubberband
+        let rb_clamp_x1 = lane_left;
+        let rb_clamp_x2 = lane_left + lane_area_w;
+        let rb_clamp_y1 = top;
+        let rb_clamp_y2 = (top + state.track_area_height()).min(state.bottom_panel_y());
         if let Some(ref mut rb) = state.rubberband {
-            rb.2 = input.mouse_x;
-            rb.3 = input.mouse_y;
+            // Clamp the drag extent to the visible lane area so the rect doesn't
+            // grow outside the window when the mouse leaves the arrangement.
+            rb.2 = input.mouse_x.clamp(rb_clamp_x1, rb_clamp_x2);
+            rb.3 = input.mouse_y.clamp(rb_clamp_y1, rb_clamp_y2);
         }
         // Live-select clips inside the rubberband
         if let Some((rx1, ry1, rx2, ry2)) = state.rubberband {
@@ -9241,14 +9248,22 @@ fn draw_left_panel_files(
                     state.push_status(format!("Added {} to clip manager", file_name));
                 } else {
                     state.sample_drag_path = Some(row.path.clone());
-                    // Cache the clip length in beats for the drag preview
+                    // Cache the clip length in beats for the drag preview.
+                    // Use waveform_cache (already loaded) when available to avoid
+                    // a redundant disk read and to guarantee the same duration
+                    // value that the right-handle resize will later clamp to.
                     let file_str = row.path.to_string_lossy().to_string();
-                    let clip_len_beats = if let Ok((samples, sr)) =
+                    let beats_per_sec = state.project.tempo_map.bpm_at(0.0) / 60.0;
+                    let clip_len_beats = if let Some((_, total_dur)) =
+                        state.waveform_cache.get(&file_str)
+                    {
+                        // Cache hit — use the exact same duration the handle-resize uses
+                        (*total_dur * beats_per_sec).max(0.01)
+                    } else if let Ok((samples, sr)) =
                         crate::audio::load_audio(std::path::Path::new(&file_str))
                     {
                         let duration_secs = samples.len() as f64 / sr as f64;
-                        let beats_per_sec = state.project.tempo_map.bpm_at(0.0) / 60.0;
-                        (duration_secs * beats_per_sec).max(1.0)
+                        (duration_secs * beats_per_sec).max(0.01)
                     } else {
                         4.0
                     };
@@ -9562,13 +9577,19 @@ fn draw_left_panel_files(
                             }
 
                             if !replaced_clip {
-                                // Calculate clip length from audio file duration
-                                let clip_len_beats = if let Ok((samples, sr)) =
+                                // Calculate clip length from audio file duration.
+                                // Prefer waveform_cache (same value the right-handle resize uses)
+                                // to avoid any mismatch from duplicate disk reads.
+                                let beats_per_sec = state.project.tempo_map.bpm_at(0.0) / 60.0;
+                                let clip_len_beats = if let Some((_, total_dur)) =
+                                    state.waveform_cache.get(&file_str)
+                                {
+                                    (*total_dur * beats_per_sec).max(0.01)
+                                } else if let Ok((samples, sr)) =
                                     crate::audio::load_audio(std::path::Path::new(&file_str))
                                 {
                                     let duration_secs = samples.len() as f64 / sr as f64;
-                                    let beats_per_sec = state.project.tempo_map.bpm_at(0.0) / 60.0;
-                                    (duration_secs * beats_per_sec).max(1.0)
+                                    (duration_secs * beats_per_sec).max(0.01)
                                 } else {
                                     4.0
                                 };
@@ -16905,11 +16926,19 @@ fn draw_piano_roll_impl(
 
     // ── Draw-drag: drawing new note by click+drag ─────────────────────
     if let Some((note_beat, note_pitch, drag_sx, drag_sbeat)) = state.piano_roll_draw_drag {
-        // Live preview — snap length to grid
-        let raw_cur_beat = x_to_beat(input.mouse_x);
+        // When dragging left past the click point the note should start at the
+        // cursor and grow rightward toward where the mouse was clicked — mirroring
+        // the behaviour of every other DAW note-draw tool.
+        let raw_cur_beat = x_to_beat(input.mouse_x).max(0.0);
         let raw_len = (raw_cur_beat - drag_sbeat).abs().max(snap_beats.min(0.125));
         let note_len = pr_snap(raw_len).max(snap_beats.min(0.125));
-        let nx = beat_to_x(note_beat);
+        // Actual start: left edge of the note regardless of drag direction
+        let actual_start = if raw_cur_beat < drag_sbeat {
+            pr_snap(raw_cur_beat).max(0.0)
+        } else {
+            note_beat
+        };
+        let nx = beat_to_x(actual_start);
         let nw = (note_len * zoom).max(4.0) as i32;
         let ny = pitch_to_y(note_pitch as i32);
         let nc = state.theme.note_on;
@@ -16919,12 +16948,12 @@ fn draw_piano_roll_impl(
         let _ = canvas.draw_rect(Rect::new(nx, ny + 1, nw as u32, (NOTE_H - 2) as u32));
 
         if input.mouse_released {
-            // Commit note
+            // Commit note at the correct start position
             let final_len = pr_snap(note_len).max(snap_beats.min(0.125));
             let new_note = crate::models::MidiNote {
                 pitch: note_pitch,
                 velocity: 100,
-                start: note_beat,
+                start: actual_start,
                 length: final_len,
             };
             state.commands.execute(
@@ -16942,8 +16971,9 @@ fn draw_piano_roll_impl(
 
     // ── Rubberband select update ──────────────────────────────────────
     if let Some(ref mut rb) = state.piano_roll_rubberband {
-        rb.2 = input.mouse_x;
-        rb.3 = input.mouse_y;
+        // Clamp to the visible grid region so the rect doesn't escape the piano roll panel
+        rb.2 = input.mouse_x.clamp(KEY_W, vscroll_x);
+        rb.3 = input.mouse_y.clamp(grid_top, grid_top + grid_h);
         // Live-select overlapping notes
         let (rx1, ry1, rx2, ry2) = *rb;
         let sel_x1 = rx1.min(rx2);
