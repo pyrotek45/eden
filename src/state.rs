@@ -9,6 +9,9 @@ use crate::theme::Theme;
 
 use serde::{Deserialize, Serialize};
 
+/// Stereo waveform peak envelope: (left_max, left_min, right_max, right_min).
+pub type StereoWaveformPeaks = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+
 /// Get the user's home directory, falling back to current dir.
 fn dirs_home() -> std::path::PathBuf {
     std::env::var("HOME")
@@ -313,6 +316,8 @@ pub struct AppState {
     pub bottom_panel_tab: BottomPanelTab,
     /// Whether the user is currently dragging the bottom panel resize handle
     pub bottom_panel_dragging: bool,
+    /// Remembered click type from mouse-press, held until mouse-release fires
+    pub bottom_panel_click_type: Option<crate::input::ClickType>,
     // ── Audio metering ───────────────────────────────────────────────
     pub meters: MeterState,
     // ── UI Scaling ───────────────────────────────────────────────────
@@ -355,6 +360,16 @@ pub struct AppState {
     /// Target track for cross-track clip drag (None = same track)
     pub clip_drag_target_track: Option<u32>,
     pub clip_drag_target_valid: bool,
+
+    // ── Audio editor → arranger drag ─────────────────────────────────
+    /// Whether a Ctrl+drag from the audio editor is in progress
+    pub audio_drag_to_arranger: bool,
+    /// Source file path for the dragged audio region
+    pub audio_drag_source: String,
+    /// Offset into the source file (seconds) for the dragged region
+    pub audio_drag_offset: f64,
+    /// Length of the dragged region (seconds)
+    pub audio_drag_length_secs: f64,
 
     // ── Text field state ─────────────────────────────────────────────
     /// ID of the currently focused/active text field (0 = none)
@@ -404,8 +419,6 @@ pub struct AppState {
     pub piano_roll_loop_len_idx: usize,
     /// Whether the velocity editor lane is visible in the piano roll
     pub velocity_editor_visible: bool,
-    /// Whether notes are auditioned (play sound) when drawing in the piano roll
-    pub piano_roll_audition_on_draw: bool,
     /// Whether the piano roll local playhead is playing
     pub piano_roll_playing: bool,
     // ── Clip manager ─────────────────────────────────────────────────
@@ -436,6 +449,10 @@ pub struct AppState {
     pub sample_preview_path: Option<std::path::PathBuf>,
     /// Set to true when a new preview should be loaded and played
     pub sample_preview_trigger: bool,
+    /// Start sample offset for preview playback (in output samples, 0 = from beginning)
+    pub sample_preview_start_sample: usize,
+    /// End sample boundary for preview playback (in output samples, 0 = play to file end)
+    pub sample_preview_end_sample: usize,
     /// Preview notes to send to audio thread: Vec of (track_idx, pitch, velocity)
     pub preview_notes: Vec<(usize, u8, u8)>,
     /// Set to true when user triggers panic (stop all sounds)
@@ -488,6 +505,9 @@ pub struct AppState {
     // ── Focus / Context ──────────────────────────────────────────────
     /// Which panel currently owns keyboard input (Delete, etc.)
     pub focused_panel: FocusedPanel,
+    /// Paths of audio files whose samples need to be reloaded from disk
+    /// (set by views.rs after destructive edits, drained by main.rs).
+    pub audio_sample_invalidate: Vec<String>,
     /// Whether the add-track popup is open
     pub add_track_popup_open: bool,
     /// When true, the RACK panel shows the master output effects chain instead of a track
@@ -531,6 +551,8 @@ pub struct AppState {
     pub automation_drag_orig: Option<(f64, f32)>,
     /// Whether snap-to-grid is enabled in the automation editor
     pub automation_snap_enabled: bool,
+    /// Per-editor snap resolution index for the automation editor (into SNAP_RESOLUTIONS)
+    pub automation_snap_idx: usize,
     /// Horizontal scroll (in beats) for automation editor
     pub automation_scroll_x: f64,
     /// Horizontal zoom (pixels per beat) for automation editor
@@ -568,12 +590,24 @@ pub struct AppState {
     pub multi_pan_drag_origins: Vec<(u32, f32)>,
     /// Snapshot for multi-track volume/pan undo
     pub multi_slider_snapshot: Option<Project>,
+    /// Raw mouse X at start of multi-track volume drag (pixel-accurate delta)
+    pub multi_vol_drag_start_x: i32,
+    pub multi_vol_slider_w: i32,
+    /// Raw mouse X at start of multi-track pan drag
+    pub multi_pan_drag_start_x: i32,
     // ── Piano roll snap ──────────────────────────────────────────────
     /// Independent snap toggle for the piano roll
     pub piano_roll_snap_enabled: bool,
     // ── Audio editor snap ────────────────────────────────────────────
     /// Independent snap toggle for the audio editor
     pub audio_editor_snap_enabled: bool,
+    /// Per-editor snap resolution index for the audio editor (into SNAP_RESOLUTIONS)
+    pub audio_editor_snap_idx: usize,
+    // ── Audio editor fade ─────────────────────────────────────────────
+    /// Fade-in duration in seconds (0.0 = no fade)
+    pub audio_editor_fade_in: f64,
+    /// Fade-out duration in seconds (0.0 = no fade)
+    pub audio_editor_fade_out: f64,
     // ── Module drag state ─────────────────────────────────────────────
     /// Module name being dragged from the modules panel
     pub module_drag: Option<String>,
@@ -605,7 +639,11 @@ pub struct AppState {
     /// Key = source_file string, Value = (left_max, left_min, right_max, right_min).
     /// Each Vec has `num_peaks` entries representing amplitude envelope over the full file.
     pub waveform_stereo_cache:
-        std::collections::HashMap<String, (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)>,
+        std::collections::HashMap<String, StereoWaveformPeaks>,
+    /// Raw stereo waveform data for high-res audio editor rendering.
+    /// Key = source_file string, Value = (left_samples, right_samples, sample_rate).
+    pub waveform_raw_cache:
+        std::collections::HashMap<String, (Vec<f32>, Vec<f32>, u32)>,
     // ── Audio editor state ───────────────────────────────────────────
     /// Audio editor horizontal scroll (in samples fraction 0.0-1.0)
     pub audio_editor_scroll: f64,
@@ -615,11 +653,55 @@ pub struct AppState {
     pub audio_editor_selection: Option<(f64, f64)>,
     /// Audio editor tool: 0=select, 1=trim, 2=cut
     pub audio_editor_tool: u8,
+    // ── Audio editor playhead & loop ─────────────────────────────────
+    /// Audio editor independent playhead position (seconds within the audio file)
+    pub audio_editor_playhead: f64,
+    /// Whether the audio editor is currently playing its own preview
+    pub audio_editor_playing: bool,
+    /// Whether looping is enabled in the audio editor
+    pub audio_editor_loop_enabled: bool,
+    /// Loop region start in seconds (within the audio file)
+    pub audio_editor_loop_start: f64,
+    /// Loop region end in seconds (within the audio file)
+    pub audio_editor_loop_end: f64,
+    // ── Audio editor clipboard (for cut/paste) ───────────────────────
+    /// Clipboard buffer for audio samples (mono f32, cut from source file)
+    pub audio_clipboard: Option<Vec<f32>>,
+    /// Sample rate of the audio clipboard samples
+    pub audio_clipboard_sr: u32,
+    // ── Audio editor undo stack ──────────────────────────────────────
+    /// Stack of undo snapshots: (source_file_path, backup_file_path, description, project_snapshot).
+    /// Each destructive operation saves a backup of the file before modifying it.
+    /// The optional project snapshot restores clip metadata (offset, length) changed alongside the file.
+    pub audio_undo_stack: Vec<(String, String, String, Option<crate::models::Project>)>,
+    /// Redo stack (same format as undo). Cleared on new destructive operation.
+    pub audio_redo_stack: Vec<(String, String, String, Option<crate::models::Project>)>,
+    // ── Audio editor effects ────────────────────────────────────────
+    /// Currently selected effect index in the audio editor effects dropdown
+    pub audio_editor_effect_idx: usize,
     /// Recently opened project paths (newest first)
     pub recent_projects: Vec<String>,
     // ── Help screen ──────────────────────────────────────────────────
     /// Whether the help/shortcut overlay is visible
     pub help_screen_visible: bool,
+    /// Currently selected tab index in the help screen
+    pub help_screen_tab: usize,
+    // ── Audio editor export ────────────────────────────────────────
+    /// Whether the audio export popup is open
+    pub audio_export_popup_open: bool,
+    /// The filename for audio export
+    pub audio_export_name: String,
+    /// The directory path for audio export
+    pub audio_export_dir: String,
+    /// The source file path to export from
+    pub audio_export_source: String,
+    // ── MIDI export ──────────────────────────────────────────────────
+    /// Whether the MIDI export popup is open
+    pub midi_export_popup_open: bool,
+    /// The filename for MIDI export
+    pub midi_export_name: String,
+    /// The directory path for MIDI export
+    pub midi_export_dir: String,
     // ── Computer keyboard piano mode ─────────────────────────────────
     /// When true, QWERTY keys are mapped to MIDI notes for live playing
     pub piano_keyboard_mode: bool,
@@ -664,6 +746,7 @@ impl AppState {
             bottom_panel_open: false,
             bottom_panel_tab: BottomPanelTab::Mixer,
             bottom_panel_dragging: false,
+            bottom_panel_click_type: None,
             meters: MeterState::default(),
             ui_scale: 1.0,
             ui_scale_pending: 1.0,
@@ -685,6 +768,10 @@ impl AppState {
             clip_drag_ghost_positions: Vec::new(),
             clip_drag_target_track: None,
             clip_drag_target_valid: false,
+            audio_drag_to_arranger: false,
+            audio_drag_source: String::new(),
+            audio_drag_offset: 0.0,
+            audio_drag_length_secs: 0.0,
             text_field_active_id: 0,
             text_field_buffer: String::new(),
             text_field_cursor: 0,
@@ -707,7 +794,6 @@ impl AppState {
             piano_roll_playhead: 0.0,
             piano_roll_loop_len_idx: 0,
             velocity_editor_visible: true,
-            piano_roll_audition_on_draw: true,
             piano_roll_playing: false,
             clip_manager_scroll: 0,
             clip_sidebar_drag: None,
@@ -720,6 +806,8 @@ impl AppState {
             instruments_scroll: 0,
             sample_preview_path: None,
             sample_preview_trigger: false,
+            sample_preview_start_sample: 0,
+            sample_preview_end_sample: 0,
             preview_notes: Vec::new(),
             panic_triggered: false,
             sample_auto_play: true,
@@ -744,6 +832,7 @@ impl AppState {
             rack_reorder_drag: None,
             rack_reorder_target: None,
             focused_panel: FocusedPanel::Arrangement,
+            audio_sample_invalidate: Vec::new(),
             add_track_popup_open: false,
             master_rack_open: false,
             clip_lib_confirm_delete: None,
@@ -763,6 +852,7 @@ impl AppState {
             automation_drag_idx: None,
             automation_drag_orig: None,
             automation_snap_enabled: true,
+            automation_snap_idx: 2, // default 1/4 note
             automation_scroll_x: 0.0,
             automation_zoom_x: 40.0,
             automation_selected: Vec::new(),
@@ -780,8 +870,14 @@ impl AppState {
             multi_vol_drag_origins: Vec::new(),
             multi_pan_drag_origins: Vec::new(),
             multi_slider_snapshot: None,
+            multi_vol_drag_start_x: 0,
+            multi_vol_slider_w: 1,
+            multi_pan_drag_start_x: 0,
             piano_roll_snap_enabled: true,
             audio_editor_snap_enabled: true,
+            audio_editor_snap_idx: 2, // default 1/4 note
+            audio_editor_fade_in: 0.0,
+            audio_editor_fade_out: 0.0,
             audio_device_names: Vec::new(),
             audio_device_idx: 0,
             audio_device_changed: false,
@@ -791,15 +887,34 @@ impl AppState {
             hover_last_widget: crate::input::WidgetId::None,
             waveform_cache: std::collections::HashMap::new(),
             waveform_stereo_cache: std::collections::HashMap::new(),
+            waveform_raw_cache: std::collections::HashMap::new(),
             audio_editor_scroll: 0.0,
             audio_editor_zoom: 1.0,
             audio_editor_selection: None,
             audio_editor_tool: 0,
+            audio_editor_playhead: 0.0,
+            audio_editor_playing: false,
+            audio_editor_loop_enabled: false,
+            audio_editor_loop_start: 0.0,
+            audio_editor_loop_end: 0.0,
+            audio_clipboard: None,
+            audio_clipboard_sr: 44100,
+            audio_undo_stack: Vec::new(),
+            audio_redo_stack: Vec::new(),
+            audio_editor_effect_idx: 0,
+            audio_export_popup_open: false,
+            audio_export_name: String::new(),
+            audio_export_dir: String::new(),
+            audio_export_source: String::new(),
+            midi_export_popup_open: false,
+            midi_export_name: String::new(),
+            midi_export_dir: String::new(),
             module_drag: None,
             module_drag_insert_idx: None,
             module_drag_replace_idx: None,
             recent_projects: Vec::new(),
             help_screen_visible: false,
+            help_screen_tab: 0,
             piano_keyboard_mode: false,
             piano_keyboard_octave: 4,
             piano_keyboard_held: std::collections::HashSet::new(),
@@ -1175,6 +1290,42 @@ impl AppState {
             let (l_max, l_min, r_max, r_min) = load_waveform_stereo(path, 4096);
             self.waveform_stereo_cache
                 .insert(path.clone(), (l_max, l_min, r_max, r_min));
+        }
+        // Load raw stereo data for audio editor high-res rendering (one file at a time)
+        let ae_source: Option<String> = if let Some((track_id, clip_idx)) = self.selected_clip {
+            self.project
+                .tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .and_then(|t| t.clips.get(clip_idx))
+                .and_then(|c| {
+                    if let Clip::Audio(ac) = c {
+                        if !ac.source_file.is_empty() {
+                            Some(ac.source_file.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+        if let Some(sf) = ae_source {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.waveform_raw_cache.entry(sf) {
+                let path_ref = std::path::Path::new(e.key());
+                if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path_ref) {
+                    let (left, right) = if channels >= 2 {
+                        let l: Vec<f32> = raw.chunks(channels).map(|ch| ch[0]).collect();
+                        let r: Vec<f32> = raw.chunks(channels).map(|ch| ch[1.min(channels - 1)]).collect();
+                        (l, r)
+                    } else {
+                        (raw.clone(), raw)
+                    };
+                    e.insert((left, right, sr));
+                }
+            }
         }
     }
 }

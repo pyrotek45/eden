@@ -20,9 +20,29 @@ use std::sync::{
 };
 
 use crate::modules::{
-    create_effect, create_instrument, voice_is_done, EffectModule, InstrumentModule, ModuleExtra,
-    ModuleVoice,
+    create_effect, create_instrument, create_midi_effect, voice_is_done, EffectModule,
+    InstrumentModule, MidiContext, MidiEffect, MidiEvent, ModuleExtra, ModuleVoice,
 };
+
+// ── MIDI effect chain helper ─────────────────────────────────────────
+
+/// Run `events` through every MIDI effect instance in `chain`, using the
+/// matching param slices from `param_slices`.  Returns the final event list.
+fn run_midi_chain<'a>(
+    mut events: Vec<MidiEvent>,
+    chain: &'a mut [Box<dyn MidiEffect>],
+    param_slices: impl Iterator<Item = &'a Vec<(String, f32)>>,
+    pos_beats: f64,
+    prev_beats: f64,
+    bpm: f64,
+    sample_rate: f64,
+) -> Vec<MidiEvent> {
+    for (fx, params) in chain.iter_mut().zip(param_slices) {
+        let ctx = MidiContext { pos_beats, prev_beats, bpm, sample_rate, params: params.as_slice() };
+        events = fx.process(events, &ctx);
+    }
+    events
+}
 
 // ── Shared state (UI → audio) ─────────────────────────────────────────
 
@@ -61,13 +81,20 @@ pub struct AudioShared {
     pub seek_pending: bool,
     // ── Sample preview ───────────────────────────────────────────────
     /// Mono sample data for preview playback (loaded from WAV/FLAC)
-    pub preview_samples: Vec<f32>,
+    pub preview_samples: Arc<Vec<f32>>,
     /// Current playback position in the preview buffer (in samples)
     pub preview_pos: usize,
     /// Whether preview is actively playing
     pub preview_playing: bool,
     /// Sample rate of the loaded preview file (for resampling)
     pub preview_sample_rate: u32,
+    /// End boundary for preview playback (in output samples, 0 = play to end).
+    /// When non-zero, playback stops when preview_pos reaches this value.
+    pub preview_end_sample: usize,
+    /// Whether preview playback should loop (audio editor loop feature).
+    pub preview_loop_enabled: bool,
+    /// Start position to loop back to (in output samples). Used when preview_loop_enabled is true.
+    pub preview_loop_start: usize,
     // ── MIDI note preview ────────────────────────────────────────────
     /// When set: list of (track_index, pitch, velocity) — audio thread spawns voices
     pub preview_notes: Vec<(usize, u8, u8)>,
@@ -76,6 +103,10 @@ pub struct AudioShared {
     pub preview_sustain: bool,
     /// Pitches to immediately release (key-up from piano keyboard mode).
     pub preview_note_off: Vec<u8>,
+    /// Currently-held keyboard pitches per track for the keyboard-mode arp clock.
+    /// Each entry is (track_index, sorted list of held MIDI pitches).
+    /// Updated every UI frame; audio thread uses this to drive the arp when transport is stopped.
+    pub preview_held_pitches: Vec<(usize, Vec<u8>)>,
     /// When true, kill all voices immediately (panic button).
     pub panic: bool,
     /// Master rack effect chain: list of (effect_name, params).
@@ -166,13 +197,17 @@ impl Default for AudioShared {
             track_effect_gr: Vec::new(),
             master_effect_gr: Vec::new(),
             seek_pending: false,
-            preview_samples: Vec::new(),
+            preview_samples: Arc::new(Vec::new()),
             preview_pos: 0,
             preview_playing: false,
             preview_sample_rate: 44100,
+            preview_end_sample: 0,
+            preview_loop_enabled: false,
+            preview_loop_start: 0,
             preview_notes: Vec::new(),
             preview_sustain: false,
             preview_note_off: Vec::new(),
+            preview_held_pitches: Vec::new(),
             panic: false,
             master_effects: Vec::new(),
         }
@@ -182,6 +217,42 @@ impl Default for AudioShared {
 pub type SharedAudio = Arc<Mutex<AudioShared>>;
 
 // ── WAV file loading ──────────────────────────────────────────────────
+
+/// Save mono f32 samples to a WAV file (32-bit float, mono).
+/// Used by the audio editor for destructive edits (TRIM, CUT).
+pub fn save_wav_mono(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> Result<(), String> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)
+        .map_err(|e| format!("WAV create error: {}", e))?;
+    for &s in samples {
+        writer.write_sample(s).map_err(|e| format!("WAV write error: {}", e))?;
+    }
+    writer.finalize().map_err(|e| format!("WAV finalize error: {}", e))?;
+    Ok(())
+}
+
+/// Save interleaved stereo f32 samples to a WAV file (32-bit float, stereo).
+/// Used by the audio editor for destructive edits on stereo files.
+pub fn save_wav_stereo(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> Result<(), String> {
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)
+        .map_err(|e| format!("WAV create error: {}", e))?;
+    for &s in samples {
+        writer.write_sample(s).map_err(|e| format!("WAV write error: {}", e))?;
+    }
+    writer.finalize().map_err(|e| format!("WAV finalize error: {}", e))?;
+    Ok(())
+}
 
 /// Load a WAV file and return mono f32 samples + sample rate.
 /// Handles 16-bit, 24-bit, 32-bit int and 32-bit float formats.
@@ -375,6 +446,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         // Keyed by track index.  Rebuilt when module names change.
         let mut track_instruments: Vec<Option<(String, Box<dyn InstrumentModule>)>> = Vec::new();
         let mut track_effects: Vec<Vec<(String, Box<dyn EffectModule>)>> = Vec::new();
+        // Persistent per-track MIDI effect instances (one Vec per track).
+        // Rebuilt when midi_effect_slots change, like track_effects above.
+        let mut track_midi_effects: Vec<Vec<Box<dyn MidiEffect>>> = Vec::new();
         // Persistent master rack effect instances (applied to the stereo mix).
         let mut master_effects: Vec<(String, Box<dyn EffectModule>)> = Vec::new();
 
@@ -386,6 +460,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
 
         // Per-track arp state: (step_index, last_step_beat, held_pitches)
         let mut track_arp_state: Vec<(usize, f64, Vec<u8>)> = Vec::new();
+        // Independent beat clock for keyboard/preview arp (always advances at BPM speed,
+        // separate from the transport position so the arp works when transport is stopped).
+        let mut keyboard_arp_beat: f64 = 0.0;
+        // Per-track keyboard arp state: (step_index, last_beat)
+        let mut keyboard_arp_state: Vec<(usize, f64)> = Vec::new();
 
         let stream = match device.build_output_stream(
             &config.into(),
@@ -395,6 +474,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 let mut pending_preview: Vec<(usize, u8, u8)> = Vec::new();
                 let mut pending_note_offs: Vec<u8> = Vec::new();
                 let mut sustain_mode = false;
+                let mut cur_held_pitches: Vec<(usize, Vec<u8>)> = Vec::new();
                 let snap: AudioShared = match shared_cb.try_lock() {
                     Ok(mut s) => {
                         // If UI requested a seek, jump to that position, clear voices,
@@ -413,6 +493,18 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             for (_, fx) in master_effects.iter_mut() {
                                 fx.reset();
                             }
+                            // Reset arp state so the arp re-fires from the new position.
+                            for arp in track_arp_state.iter_mut() {
+                                arp.0 = 0;
+                                arp.1 = -999.0;
+                                arp.2.clear();
+                            }
+                            // Reset MIDI effect state (e.g. arp step counters) on seek.
+                            for chain in track_midi_effects.iter_mut() {
+                                for fx in chain.iter_mut() {
+                                    fx.reset();
+                                }
+                            }
                             let target = s.position_beats;
                             pos_cb.store(target.to_bits(), Ordering::Relaxed);
                         }
@@ -427,9 +519,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         // Extract note-offs (piano key releases)
                         pending_note_offs = std::mem::take(&mut s.preview_note_off);
                         sustain_mode = s.preview_sustain;
-                        let clone = s.clone();
-                        prev_snapshot = Some(clone.clone());
-                        clone
+                        // Snapshot the currently-held keyboard pitches (for keyboard arp)
+                        cur_held_pitches = s.preview_held_pitches.clone();
+                        let snap = s.clone();
+                        prev_snapshot = Some(snap.clone());
+                        snap
                     }
                     Err(_) => {
                         // UI thread is writing — reuse last good snapshot
@@ -440,109 +534,94 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
                 };
 
-                // Handle note-off signals (piano key released)
+                // Handle note-off signals (piano key released).
+                // Match by original_pitch so MIDI-effect-expanded voices (e.g. Chord)
+                // are also released even though their .pitch differs from the key pressed.
                 for off_pitch in &pending_note_offs {
                     for voice in voices.iter_mut() {
-                        if voice.pitch == *off_pitch && !voice.released {
+                        if (voice.original_pitch == *off_pitch || voice.pitch == *off_pitch)
+                            && !voice.released
+                        {
                             voice.released = true;
                         }
                     }
                 }
 
-                // Handle preview notes from UI (piano key clicks)
+                // Handle preview notes from UI (piano key clicks / keyboard mode).
+                // For tracks with an Arpeggiator, pressing a key updates the keyboard arp held
+                // set and lets the keyboard arp clock fire voices; no direct spawn here.
+                // For all other MIDI effects (Chord, Transpose, Velocity) spawn voices normally.
                 for (preview_ti, preview_pitch, preview_vel) in &pending_preview {
                     if *preview_ti < snap.tracks.len() {
                         let track = &snap.tracks[*preview_ti];
                         let vel = *preview_vel as f32 / 127.0;
 
-                        // Apply MIDI effects (same processing as playback)
-                        let mut note_events: Vec<(u8, f32)> = vec![(*preview_pitch, vel)];
-                        for (effect_name, params) in &track.midi_effect_slots {
-                            let get = |k: &str| -> f32 {
-                                params
+                        // Ensure MIDI effect instances exist for this track.
+                        while track_midi_effects.len() <= *preview_ti {
+                            track_midi_effects.push(Vec::new());
+                        }
+                        let midi_changed = track.midi_effect_slots.len() != track_midi_effects[*preview_ti].len()
+                            || track.midi_effect_slots.iter().zip(track_midi_effects[*preview_ti].iter())
+                                .any(|((want, _), have)| want != have.name());
+                        if midi_changed {
+                            let mut new_mfx: Vec<Box<dyn MidiEffect>> = Vec::new();
+                            for (fx_name, _) in &track.midi_effect_slots {
+                                let existing = track_midi_effects[*preview_ti]
                                     .iter()
-                                    .find(|(id, _)| id == k)
-                                    .map(|(_, v)| *v)
-                                    .unwrap_or(0.0)
-                            };
-                            match effect_name.as_str() {
-                                "Transpose" => {
-                                    let semitones = get("semitones") as i32;
-                                    let octave = get("octave") as i32;
-                                    let shift = semitones + octave * 12;
-                                    note_events = note_events
-                                        .into_iter()
-                                        .map(|(p, v)| {
-                                            let new_p = (p as i32 + shift).clamp(0, 127) as u8;
-                                            (new_p, v)
-                                        })
-                                        .collect();
+                                    .position(|m| m.name() == fx_name.as_str());
+                                if let Some(i) = existing {
+                                    new_mfx.push(track_midi_effects[*preview_ti].remove(i));
+                                } else if let Some(m) = create_midi_effect(fx_name) {
+                                    new_mfx.push(m);
                                 }
-                                "Velocity" => {
-                                    let amount = get("amount");
-                                    let curve = get("curve");
-                                    let min_vel = get("min_vel") / 127.0;
-                                    let max_vel = get("max_vel") / 127.0;
-                                    note_events = note_events
-                                        .into_iter()
-                                        .map(|(p, v)| {
-                                            let curved = if curve > 0.5 {
-                                                v.powf(1.0 / (curve * 2.0).max(0.01))
-                                            } else {
-                                                v.powf((1.0 - curve) * 2.0)
-                                            };
-                                            let new_v = (curved + amount).clamp(min_vel, max_vel);
-                                            (p, new_v)
-                                        })
-                                        .collect();
-                                }
-                                "Chord" => {
-                                    let chord_type = get("type") as i32;
-                                    let voicing = get("voicing") as i32;
-                                    let intervals: &[i32] = match chord_type {
-                                        0 => &[4i32, 7],
-                                        1 => &[3i32, 7],
-                                        2 => &[4i32, 7, 10],
-                                        3 => &[3i32, 7, 10],
-                                        4 => &[5i32, 7],
-                                        5 => &[3i32, 6],
-                                        _ => &[4i32, 7],
-                                    };
-                                    let mut expanded = note_events.clone();
-                                    for &(base_p, base_v) in &note_events {
-                                        for (idx, &interval) in intervals.iter().enumerate() {
-                                            let octave_shift = match voicing {
-                                                0 => 0,                      // close
-                                                1 => if idx % 2 == 1 { 12 } else { 0 }, // open
-                                                2 => (idx as i32) * 12,     // spread
-                                                _ => 0,
-                                            };
-                                            let new_p = (base_p as i32 + interval + octave_shift)
-                                                .clamp(0, 127) as u8;
-                                            expanded.push((new_p, base_v));
-                                        }
-                                    }
-                                    note_events = expanded;
-                                }
-                                _ => {}
                             }
+                            track_midi_effects[*preview_ti] = new_mfx;
                         }
 
-                        // Spawn voices for all resulting notes (after MIDI effects)
-                        for (pitch, final_vel) in note_events {
-                            // Remove any existing preview voices for this track+pitch
-                            voices.retain(|v| !(v.track_idx == *preview_ti && v.pitch == pitch));
-                            voices.push(ModuleVoice::new(
-                                midi_to_freq(pitch),
-                                final_vel,
-                                *preview_ti,
-                                pitch,
-                            ));
-                            // In sustain mode (piano keyboard mode), don't auto-release — wait for key-up
-                            // In normal mode (click preview), auto-release after 300ms
-                            if !sustain_mode {
-                                if let Some(v) = voices.last_mut() {
-                                    v.preview_samples_remaining = Some((sample_rate * 0.3) as u64);
+                        // Check if this track has an arp in its MIDI chain.
+                        let has_arp = track_midi_effects[*preview_ti].iter().any(|m| m.manages_voices());
+
+                        if has_arp {
+                            // For arp: the keyboard_arp clock will fire voices.
+                            // Key-press just ensures the held set is up to date (main.rs sends it).
+                            // Grow keyboard_arp_state as needed and reset beat so it fires immediately.
+                            while keyboard_arp_state.len() <= *preview_ti {
+                                keyboard_arp_state.push((0, -999.0));
+                            }
+                            // On first key-down (held was empty), reset so arp fires from beat 0.
+                            keyboard_arp_state[*preview_ti].1 = -999.0;
+                        } else {
+                            // No arp — run MIDI chain and spawn voices directly.
+                            let seed_events = vec![MidiEvent::new(*preview_pitch, vel)];
+                            let final_events = run_midi_chain(
+                                seed_events,
+                                &mut track_midi_effects[*preview_ti],
+                                track.midi_effect_slots.iter().map(|(_, p)| p),
+                                0.0, 0.0, snap.bpm, sample_rate,
+                            );
+
+                            // Spawn voices for all resulting notes (after MIDI effects)
+                            for ev in final_events {
+                                let pitch = ev.pitch;
+                                let final_vel = ev.velocity;
+                                // Remove any existing preview voices for this track+pitch
+                                voices.retain(|v| !(v.track_idx == *preview_ti && v.pitch == pitch));
+                                let mut new_voice = ModuleVoice::new(
+                                    midi_to_freq(pitch),
+                                    final_vel,
+                                    *preview_ti,
+                                    pitch,
+                                );
+                                // Keep original_pitch = the key the user pressed so note-off
+                                // (which sends preview_pitch) can release all chord-expanded voices.
+                                new_voice.original_pitch = *preview_pitch;
+                                voices.push(new_voice);
+                                // In sustain mode (piano keyboard mode), don't auto-release — wait for key-up
+                                // In normal mode (click preview), auto-release after 300ms
+                                if !sustain_mode {
+                                    if let Some(v) = voices.last_mut() {
+                                        v.preview_samples_remaining = Some((sample_rate * 0.3) as u64);
+                                    }
                                 }
                             }
                         }
@@ -561,6 +640,21 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                     }
                 }
+                // Detect transport start transition → reset arp state so last_beat doesn't
+                // refer to a position from a previous play session, causing the arp to
+                // skip firing until pos catches up past the old last_beat.
+                if !was_playing && snap.playing {
+                    for arp in track_arp_state.iter_mut() {
+                        arp.0 = 0;
+                        arp.1 = -999.0;
+                        arp.2.clear();
+                    }
+                    for chain in track_midi_effects.iter_mut() {
+                        for fx in chain.iter_mut() {
+                            fx.reset();
+                        }
+                    }
+                }
                 was_playing = snap.playing;
 
                 if !snap.playing {
@@ -575,10 +669,32 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     let mut preview_pos_local = snap.preview_pos;
                     if snap.preview_playing && !snap.preview_samples.is_empty() {
                         let preview_ratio = snap.preview_sample_rate as f64 / sample_rate;
+                        let preview_end = snap.preview_end_sample; // 0 = play to file end
+                        let loop_enabled = snap.preview_loop_enabled;
+                        let loop_start = snap.preview_loop_start;
                         for s in frame_samples.iter_mut() {
+                            // Check end boundary
+                            if preview_end > 0 && preview_pos_local >= preview_end {
+                                if loop_enabled {
+                                    preview_pos_local = loop_start;
+                                } else {
+                                    break;
+                                }
+                            }
                             let src_idx = (preview_pos_local as f64 * preview_ratio) as usize;
                             if src_idx >= snap.preview_samples.len() {
-                                break;
+                                if loop_enabled {
+                                    preview_pos_local = loop_start;
+                                    let src_idx2 = (preview_pos_local as f64 * preview_ratio) as usize;
+                                    if src_idx2 >= snap.preview_samples.len() { break; }
+                                    let ps = (snap.preview_samples[src_idx2] * snap.master_volume).clamp(-1.0, 1.0);
+                                    s.0 = ps;
+                                    s.1 = ps;
+                                    preview_pos_local += 1;
+                                    continue;
+                                } else {
+                                    break;
+                                }
                             }
                             let preview_sample = snap.preview_samples[src_idx] * snap.master_volume;
                             let ps = preview_sample.clamp(-1.0, 1.0);
@@ -634,7 +750,108 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // Process each voice sample-by-sample
                     let mut preview_rms_accum = vec![0.0_f32; num_tracks];
                     let mut preview_rms_pre_accum = vec![0.0_f32; num_tracks];
+                    let beats_per_sample_kbd = snap.bpm / 60.0 / sample_rate;
+                    #[allow(clippy::needless_range_loop)]
                     for fi in 0..frames {
+                        // ── Keyboard arp clock ──────────────────────────────────────────
+                        // Advance a beat clock driven by BPM (independent of transport).
+                        keyboard_arp_beat += beats_per_sample_kbd;
+                        // Grow state arrays as needed
+                        while keyboard_arp_state.len() < snap.tracks.len() {
+                            keyboard_arp_state.push((0, -999.0));
+                        }
+                        for (ti, track) in snap.tracks.iter().enumerate() {
+                            // Only process tracks with an arp
+                            let has_arp = ti < track_midi_effects.len()
+                                && track_midi_effects[ti].iter().any(|m| m.manages_voices());
+                            if !has_arp { continue; }
+                            // Find currently-held pitches for this track from UI snapshot
+                            let held: Vec<u8> = cur_held_pitches
+                                .iter()
+                                .find(|(t, _)| *t == ti)
+                                .map(|(_, pitches)| pitches.clone())
+                                .unwrap_or_default();
+                            if held.is_empty() {
+                                // No keys held — release arp voices and reset step
+                                for v in voices.iter_mut() {
+                                    if v.track_idx == ti && !v.released
+                                        && v.preview_samples_remaining.is_none()
+                                    {
+                                        v.released = true;
+                                    }
+                                }
+                                keyboard_arp_state[ti] = (0, -999.0);
+                                continue;
+                            }
+                            // Find arp params
+                            let arp_params_opt = track
+                                .midi_effect_slots
+                                .iter()
+                                .find(|(n, _)| n == "Arpeggiator")
+                                .map(|(_, p)| p);
+                            if let Some(arp_params) = arp_params_opt {
+                                let get_arp = |k: &str, def: f32| -> f32 {
+                                    arp_params.iter().find(|(id, _)| id == k)
+                                        .map(|(_, v)| *v).unwrap_or(def)
+                                };
+                                let rate_beats = get_arp("rate", 0.25) as f64;
+                                let octaves    = get_arp("octaves", 1.0) as i32;
+                                let pattern    = get_arp("pattern", 0.0) as i32;
+                                let vel_default = track.volume;
+                                let (ref mut step, ref mut last_beat) = keyboard_arp_state[ti];
+
+                                // Build pool
+                                let mut pool: Vec<u8> = Vec::new();
+                                for oct in 0..octaves {
+                                    for &p in &held {
+                                        pool.push((p as i32 + oct * 12).clamp(0, 127) as u8);
+                                    }
+                                }
+                                match pattern {
+                                    1 => pool.reverse(),
+                                    2 => {
+                                        let mut down = pool.clone();
+                                        down.reverse();
+                                        if down.len() > 1 {
+                                            pool.extend_from_slice(&down[1..down.len()-1]);
+                                        }
+                                    }
+                                    3 => {
+                                        let seed = (keyboard_arp_beat * 1000.0) as u64;
+                                        for i in (1..pool.len()).rev() {
+                                            let j = (seed.wrapping_mul(6364136223846793005)
+                                                .wrapping_add(1442695040888963407) >> 33) as usize
+                                                % (i + 1);
+                                            pool.swap(i, j);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                if pool.is_empty() { continue; }
+
+                                let fire = if *last_beat < 0.0 { true } else {
+                                    let steps_now  = (keyboard_arp_beat / rate_beats).floor() as usize;
+                                    let steps_last = (*last_beat         / rate_beats).floor() as usize;
+                                    steps_now > steps_last
+                                };
+                                if fire {
+                                    // Release previous arp voice on this track
+                                    for v in voices.iter_mut() {
+                                        if v.track_idx == ti && !v.released
+                                            && v.preview_samples_remaining.is_none()
+                                        {
+                                            v.released = true;
+                                        }
+                                    }
+                                    let idx = *step % pool.len();
+                                    let pitch = pool[idx];
+                                    voices.push(ModuleVoice::new(midi_to_freq(pitch), vel_default, ti, pitch));
+                                    *step = (*step + 1) % pool.len().max(1);
+                                    *last_beat = keyboard_arp_beat;
+                                }
+                            }
+                        }
+
                         // Auto-release countdown for preview voices
                         for voice in voices.iter_mut() {
                             if let Some(remaining) = voice.preview_samples_remaining.as_mut() {
@@ -747,6 +964,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // Remove dead voices
                     voices.retain(|v| !voice_is_done(v));
 
+                    // Safety cap on voice count
+                    const MAX_VOICES_STOPPED: usize = 256;
+                    if voices.len() > MAX_VOICES_STOPPED {
+                        voices.drain(0..voices.len() - MAX_VOICES_STOPPED);
+                    }
+
                     // Count down tail drain timer
                     if tail_frames_remaining > 0 {
                         tail_frames_remaining = tail_frames_remaining.saturating_sub(frames);
@@ -788,7 +1011,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         s.preview_pos = preview_pos_local;
                         let preview_ratio = s.preview_sample_rate as f64 / sample_rate;
                         let src_idx = (preview_pos_local as f64 * preview_ratio) as usize;
-                        if src_idx >= s.preview_samples.len() && s.preview_playing {
+                        let past_end = s.preview_end_sample > 0
+                            && preview_pos_local >= s.preview_end_sample;
+                        if (src_idx >= s.preview_samples.len() || past_end) && s.preview_playing && !s.preview_loop_enabled {
                             s.preview_playing = false;
                         }
                         // Update track meters with preview voice levels so FX vis
@@ -874,6 +1099,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     while track_effects.len() < num_tracks {
                         track_effects.push(Vec::new());
                     }
+                    while track_midi_effects.len() < num_tracks {
+                        track_midi_effects.push(Vec::new());
+                    }
                     while track_arp_state.len() < num_tracks {
                         track_arp_state.push((0, -999.0, Vec::new()));
                     }
@@ -906,6 +1134,28 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 }
                             }
                             track_effects[ti] = new_fx;
+                        }
+                        // ── Sync MIDI effect instances ──
+                        let midi_changed = track.midi_effect_slots.len() != track_midi_effects[ti].len()
+                            || track
+                                .midi_effect_slots
+                                .iter()
+                                .zip(track_midi_effects[ti].iter())
+                                .any(|((want, _), have)| want != have.name());
+                        if midi_changed {
+                            let mut new_mfx: Vec<Box<dyn MidiEffect>> = Vec::new();
+                            for (fx_name, _) in &track.midi_effect_slots {
+                                // Reuse existing instance if possible (preserves arp state)
+                                let existing = track_midi_effects[ti]
+                                    .iter()
+                                    .position(|m| m.name() == fx_name.as_str());
+                                if let Some(i) = existing {
+                                    new_mfx.push(track_midi_effects[ti].remove(i));
+                                } else if let Some(m) = create_midi_effect(fx_name) {
+                                    new_mfx.push(m);
+                                }
+                            }
+                            track_midi_effects[ti] = new_mfx;
                         }
                     }
                     // ── Sync master rack effect instances ──
@@ -987,120 +1237,47 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     && clip_pos >= note_start
                                     && clip_pos < note_start + beats_per_sample * 2.0
                                     && !voices.iter().any(|v| {
-                                        v.track_idx == ti && v.pitch == note.pitch && !v.released
+                                        v.track_idx == ti && v.original_pitch == note.pitch && !v.released
                                     });
                                 if just_started || catch_on_start {
-                                    // ── Apply MIDI effects to get final (pitch, velocity) list ──
-                                    // Start with the original note and accumulate transformations
-                                    let mut note_events: Vec<(u8, f32)> = {
-                                        let vel = note.velocity as f32 / 127.0 * track.volume;
-                                        vec![(note.pitch, vel)]
-                                    };
+                                    let vel = note.velocity as f32 / 127.0 * track.volume;
+                                    let seed_events = vec![MidiEvent::new(note.pitch, vel)];
 
-                                    // Check if arp is in the chain
-                                    let has_arp = track
-                                        .midi_effect_slots
-                                        .iter()
-                                        .any(|(n, _)| n == "Arpeggiator");
+                                    // Check if arp is in the chain — arp manages its own voices
+                                    let has_arp = ti < track_midi_effects.len()
+                                        && track_midi_effects[ti].iter().any(|m| m.manages_voices());
 
-                                    for (effect_name, params) in &track.midi_effect_slots {
-                                        let get = |k: &str| -> f32 {
-                                            params
-                                                .iter()
-                                                .find(|(id, _)| id == k)
-                                                .map(|(_, v)| *v)
-                                                .unwrap_or(0.0)
-                                        };
-                                        match effect_name.as_str() {
-                                            "Transpose" => {
-                                                let semitones = get("semitones") as i32;
-                                                let octave = get("octave") as i32;
-                                                let shift = semitones + octave * 12;
-                                                note_events = note_events
-                                                    .into_iter()
-                                                    .map(|(p, v)| {
-                                                        let new_p =
-                                                            (p as i32 + shift).clamp(0, 127) as u8;
-                                                        (new_p, v)
-                                                    })
-                                                    .collect();
+                                    if has_arp {
+                                        // For arp: accumulate held notes; arp step logic fires below
+                                        if ti < track_arp_state.len() {
+                                            let held = &mut track_arp_state[ti].2;
+                                            if !held.contains(&note.pitch) {
+                                                held.push(note.pitch);
+                                                held.sort_unstable();
                                             }
-                                            "Velocity" => {
-                                                let amount = get("amount"); // -1..1
-                                                let curve = get("curve"); // 0..1
-                                                let min_vel = get("min_vel") / 127.0;
-                                                let max_vel = get("max_vel") / 127.0;
-                                                note_events = note_events
-                                                    .into_iter()
-                                                    .map(|(p, v)| {
-                                                        // Apply curve (gamma-like)
-                                                        let curved = if curve > 0.5 {
-                                                            v.powf(1.0 / (curve * 2.0).max(0.01))
-                                                        } else {
-                                                            v.powf((1.0 - curve) * 2.0)
-                                                        };
-                                                        let new_v = (curved + amount)
-                                                            .clamp(min_vel, max_vel);
-                                                        (p, new_v * track.volume)
-                                                    })
-                                                    .collect();
-                                            }
-                                            "Chord" => {
-                                                // chord_type: 0=maj,1=min,2=7th,3=min7,4=sus4,5=dim
-                                                let chord_type = get("type") as i32;
-                                                let voicing = get("voicing") as i32;
-                                                let intervals: &[i32] = match chord_type {
-                                                    0 => &[4i32, 7],     // major
-                                                    1 => &[3i32, 7],     // minor
-                                                    2 => &[4i32, 7, 10], // dominant 7th
-                                                    3 => &[3i32, 7, 10], // minor 7th
-                                                    4 => &[5i32, 7],     // sus4
-                                                    5 => &[3i32, 6],     // diminished
-                                                    _ => &[4i32, 7],
-                                                };
-                                                let mut expanded = note_events.clone();
-                                                for &(base_p, base_v) in &note_events {
-                                                    for (idx, &interval) in intervals.iter().enumerate() {
-                                                        let octave_shift = match voicing {
-                                                            0 => 0,                      // close
-                                                            1 => if idx % 2 == 1 { 12 } else { 0 }, // open
-                                                            2 => (idx as i32) * 12,     // spread
-                                                            _ => 0,
-                                                        };
-                                                        let new_p = (base_p as i32 + interval + octave_shift)
-                                                            .clamp(0, 127)
-                                                            as u8;
-                                                        expanded.push((new_p, base_v));
-                                                    }
-                                                }
-                                                note_events = expanded;
-                                            }
-                                            "Arpeggiator" => {
-                                                // Collect this note pitch into the arp held pool.
-                                                // Actual triggering is handled by the arp per-track
-                                                // step logic below the clip loop.
-                                                if ti < track_arp_state.len() {
-                                                    let held = &mut track_arp_state[ti].2;
-                                                    if !held.contains(&note.pitch) {
-                                                        held.push(note.pitch);
-                                                        held.sort_unstable();
-                                                    }
-                                                }
-                                                // Skip normal voice spawn — arp will handle it
-                                                note_events.clear();
-                                            }
-                                            _ => {}
                                         }
-                                    }
+                                    } else {
+                                        // Run the full MIDI effect chain
+                                        let final_events = if ti < track_midi_effects.len() {
+                                            run_midi_chain(
+                                                seed_events,
+                                                &mut track_midi_effects[ti],
+                                                track.midi_effect_slots.iter().map(|(_, p)| p),
+                                                pos, pos - beats_per_sample, snap.bpm, sample_rate,
+                                            )
+                                        } else {
+                                            vec![MidiEvent::new(note.pitch, vel)]
+                                        };
 
-                                    // Spawn voices for all resulting notes (not arp — handled separately)
-                                    if !has_arp {
-                                        for (pitch, vel) in note_events {
+                                        // Spawn voices for all resulting notes
+                                        for ev in final_events {
                                             if !voices.iter().any(|v| {
-                                                v.track_idx == ti && v.pitch == pitch && !v.released
+                                                v.track_idx == ti && v.pitch == ev.pitch && !v.released
                                             }) {
-                                                let freq = midi_to_freq(pitch);
-                                                voices.push(ModuleVoice::new(freq, vel, ti, pitch));
+                                                let freq = midi_to_freq(ev.pitch);
+                                                let mut voice = ModuleVoice::new(freq, ev.velocity, ti, ev.pitch);
+                                                voice.original_pitch = note.pitch;
+                                                voices.push(voice);
                                             }
                                         }
                                     }
@@ -1110,119 +1287,115 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
 
                         // ── Arp per-track step trigger ──
                         // For tracks with an Arpeggiator, generate stepped voices.
-                        let arp_slot = track
-                            .midi_effect_slots
-                            .iter()
-                            .find(|(n, _)| n == "Arpeggiator");
-                        if let Some((_, arp_params)) = arp_slot {
-                            let get_arp = |k: &str, default: f32| -> f32 {
-                                arp_params
-                                    .iter()
-                                    .find(|(id, _)| id == k)
-                                    .map(|(_, v)| *v)
-                                    .unwrap_or(default)
-                            };
-                            let rate_beats = get_arp("rate", 0.25) as f64; // beats per step
-                            let octaves = get_arp("octaves", 1.0) as i32;
-                            let pattern = get_arp("pattern", 0.0) as i32;
-                            let vel_default = track.volume;
+                        let has_arp_instance = ti < track_midi_effects.len()
+                            && track_midi_effects[ti].iter().any(|m| m.manages_voices());
+                        if has_arp_instance {
+                            // Find the arp params from the slot data
+                            let arp_params_opt = track
+                                .midi_effect_slots
+                                .iter()
+                                .find(|(n, _)| n == "Arpeggiator")
+                                .map(|(_, p)| p);
+                            if let Some(arp_params) = arp_params_opt {
+                                let get_arp = |k: &str, default: f32| -> f32 {
+                                    arp_params
+                                        .iter()
+                                        .find(|(id, _)| id == k)
+                                        .map(|(_, v)| *v)
+                                        .unwrap_or(default)
+                                };
+                                let rate_beats = get_arp("rate", 0.25) as f64;
+                                let octaves = get_arp("octaves", 1.0) as i32;
+                                let pattern = get_arp("pattern", 0.0) as i32;
+                                let vel_default = track.volume;
 
-                            if ti < track_arp_state.len() {
-                                let (ref mut step, ref mut last_beat, ref mut _held) =
-                                    track_arp_state[ti];
+                                if ti < track_arp_state.len() {
+                                    let (ref mut step, ref mut last_beat, ref mut _held) =
+                                        track_arp_state[ti];
 
-                                // Collect currently-active notes in all clips for this track
-                                let mut active_pitches: Vec<u8> = Vec::new();
-                                for clip in &track.midi_clips {
-                                    let clip_end = clip.start_beats + clip.length_beats;
-                                    if pos < clip.start_beats || pos >= clip_end {
-                                        continue;
-                                    }
-                                    let clip_pos = pos - clip.start_beats;
-                                    for note in &clip.notes {
-                                        if clip_pos >= note.start_beats
-                                            && clip_pos < note.start_beats + note.length_beats
-                                            && !active_pitches.contains(&note.pitch)
-                                        {
-                                            active_pitches.push(note.pitch);
+                                    // Collect currently-active notes in all clips for this track
+                                    let mut active_pitches: Vec<u8> = Vec::new();
+                                    for clip in &track.midi_clips {
+                                        let clip_end = clip.start_beats + clip.length_beats;
+                                        if pos < clip.start_beats || pos >= clip_end {
+                                            continue;
+                                        }
+                                        let clip_pos = pos - clip.start_beats;
+                                        for note in &clip.notes {
+                                            if clip_pos >= note.start_beats
+                                                && clip_pos < note.start_beats + note.length_beats
+                                                && !active_pitches.contains(&note.pitch)
+                                            {
+                                                active_pitches.push(note.pitch);
+                                            }
                                         }
                                     }
-                                }
-                                active_pitches.sort_unstable();
+                                    active_pitches.sort_unstable();
 
-                                // Build arp note pool across octaves
-                                let mut pool: Vec<u8> = Vec::new();
-                                for oct in 0..octaves {
-                                    for &p in &active_pitches {
-                                        let shifted = (p as i32 + oct * 12).clamp(0, 127) as u8;
-                                        pool.push(shifted);
-                                    }
-                                }
-                                // Apply pattern
-                                match pattern {
-                                    1 => pool.reverse(), // down
-                                    2 => {
-                                        // up-down
-                                        let mut down = pool.clone();
-                                        down.reverse();
-                                        if down.len() > 1 {
-                                            // avoid repeating top and bottom
-                                            pool.extend_from_slice(&down[1..down.len() - 1]);
+                                    // Build arp note pool across octaves
+                                    let mut pool: Vec<u8> = Vec::new();
+                                    for oct in 0..octaves {
+                                        for &p in &active_pitches {
+                                            let shifted = (p as i32 + oct * 12).clamp(0, 127) as u8;
+                                            pool.push(shifted);
                                         }
                                     }
-                                    3 => {
-                                        // random — deterministic shuffle using pos
-                                        let seed = (pos * 1000.0) as u64;
-                                        for i in (1..pool.len()).rev() {
-                                            let j = (seed
-                                                .wrapping_mul(6364136223846793005)
-                                                .wrapping_add(1442695040888963407)
-                                                >> 33)
-                                                as usize
-                                                % (i + 1);
-                                            pool.swap(i, j);
+                                    // Apply pattern
+                                    match pattern {
+                                        1 => pool.reverse(),
+                                        2 => {
+                                            let mut down = pool.clone();
+                                            down.reverse();
+                                            if down.len() > 1 {
+                                                pool.extend_from_slice(&down[1..down.len() - 1]);
+                                            }
                                         }
+                                        3 => {
+                                            let seed = (pos * 1000.0) as u64;
+                                            for i in (1..pool.len()).rev() {
+                                                let j = (seed
+                                                    .wrapping_mul(6364136223846793005)
+                                                    .wrapping_add(1442695040888963407)
+                                                    >> 33)
+                                                    as usize
+                                                    % (i + 1);
+                                                pool.swap(i, j);
+                                            }
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {} // 0 = up (default, already sorted)
-                                }
 
-                                if !pool.is_empty() {
-                                    // Check if it's time to fire the next arp step
-                                    let _step_beat = (*step as f64) * rate_beats;
-                                    let fire = if *last_beat < 0.0 {
-                                        // First trigger
-                                        true
+                                    if !pool.is_empty() {
+                                        let fire = if *last_beat < 0.0 {
+                                            true
+                                        } else {
+                                            let steps_now = (pos / rate_beats).floor() as usize;
+                                            let steps_last = (*last_beat / rate_beats).floor() as usize;
+                                            steps_now > steps_last
+                                        };
+
+                                        if fire {
+                                            for v in voices.iter_mut() {
+                                                if v.track_idx == ti && !v.released {
+                                                    v.released = true;
+                                                }
+                                            }
+                                            let pool_step = *step % pool.len();
+                                            let pitch = pool[pool_step];
+                                            let freq = midi_to_freq(pitch);
+                                            voices.push(ModuleVoice::new(freq, vel_default, ti, pitch));
+                                            *step = (*step + 1) % pool.len().max(1);
+                                            *last_beat = pos;
+                                        }
                                     } else {
-                                        // Check if we've crossed a step boundary
-                                        let steps_now = (pos / rate_beats).floor() as usize;
-                                        let steps_last = (*last_beat / rate_beats).floor() as usize;
-                                        steps_now > steps_last
-                                    };
-
-                                    if fire {
-                                        // Release any prior arp voices on this track
                                         for v in voices.iter_mut() {
                                             if v.track_idx == ti && !v.released {
                                                 v.released = true;
                                             }
                                         }
-
-                                        let pool_step = *step % pool.len();
-                                        let pitch = pool[pool_step];
-                                        let freq = midi_to_freq(pitch);
-                                        voices.push(ModuleVoice::new(freq, vel_default, ti, pitch));
-                                        *step = (*step + 1) % pool.len().max(1);
-                                        *last_beat = pos;
+                                        *step = 0;
+                                        *last_beat = -999.0;
                                     }
-                                } else {
-                                    // No notes held — release arp voices and reset step
-                                    for v in voices.iter_mut() {
-                                        if v.track_idx == ti && !v.released {
-                                            v.released = true;
-                                        }
-                                    }
-                                    *step = 0;
-                                    *last_beat = -999.0;
                                 }
                             }
                         }
@@ -1234,10 +1407,20 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         if voice.released {
                             continue; // already in release
                         }
+                        // Preview voices manage their own lifetime via preview_samples_remaining
+                        if voice.preview_samples_remaining.is_some() {
+                            continue;
+                        }
                         let track = &snap.tracks[voice.track_idx];
                         // If the track is muted or not soloed, keep the voice alive
                         // (don't release it) so it resumes naturally when unmuted.
                         if track.is_automation || track.mute || (any_solo && !track.solo) {
+                            continue;
+                        }
+                        // Tracks with arp-like effects manage their own voice lifecycle.
+                        let has_arp = voice.track_idx < track_midi_effects.len()
+                            && track_midi_effects[voice.track_idx].iter().any(|m| m.manages_voices());
+                        if has_arp {
                             continue;
                         }
                         let mut still_active = false;
@@ -1248,7 +1431,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             }
                             let clip_pos = pos - clip.start_beats;
                             for note in &clip.notes {
-                                if note.pitch == voice.pitch
+                                if note.pitch == voice.original_pitch
                                     && clip_pos >= note.start_beats
                                     && clip_pos < note.start_beats + note.length_beats
                                 {
@@ -1279,6 +1462,13 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
                     // Remove fully finished voices (amp envelope done)
                     voices.retain(|v| !voice_is_done(v));
+
+                    // Safety cap: prevent unbounded voice accumulation from causing
+                    // CPU overload / glitches over time. Keep newest voices.
+                    const MAX_VOICES: usize = 256;
+                    if voices.len() > MAX_VOICES {
+                        voices.drain(0..voices.len() - MAX_VOICES);
+                    }
 
                     // ── Synthesize all voices via module trait objects ──
                     // Reset per-track accumulators (allocated outside loop)
@@ -1331,17 +1521,21 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     * aclip.gain as f64
                                     * track.volume as f64;
 
-                                // Short linear fade-in/out at clip boundaries (64 samples)
+                                // Short linear fade at CLIP boundaries (64 samples)
                                 // to eliminate clicks at zero-crossing mismatches.
+                                // Use clip-relative sample position so fades always
+                                // happen at clip start/end regardless of offset.
                                 let fade_len = 64usize;
+                                let clip_sample = (clip_pos_secs * sample_rate) as usize;
+                                let clip_len_samples = (aclip.length_beats / beats_per_sec * sample_rate) as usize;
                                 // Fade in at clip start
-                                if src_idx < fade_len {
-                                    s *= src_idx as f64 / fade_len as f64;
+                                if clip_sample < fade_len {
+                                    s *= clip_sample as f64 / fade_len as f64;
                                 }
                                 // Fade out at clip end
-                                let samples_remaining = aclip.samples.len().saturating_sub(src_idx);
-                                if samples_remaining < fade_len {
-                                    s *= samples_remaining as f64 / fade_len as f64;
+                                let remaining = clip_len_samples.saturating_sub(clip_sample);
+                                if remaining < fade_len {
+                                    s *= remaining as f64 / fade_len as f64;
                                 }
 
                                 if ti < num_tracks {
@@ -1488,10 +1682,32 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 let mut preview_pos_local = snap.preview_pos;
                 if snap.preview_playing && !snap.preview_samples.is_empty() {
                     let preview_ratio = snap.preview_sample_rate as f64 / sample_rate;
+                    let preview_end = snap.preview_end_sample; // 0 = play to file end
+                    let loop_enabled = snap.preview_loop_enabled;
+                    let loop_start = snap.preview_loop_start;
                     for fi in 0..frames {
+                        // Check end boundary
+                        if preview_end > 0 && preview_pos_local >= preview_end {
+                            if loop_enabled {
+                                preview_pos_local = loop_start;
+                            } else {
+                                break;
+                            }
+                        }
                         let src_idx = (preview_pos_local as f64 * preview_ratio) as usize;
                         if src_idx >= snap.preview_samples.len() {
-                            break;
+                            if loop_enabled {
+                                preview_pos_local = loop_start;
+                                let src_idx2 = (preview_pos_local as f64 * preview_ratio) as usize;
+                                if src_idx2 >= snap.preview_samples.len() { break; }
+                                let ps = (snap.preview_samples[src_idx2] * snap.master_volume).clamp(-1.0, 1.0);
+                                frame_samples_l[fi] = (frame_samples_l[fi] + ps).clamp(-1.0, 1.0);
+                                frame_samples_r[fi] = (frame_samples_r[fi] + ps).clamp(-1.0, 1.0);
+                                preview_pos_local += 1;
+                                continue;
+                            } else {
+                                break;
+                            }
                         }
                         let preview_sample = snap.preview_samples[src_idx] * snap.master_volume;
                         frame_samples_l[fi] =
@@ -1611,7 +1827,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     if !s.preview_samples.is_empty() && s.preview_playing {
                         let preview_ratio = s.preview_sample_rate as f64 / sample_rate;
                         let src_idx = (preview_pos_local as f64 * preview_ratio) as usize;
-                        if src_idx >= s.preview_samples.len() {
+                        let past_end = s.preview_end_sample > 0
+                            && preview_pos_local >= s.preview_end_sample;
+                        if (src_idx >= s.preview_samples.len() || past_end) && !s.preview_loop_enabled {
                             s.preview_playing = false;
                         }
                     }

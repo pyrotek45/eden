@@ -22,7 +22,7 @@ thread_local! {
 /// Set the global font scale used by `draw_pixel_label`. Call once per frame
 /// with `state.font_scale` before drawing the UI.
 pub fn set_font_scale(scale: i32) {
-    FONT_SCALE.with(|s| s.set(scale.max(1).min(4)));
+    FONT_SCALE.with(|s| s.set(scale.clamp(1, 4)));
 }
 
 /// Get the current global font scale.
@@ -351,6 +351,7 @@ pub fn knob(
     changed
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_thick_arc(
     canvas: &mut Canvas<Window>,
     cx: f64,
@@ -576,6 +577,7 @@ pub enum ScrollbarDir {
     Vertical,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn scrollbar(
     canvas: &mut Canvas<Window>,
     input: &mut InputState,
@@ -637,8 +639,8 @@ pub fn scrollbar(
         track_rect.height() as i32,
     );
 
-    // Interaction: start drag on thumb press
-    if thumb_hover && input.mouse_pressed {
+    // Interaction: start drag on thumb press (only if not already consumed — e.g. by a squeeze handle)
+    if thumb_hover && input.mouse_pressed && !input.consumed {
         input.drag_widget = id;
         input.active_widget = id;
         input.drag_start_value = scroll as f64;
@@ -648,7 +650,7 @@ pub fn scrollbar(
     }
 
     // Click on track (outside thumb) — jump
-    if track_hover && !thumb_hover && input.mouse_pressed {
+    if track_hover && !thumb_hover && input.mouse_pressed && !input.consumed {
         let raw = match dir {
             ScrollbarDir::Horizontal => (input.mouse_x - x - thumb_len / 2) as f32 / travel as f32,
             ScrollbarDir::Vertical => (input.mouse_y - y - thumb_len / 2) as f32 / travel as f32,
@@ -709,7 +711,10 @@ pub fn scrollbar_with_squeeze(
 ) -> (f32, f32) {
     // (new_scroll, new_thumb_ratio)
     let thumb_ratio_clamped = thumb_ratio.clamp(0.05, 1.0);
-    const HANDLE_SIZE: i32 = 8;
+    // Visual size of squeeze handle nubs
+    const HANDLE_SIZE: i32 = 14;
+    // Extra pixels beyond the visual rect that still count as a hit (makes handles easy to grab)
+    const HIT_PAD: i32 = 4;
     let thumb_len = ((length as f32 * thumb_ratio_clamped) as i32).max(HANDLE_SIZE * 2 + 2);
     let travel = (length - thumb_len).max(1);
     let thumb_offset = (scroll.clamp(0.0, 1.0) * travel as f32) as i32;
@@ -736,22 +741,45 @@ pub fn scrollbar_with_squeeze(
         ),
     };
 
-    let lo_hover = input.mouse_in_rect(
-        lo_rect.x(),
-        lo_rect.y(),
-        lo_rect.width() as i32,
-        lo_rect.height() as i32,
-    );
-    let hi_hover = input.mouse_in_rect(
-        hi_rect.x(),
-        hi_rect.y(),
-        hi_rect.width() as i32,
-        hi_rect.height() as i32,
-    );
+    // Use padded hit rects so the handles are easy to grab even at small scrollbar heights
+    let lo_hit = match dir {
+        ScrollbarDir::Horizontal => Rect::new(
+            lo_rect.x() - HIT_PAD,
+            lo_rect.y() - HIT_PAD,
+            (lo_rect.width() as i32 + HIT_PAD * 2) as u32,
+            (lo_rect.height() as i32 + HIT_PAD * 2) as u32,
+        ),
+        ScrollbarDir::Vertical => Rect::new(
+            lo_rect.x() - HIT_PAD,
+            lo_rect.y() - HIT_PAD,
+            (lo_rect.width() as i32 + HIT_PAD * 2) as u32,
+            (lo_rect.height() as i32 + HIT_PAD * 2) as u32,
+        ),
+    };
+    let hi_hit = match dir {
+        ScrollbarDir::Horizontal => Rect::new(
+            hi_rect.x() - HIT_PAD,
+            hi_rect.y() - HIT_PAD,
+            (hi_rect.width() as i32 + HIT_PAD * 2) as u32,
+            (hi_rect.height() as i32 + HIT_PAD * 2) as u32,
+        ),
+        ScrollbarDir::Vertical => Rect::new(
+            hi_rect.x() - HIT_PAD,
+            hi_rect.y() - HIT_PAD,
+            (hi_rect.width() as i32 + HIT_PAD * 2) as u32,
+            (hi_rect.height() as i32 + HIT_PAD * 2) as u32,
+        ),
+    };
 
-    // Claim squeeze handle drag BEFORE the main scrollbar sees the press
-    // (prevents the scrollbar thumb from stealing the click)
-    if input.mouse_pressed && lo_hover && input.active_widget == WidgetId::None {
+    let lo_hover = input.mouse_in_rect(lo_hit.x(), lo_hit.y(), lo_hit.width() as i32, lo_hit.height() as i32);
+    let hi_hover = input.mouse_in_rect(hi_hit.x(), hi_hit.y(), hi_hit.width() as i32, hi_hit.height() as i32);
+
+    // Claim squeeze handle drag BEFORE the main scrollbar sees the press.
+    // We guard on drag_widget == None rather than !consumed: this ensures no
+    // other drag is already in progress, while not being blocked by consumed
+    // flags set by non-drag interactions (e.g. piano roll note clicks that call
+    // input.consume() even though they don't set drag_widget).
+    if input.mouse_pressed && lo_hover && input.drag_widget == WidgetId::None {
         input.drag_widget = squeeze_id_lo;
         input.active_widget = squeeze_id_lo;
         input.drag_start_value = thumb_ratio as f64;
@@ -760,7 +788,8 @@ pub fn scrollbar_with_squeeze(
             ScrollbarDir::Horizontal => input.mouse_x,
             ScrollbarDir::Vertical => input.mouse_y,
         };
-    } else if input.mouse_pressed && hi_hover && input.active_widget == WidgetId::None {
+        input.consumed = true;
+    } else if input.mouse_pressed && hi_hover && input.drag_widget == WidgetId::None {
         input.drag_widget = squeeze_id_hi;
         input.active_widget = squeeze_id_hi;
         input.drag_start_value = thumb_ratio as f64;
@@ -769,6 +798,7 @@ pub fn scrollbar_with_squeeze(
             ScrollbarDir::Horizontal => input.mouse_x,
             ScrollbarDir::Vertical => input.mouse_y,
         };
+        input.consumed = true;
     }
 
     // Main scrollbar (only processes the click if no squeeze handle is active)
@@ -1101,9 +1131,7 @@ pub struct ViewLayers<'a> {
 
 impl<'a> ViewLayers<'a> {
     pub fn new(input: &'a mut InputState) -> Self {
-        let mut dead = InputState::default();
-        dead.mouse_x = input.mouse_x;
-        dead.mouse_y = input.mouse_y;
+        let dead = InputState { mouse_x: input.mouse_x, mouse_y: input.mouse_y, ..Default::default() };
         ViewLayers { real: input, dead }
     }
 
@@ -1427,6 +1455,7 @@ pub fn button(
 
 // ── Small Toggle (Mute / Solo style) ─────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn toggle_button(
     canvas: &mut Canvas<Window>,
     input: &mut InputState,
@@ -1521,6 +1550,7 @@ pub struct TextFieldParams {
 
 /// Returns (committed: bool, new_value: Option<String>).
 /// When committed=true, new_value contains the final text.
+#[allow(clippy::too_many_arguments)]
 pub fn text_field(
     canvas: &mut Canvas<Window>,
     input: &mut InputState,
@@ -1705,6 +1735,7 @@ pub fn text_field(
 // Scroll wheel over the closed dropdown cycles through options.
 // Click opens/closes the popup list.
 
+#[allow(clippy::too_many_arguments)]
 pub fn dropdown(
     canvas: &mut Canvas<Window>,
     input: &mut InputState,
@@ -1853,11 +1884,78 @@ pub fn dropdown(
     changed
 }
 
+/// Redraw just the popup overlay for an open dropdown.
+/// Call this at the very end of your draw function (after all content)
+/// so the popup renders on top of everything.
+#[allow(clippy::too_many_arguments)]
+pub fn dropdown_popup_overlay(
+    canvas: &mut Canvas<Window>,
+    theme: &Theme,
+    id: u32,
+    x: i32,
+    y: i32,
+    _w_closed: i32,
+    h: i32,
+    w: i32,
+    options: &[&str],
+    selected: usize,
+    open_id: u32,
+    mouse_x: i32,
+    mouse_y: i32,
+) {
+    if open_id != id || options.is_empty() {
+        return;
+    }
+    canvas.set_clip_rect(None);
+    let item_h = h;
+    let popup_h = options.len() as i32 * item_h;
+    let popup_y = y + h;
+
+    // Shadow
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 100));
+    let _ = canvas.fill_rect(Rect::new(x + 2, popup_y + 2, w as u32, popup_h as u32));
+
+    // Background
+    canvas.set_draw_color(Theme::c(theme.panel_bg));
+    let _ = canvas.fill_rect(Rect::new(x, popup_y, w as u32, popup_h as u32));
+    canvas.set_draw_color(Theme::c(theme.accent));
+    let _ = canvas.draw_rect(Rect::new(x, popup_y, w as u32, popup_h as u32));
+
+    for (i, opt) in options.iter().enumerate() {
+        let iy = popup_y + i as i32 * item_h;
+        let item_hover = mouse_x >= x && mouse_x < x + w && mouse_y >= iy && mouse_y < iy + item_h;
+
+        if item_hover {
+            canvas.set_draw_color(Theme::c(theme.button_hover));
+            let _ = canvas.fill_rect(Rect::new(x, iy, w as u32, item_h as u32));
+        }
+        if i == selected {
+            canvas.set_draw_color(Theme::c(theme.accent_active));
+            let _ = canvas.fill_rect(Rect::new(x, iy, 3, item_h as u32));
+        }
+
+        draw_pixel_label(
+            canvas,
+            theme,
+            opt,
+            x + 6,
+            iy + (item_h - 10) / 2,
+            w - 10,
+            if i == selected {
+                Theme::c(theme.accent)
+            } else {
+                sdl2::pixels::Color::RGBA(210, 210, 210, 255)
+            },
+        );
+    }
+}
+
 // ── Number spinner ────────────────────────────────────────────────────
 //
 // Displays a numeric value. Scroll wheel or click+drag to change.
 // Returns true when value changes.
 
+#[allow(clippy::too_many_arguments)]
 pub fn number_spinner(
     canvas: &mut Canvas<Window>,
     input: &mut InputState,
@@ -1996,6 +2094,7 @@ pub fn draw_pixel_label(
 }
 
 /// Like `draw_pixel_label` but with a custom pixel scale multiplier.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_pixel_label_scaled(
     canvas: &mut Canvas<Window>,
     _theme: &Theme,
@@ -2182,6 +2281,7 @@ pub fn clip_hit_test(
     ClipHitZone::Body
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_clip_handles(
     canvas: &mut Canvas<Window>,
     theme: &Theme,

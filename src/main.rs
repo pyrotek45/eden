@@ -190,11 +190,7 @@ fn main() {
     // Default session file — named after the project if one exists, else fallback
     let default_save_fallback = "eden_session.eden.json";
     // Try to load any previously saved session (check fallback name first, then project-named)
-    let default_save = if std::path::Path::new(default_save_fallback).exists() {
-        default_save_fallback.to_string()
-    } else {
-        default_save_fallback.to_string()
-    };
+    let default_save = default_save_fallback.to_string();
     if std::path::Path::new(&default_save).exists() {
         match state.load_project(&default_save) {
             Ok(()) => {
@@ -277,12 +273,11 @@ fn main() {
                 Event::Quit { .. } => {
                     state.running = false;
                 }
-                Event::Window { win_event, .. } => {
-                    if let sdl2::event::WindowEvent::Resized(_w, _h) = win_event {
-                        // Dimensions will be recalculated from output_size()/scale in the render loop.
-                        // Don't set them here to avoid scale mismatch on HiDPI.
-                    }
+                Event::Window { win_event: sdl2::event::WindowEvent::Resized(_w, _h), .. } => {
+                    // Dimensions will be recalculated from output_size()/scale in the render loop.
+                    // Don't set them here to avoid scale mismatch on HiDPI.
                 }
+                Event::Window { .. } => {}
                 Event::MouseMotion { x, y, .. } => {
                     input.on_mouse_move(x, y);
                 }
@@ -339,6 +334,11 @@ fn main() {
                                     {
                                         state.mode = AppMode::Arrangement;
                                     }
+                                } else if state.focused_panel == crate::state::FocusedPanel::AudioEditor
+                                    && state.audio_editor_selection.is_some()
+                                {
+                                    state.audio_editor_selection = None;
+                                    state.push_status("Selection cleared");
                                 } else {
                                     state.selected_clip = None;
                                     state.selected_clips.clear();
@@ -358,12 +358,55 @@ fn main() {
                             // All other shortcuts are suppressed on the Project Manager screen
                             _ if state.mode == AppMode::ProjectManager => {}
                             Keycode::Space => {
-                                // If a sample preview is playing, stop it first — don't toggle transport.
-                                if state.sample_preview_path.is_some()
+                                // If audio editor is focused, Space controls its own playback
+                                if state.focused_panel == crate::state::FocusedPanel::AudioEditor {
+                                    if state.audio_editor_playing {
+                                        // Stop audio editor playback
+                                        state.audio_editor_playing = false;
+                                        state.sample_preview_path = None;
+                                        state.sample_preview_trigger = false;
+                                        state.sample_preview_start_sample = 0;
+                                        state.sample_preview_end_sample = 0;
+                                    } else {
+                                        // Start audio editor playback from playhead or selection
+                                        let source_file: Option<String> = state.selected_clip.and_then(|(tid, cidx)| {
+                                            state.project.tracks.iter().find(|t| t.id == tid)
+                                                .and_then(|t| t.clips.get(cidx))
+                                                .and_then(|c| if let crate::models::Clip::Audio(ac) = c {
+                                                    Some(ac.source_file.clone())
+                                                } else { None })
+                                        });
+                                        if let Some(sf) = source_file {
+                                            if !sf.is_empty() {
+                                                let preview_sr = 44100usize;
+                                                if let Some((sel_s, sel_e)) = state.audio_editor_selection {
+                                                    let s = sel_s.min(sel_e).max(0.0);
+                                                    let e = sel_s.max(sel_e);
+                                                    state.audio_editor_playhead = s;
+                                                    state.sample_preview_start_sample = (s * preview_sr as f64) as usize;
+                                                    state.sample_preview_end_sample = (e * preview_sr as f64) as usize;
+                                                } else {
+                                                    let start = state.audio_editor_playhead;
+                                                    state.sample_preview_start_sample = (start * preview_sr as f64) as usize;
+                                                    if state.audio_editor_loop_enabled && state.audio_editor_loop_end > state.audio_editor_loop_start {
+                                                        state.sample_preview_end_sample = (state.audio_editor_loop_end * preview_sr as f64) as usize;
+                                                    } else {
+                                                        state.sample_preview_end_sample = 0;
+                                                    }
+                                                }
+                                                state.audio_editor_playing = true;
+                                                state.sample_preview_path = Some(std::path::PathBuf::from(&sf));
+                                                state.sample_preview_trigger = true;
+                                            }
+                                        }
+                                    }
+                                } else if state.sample_preview_path.is_some()
                                     || state.sample_preview_trigger
                                 {
+                                    // If a sample preview is playing, stop it first
                                     state.sample_preview_path = None;
                                     state.sample_preview_trigger = false;
+                                    state.audio_editor_playing = false;
                                 } else {
                                     // Normal play/stop transport toggle
                                     if !state.project.transport.playing {
@@ -377,10 +420,6 @@ fn main() {
                                         if state.auto_return {
                                             state.project.transport.position =
                                                 state.pre_play_position;
-                                            // NOTE: intentionally NOT setting seek_pending here.
-                                            // seek_pending would call fx.reset() and kill the
-                                            // reverb/delay tail. Instead, the position is updated
-                                            // visually but the audio thread keeps draining effects.
                                         }
                                     }
                                     state.project.transport.playing =
@@ -427,6 +466,68 @@ fn main() {
                                     }
                                 }
                             }
+                            Keycode::Z if input.ctrl() && input.shift() && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                                // Audio editor redo
+                                if let Some((src, backup, desc, proj_snapshot)) = state.audio_redo_stack.pop() {
+                                    // Current state becomes undo backup
+                                    let sp = std::path::Path::new(&src);
+                                    let dir = sp.parent().unwrap_or(std::path::Path::new("."));
+                                    let stem = sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+                                    let ext = sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+                                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                                    let undo_backup = dir.join(format!(".{}_undo_{}.{}", stem, ts, ext));
+                                    // Save current project state before redo overwrites it
+                                    let current_proj = if proj_snapshot.is_some() { Some(state.project.clone()) } else { None };
+                                    if std::fs::copy(&src, &undo_backup).is_ok() {
+                                        state.audio_undo_stack.push((src.clone(), undo_backup.to_string_lossy().to_string(), desc.clone(), current_proj));
+                                    }
+                                    if std::fs::copy(&backup, &src).is_ok() {
+                                        let _ = std::fs::remove_file(&backup);
+                                        state.waveform_cache.remove(&src);
+                                        state.waveform_stereo_cache.remove(&src);
+                                        state.waveform_raw_cache.remove(&src);
+                                        state.audio_sample_invalidate.push(src.clone());
+                                        // Restore project snapshot (clip metadata) if present
+                                        if let Some(proj) = proj_snapshot {
+                                            state.project = proj;
+                                        }
+                                        state.push_status(format!("Redo: {}", desc));
+                                    }
+                                } else {
+                                    state.push_status("Nothing to redo");
+                                }
+                            }
+                            Keycode::Z if input.ctrl() && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                                // Audio editor undo
+                                if let Some((src, backup, desc, proj_snapshot)) = state.audio_undo_stack.pop() {
+                                    // Current state becomes redo backup
+                                    let sp = std::path::Path::new(&src);
+                                    let dir = sp.parent().unwrap_or(std::path::Path::new("."));
+                                    let stem = sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+                                    let ext = sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+                                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                                    let redo_backup = dir.join(format!(".{}_redo_{}.{}", stem, ts, ext));
+                                    // Save current project state before undo overwrites it
+                                    let current_proj = if proj_snapshot.is_some() { Some(state.project.clone()) } else { None };
+                                    if std::fs::copy(&src, &redo_backup).is_ok() {
+                                        state.audio_redo_stack.push((src.clone(), redo_backup.to_string_lossy().to_string(), desc.clone(), current_proj));
+                                    }
+                                    if std::fs::copy(&backup, &src).is_ok() {
+                                        let _ = std::fs::remove_file(&backup);
+                                        state.waveform_cache.remove(&src);
+                                        state.waveform_stereo_cache.remove(&src);
+                                        state.waveform_raw_cache.remove(&src);
+                                        state.audio_sample_invalidate.push(src.clone());
+                                        // Restore project snapshot (clip metadata) if present
+                                        if let Some(proj) = proj_snapshot {
+                                            state.project = proj;
+                                        }
+                                        state.push_status(format!("Undo: {}", desc));
+                                    }
+                                } else {
+                                    state.push_status("Nothing to undo");
+                                }
+                            }
                             Keycode::Z if input.ctrl() && input.shift() => {
                                 if let Some(desc) = state.commands.redo_description() {
                                     state.push_status(format!("Redo: {}", desc));
@@ -444,6 +545,30 @@ fn main() {
                                     state.push_status(format!("Redo: {}", desc));
                                 }
                                 state.commands.redo(&mut state.project);
+                            }
+                            // ── Audio editor tool shortcuts ──────────────────
+                            Keycode::A if !input.ctrl() && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                                // Select All — select the entire waveform
+                                let total = state.selected_clip.and_then(|(tid, cidx)| {
+                                    state.project.tracks.iter().find(|t| t.id == tid)
+                                        .and_then(|t| t.clips.get(cidx))
+                                        .and_then(|c| if let crate::models::Clip::Audio(ac) = c {
+                                            let path = std::path::Path::new(&ac.source_file);
+                                            crate::audio::load_audio_interleaved(path).ok().map(|(raw, ch, sr)| {
+                                                raw.len() as f64 / (ch.max(1) as f64 * sr as f64)
+                                            })
+                                        } else { None })
+                                });
+                                if let Some(dur) = total {
+                                    state.audio_editor_selection = Some((0.0, dur));
+                                    state.push_status("Selected entire waveform");
+                                }
+                            }
+                            Keycode::T if !input.ctrl() && !piano_consumes && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                                state.push_status("Press TRIM button or use toolbar");
+                            }
+                            Keycode::N if !input.ctrl() && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                                state.push_status("Press NORM button or use toolbar");
                             }
                             Keycode::T if !input.ctrl() && !piano_consumes => {
                                 state.next_theme();
@@ -489,6 +614,46 @@ fn main() {
                             Keycode::Minus => {
                                 state.arrangement.zoom_x =
                                     (state.arrangement.zoom_x / 1.2).max(5.0);
+                            }
+                            Keycode::J if !piano_consumes && !input.ctrl() => {
+                                // Join adjacent selected clips on same track
+                                let mut to_join: Vec<(u32, usize)> =
+                                    state.selected_clips.iter().cloned().collect();
+                                if to_join.is_empty() {
+                                    if let Some(sel) = state.selected_clip {
+                                        to_join.push(sel);
+                                    }
+                                }
+                                if to_join.len() >= 2 {
+                                    // Group by track_id
+                                    let mut groups: std::collections::HashMap<u32, Vec<usize>> =
+                                        std::collections::HashMap::new();
+                                    for (tid, ci) in &to_join {
+                                        groups.entry(*tid).or_default().push(*ci);
+                                    }
+                                    // Only keep groups with 2+ clips
+                                    let join_groups: Vec<(u32, Vec<usize>)> = groups
+                                        .into_iter()
+                                        .filter(|(_, v)| v.len() >= 2)
+                                        .collect();
+                                    if !join_groups.is_empty() {
+                                        state.commands.execute(
+                                            Box::new(crate::commands::JoinClips {
+                                                groups: join_groups,
+                                            }),
+                                            &mut state.project,
+                                        );
+                                        state.selected_clip = None;
+                                        state.selected_clips.clear();
+                                        state.dirty = true;
+                                        state.push_status("Joined clips");
+                                    } else {
+                                        state.push_status("Select 2+ clips on the same track to join");
+                                    }
+                                } else {
+                                    state.push_status("Select 2+ adjacent clips to join");
+                                }
+                                input.consume_key(Keycode::J);
                             }
                             Keycode::Delete | Keycode::Backspace => {
                                 use crate::state::FocusedPanel;
@@ -1034,7 +1199,7 @@ fn main() {
                                             );
                                             if let Some(ref shared) = audio_shared {
                                                 if let Ok(mut audio) = shared.try_lock() {
-                                                    audio.preview_samples = samples;
+                                                    audio.preview_samples = std::sync::Arc::new(samples);
                                                     audio.preview_sample_rate = sr;
                                                     audio.preview_pos = 0;
                                                     audio.preview_playing = true;
@@ -1073,9 +1238,19 @@ fn main() {
                             );
                             if let Some(ref shared) = audio_shared {
                                 if let Ok(mut audio) = shared.try_lock() {
-                                    audio.preview_samples = samples;
+                                    audio.preview_samples = std::sync::Arc::new(samples);
                                     audio.preview_sample_rate = sr;
-                                    audio.preview_pos = 0;
+                                    audio.preview_pos = state.sample_preview_start_sample;
+                                    audio.preview_end_sample = state.sample_preview_end_sample;
+                                    // Set loop state from audio editor
+                                    audio.preview_loop_enabled = state.audio_editor_loop_enabled
+                                        && state.audio_editor_loop_end > state.audio_editor_loop_start
+                                        && state.focused_panel == crate::state::FocusedPanel::AudioEditor;
+                                    audio.preview_loop_start = if audio.preview_loop_enabled {
+                                        (state.audio_editor_loop_start * sr as f64) as usize
+                                    } else {
+                                        0
+                                    };
                                     audio.preview_playing = true;
                                 }
                             }
@@ -1088,262 +1263,211 @@ fn main() {
                 }
             }
         }
-        // Stop preview when path is cleared
-        if state.sample_preview_path.is_none() && !state.sample_preview_trigger {
-            if let Some(ref shared) = audio_shared {
-                if let Ok(mut audio) = shared.try_lock() {
+        // ── Quick preview state sync (single try_lock to minimize contention) ──
+        if let Some(ref shared) = audio_shared {
+            if let Ok(mut audio) = shared.try_lock() {
+                // Stop preview when path is cleared
+                if state.sample_preview_path.is_none() && !state.sample_preview_trigger {
+                    state.sample_preview_start_sample = 0;
+                    state.sample_preview_end_sample = 0;
                     if audio.preview_playing {
                         audio.preview_playing = false;
+                        audio.preview_end_sample = 0;
+                        audio.preview_loop_enabled = false;
                     }
                 }
-            }
-        }
-        // Check if preview finished playing (audio callback set preview_playing=false)
-        if state.sample_preview_path.is_some() {
-            if let Some(ref shared) = audio_shared {
-                if let Ok(audio) = shared.try_lock() {
-                    if !audio.preview_playing && !state.sample_preview_trigger {
-                        state.sample_preview_path = None;
+                // Check if preview finished playing
+                if state.sample_preview_path.is_some()
+                    && !audio.preview_playing
+                    && !state.sample_preview_trigger
+                    && !audio.preview_loop_enabled
+                {
+                    state.sample_preview_path = None;
+                    state.audio_editor_playing = false;
+                }
+                // Read back preview playhead position
+                if state.audio_editor_playing {
+                    let sr = audio.preview_sample_rate as f64;
+                    if sr > 0.0 {
+                        state.audio_editor_playhead = audio.preview_pos as f64 / sr;
                     }
                 }
             }
         }
 
         if let Some(ref shared) = audio_shared {
-            // Use blocking lock — the audio callback uses try_lock and will skip if contended,
-            // so this cannot deadlock. Blocking ensures mute/solo/play changes never get dropped.
-            if let Ok(mut audio) = shared.lock() {
-                audio.playing = state.project.transport.playing;
-                audio.bpm = state.project.tempo_map.bpm_at(0.0);
+            // ── Prepare track data OUTSIDE the lock to minimize mutex hold time ──
+            // This prevents the audio callback from starving (its try_lock would fail
+            // if we hold the mutex while doing expensive work like sample loading).
 
-                // Position authority:
-                // When seek_pending: push UI position to audio and set audio.seek_pending
-                //   so the callback jumps to it immediately and clears all voices.
-                // When playing (no seek): audio callback owns position — read back to UI.
-                // When stopped (no seek): keep pushing UI position so audio is ready.
-                if state.seek_pending {
-                    audio.position_beats = state.project.transport.position;
-                    audio.seek_pending = true;
-                    state.seek_pending = false;
-                } else if state.project.transport.playing {
-                    // Audio owns position during playback — read it back
-                    state.project.transport.position = audio.position_beats;
-                } else {
-                    // Stopped: keep audio synced to UI position
-                    audio.position_beats = state.project.transport.position;
-                }
-
-                audio.loop_enabled = state.project.transport.loop_enabled;
-                audio.loop_start = state.project.transport.loop_region.start;
-                audio.loop_end = state.project.transport.loop_region.end;
-                audio.master_volume = 0.8;
-
-                // Forward preview notes from UI to audio thread
-                if !state.preview_notes.is_empty() {
-                    audio.preview_notes.append(&mut state.preview_notes);
-                }
-
-                // Piano keyboard mode sustain: set flag so audio doesn't auto-release
-                audio.preview_sustain = state.piano_keyboard_mode;
-
-                // Forward any piano note-off signals (from key releases)
-                if !state.piano_note_off_queue.is_empty() {
-                    audio
-                        .preview_note_off
-                        .append(&mut state.piano_note_off_queue);
-                }
-
-                // Panic: kill all voices
-                if state.panic_triggered {
-                    audio.panic = true;
-                    state.panic_triggered = false;
-                }
-
-                // ── Apply automation clips to rack params ──────────────────
-                // For each automation track, find the target param and interpolate
-                // the automation value at the current transport position, then
-                // write it directly into the track's rack params.
-                let cur_pos = state.project.transport.position;
-                let auto_values: Vec<(String, f32)> = state
-                    .project
-                    .tracks
-                    .iter()
-                    .filter(|t| {
-                        t.track_type == models::TrackType::Automation && t.automation_enabled
-                    })
-                    .flat_map(|t| {
-                        t.clips.iter().filter_map(|c| {
-                            if let models::Clip::Automation(ac) = c {
-                                // Only apply if position is within clip
-                                let clip_end = ac.start_time + ac.length;
-                                if cur_pos < ac.start_time || cur_pos > clip_end {
-                                    return None;
-                                }
-                                // Clip-relative time
-                                let clip_pos = cur_pos - ac.start_time;
-                                // Interpolate between automation points
-                                if ac.points.is_empty() {
-                                    return None;
-                                }
-                                let value = if ac.points.len() == 1 {
-                                    ac.points[0].value
-                                } else {
-                                    // Find surrounding points
-                                    let mut before = &ac.points[0];
-                                    let mut after = &ac.points[ac.points.len() - 1];
-                                    for i in 0..ac.points.len().saturating_sub(1) {
-                                        if ac.points[i].time <= clip_pos
-                                            && ac.points[i + 1].time >= clip_pos
-                                        {
-                                            before = &ac.points[i];
-                                            after = &ac.points[i + 1];
-                                            break;
-                                        }
-                                    }
-                                    let dt = after.time - before.time;
-                                    if dt <= 0.0 {
-                                        before.value
-                                    } else {
-                                        let t =
-                                            ((clip_pos - before.time) / dt).clamp(0.0, 1.0) as f32;
-                                        before.value + t * (after.value - before.value)
-                                    }
-                                };
-                                Some((ac.target_param.clone(), value))
-                            } else {
-                                None
+            // Apply automation clips to rack params (modifies state, no lock needed)
+            let cur_pos = state.project.transport.position;
+            let auto_values: Vec<(String, f32)> = state
+                .project
+                .tracks
+                .iter()
+                .filter(|t| {
+                    t.track_type == models::TrackType::Automation && t.automation_enabled
+                })
+                .flat_map(|t| {
+                    t.clips.iter().filter_map(|c| {
+                        if let models::Clip::Automation(ac) = c {
+                            let clip_end = ac.start_time + ac.length;
+                            if cur_pos < ac.start_time || cur_pos > clip_end {
+                                return None;
                             }
+                            let clip_pos = cur_pos - ac.start_time;
+                            if ac.points.is_empty() {
+                                return None;
+                            }
+                            let value = if ac.points.len() == 1 {
+                                ac.points[0].value
+                            } else {
+                                let mut before = &ac.points[0];
+                                let mut after = &ac.points[ac.points.len() - 1];
+                                for i in 0..ac.points.len().saturating_sub(1) {
+                                    if ac.points[i].time <= clip_pos
+                                        && ac.points[i + 1].time >= clip_pos
+                                    {
+                                        before = &ac.points[i];
+                                        after = &ac.points[i + 1];
+                                        break;
+                                    }
+                                }
+                                let dt = after.time - before.time;
+                                if dt <= 0.0 {
+                                    before.value
+                                } else {
+                                    let t =
+                                        ((clip_pos - before.time) / dt).clamp(0.0, 1.0) as f32;
+                                    before.value + t * (after.value - before.value)
+                                }
+                            };
+                            Some((ac.target_param.clone(), value))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect();
+
+            // Write automation values to rack params
+            for (target_key, auto_val) in &auto_values {
+                let parts: Vec<&str> = target_key.split(':').collect();
+                if parts.len() != 3 {
+                    continue;
+                }
+                let (Ok(track_id), Ok(slot_id)) =
+                    (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+                else {
+                    continue;
+                };
+                let param_id = parts[2];
+                if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id)
+                {
+                    if let Some(slot) = track.rack.iter_mut().find(|s| s.slot_id == slot_id) {
+                        if let Some(param) = slot.params.iter_mut().find(|p| p.id == param_id) {
+                            let mapped = param.min + auto_val * (param.max - param.min);
+                            param.value = mapped.clamp(param.min, param.max);
+                        }
+                    }
+                }
+            }
+
+            // Drain audio sample invalidation requests (modifies cache, no lock needed)
+            for path in state.audio_sample_invalidate.drain(..) {
+                audio_sample_cache.remove(&path);
+            }
+
+            // Build track data outside the lock
+            let mut prepared_tracks: Vec<audio::AudioTrack> = Vec::with_capacity(state.project.tracks.len());
+            for track in &state.project.tracks {
+                let mut midi_clips = Vec::new();
+                let mut audio_clips_vec = Vec::new();
+
+                let instrument_module: Option<String> = track
+                    .rack
+                    .iter()
+                    .filter(|slot| slot.enabled)
+                    .find(|slot| modules::is_instrument(&slot.plugin_name))
+                    .map(|slot| slot.plugin_name.clone());
+
+                let instrument_params: Vec<(String, f32)> = track
+                    .rack
+                    .iter()
+                    .filter(|slot| slot.enabled)
+                    .find(|slot| modules::is_instrument(&slot.plugin_name))
+                    .map(|slot| {
+                        slot.params
+                            .iter()
+                            .map(|p| (p.id.clone(), p.value))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let effect_slots: Vec<(String, Vec<(String, f32)>)> = track
+                    .rack
+                    .iter()
+                    .filter(|slot| slot.enabled && modules::is_effect(&slot.plugin_name))
+                    .map(|slot| {
+                        let params: Vec<(String, f32)> = slot
+                            .params
+                            .iter()
+                            .map(|p| (p.id.clone(), p.value))
+                            .collect();
+                        (slot.plugin_name.clone(), params)
+                    })
+                    .collect();
+
+                let midi_effect_slots: Vec<(String, Vec<(String, f32)>)> = track
+                    .rack
+                    .iter()
+                    .filter(|slot| slot.enabled && modules::is_midi_effect(&slot.plugin_name))
+                    .map(|slot| {
+                        let params: Vec<(String, f32)> = slot
+                            .params
+                            .iter()
+                            .map(|p| (p.id.clone(), p.value))
+                            .collect();
+                        (slot.plugin_name.clone(), params)
+                    })
+                    .collect();
+
+                let effect_sidechain_track: Vec<Option<usize>> = track
+                    .rack
+                    .iter()
+                    .filter(|slot| slot.enabled && modules::is_effect(&slot.plugin_name))
+                    .map(|slot| {
+                        slot.sidechain_track_id.and_then(|sc_id| {
+                            state.project.tracks.iter().position(|t| t.id == sc_id)
                         })
                     })
                     .collect();
 
-                // Write automation values to rack params (format: "track_id:slot_id:param_id")
-                for (target_key, auto_val) in &auto_values {
-                    let parts: Vec<&str> = target_key.split(':').collect();
-                    if parts.len() != 3 {
-                        continue;
-                    }
-                    let (Ok(track_id), Ok(slot_id)) =
-                        (parts[0].parse::<u32>(), parts[1].parse::<u32>())
-                    else {
-                        continue;
-                    };
-                    let param_id = parts[2];
-                    if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id)
-                    {
-                        if let Some(slot) = track.rack.iter_mut().find(|s| s.slot_id == slot_id) {
-                            if let Some(param) = slot.params.iter_mut().find(|p| p.id == param_id) {
-                                // Automation value is 0–1 normalized; map to param range
-                                let mapped = param.min + auto_val * (param.max - param.min);
-                                param.value = mapped.clamp(param.min, param.max);
-                            }
-                        }
-                    }
-                }
-
-                audio.tracks.clear();
-                for track in &state.project.tracks {
-                    let mut midi_clips = Vec::new();
-                    let mut audio_clips_vec = Vec::new();
-
-                    // Determine generator type: first check the rack for an oscillator module.
-                    // If none found, fall back to the track's instrument_idx selection.
-                    // ── Find the instrument module in the rack ──
-                    // The first enabled synth module (e.g. "Analog") is the instrument.
-                    // If no instrument module is found, MIDI notes produce no sound.
-                    let instrument_module: Option<String> = track
-                        .rack
-                        .iter()
-                        .filter(|slot| slot.enabled)
-                        .find(|slot| modules::is_instrument(&slot.plugin_name))
-                        .map(|slot| slot.plugin_name.clone());
-
-                    // Flatten instrument params from the rack slot
-                    let instrument_params: Vec<(String, f32)> = track
-                        .rack
-                        .iter()
-                        .filter(|slot| slot.enabled)
-                        .find(|slot| modules::is_instrument(&slot.plugin_name))
-                        .map(|slot| {
-                            slot.params
-                                .iter()
-                                .map(|p| (p.id.clone(), p.value))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    // Collect effect slots from rack (enabled effect modules, in order)
-                    let effect_slots: Vec<(String, Vec<(String, f32)>)> = track
-                        .rack
-                        .iter()
-                        .filter(|slot| slot.enabled && modules::is_effect(&slot.plugin_name))
-                        .map(|slot| {
-                            let params: Vec<(String, f32)> = slot
-                                .params
-                                .iter()
-                                .map(|p| (p.id.clone(), p.value))
-                                .collect();
-                            (slot.plugin_name.clone(), params)
-                        })
-                        .collect();
-
-                    // Collect MIDI effect slots from rack (Arpeggiator, Chord, Transpose, Velocity)
-                    let midi_effect_slots: Vec<(String, Vec<(String, f32)>)> = track
-                        .rack
-                        .iter()
-                        .filter(|slot| slot.enabled && modules::is_midi_effect(&slot.plugin_name))
-                        .map(|slot| {
-                            let params: Vec<(String, f32)> = slot
-                                .params
-                                .iter()
-                                .map(|p| (p.id.clone(), p.value))
-                                .collect();
-                            (slot.plugin_name.clone(), params)
-                        })
-                        .collect();
-
-                    // Sidechain source index per effect slot (parallel to effect_slots).
-                    // Maps sidechain_track_id (project track id) → AudioTrack index.
-                    let effect_sidechain_track: Vec<Option<usize>> = track
-                        .rack
-                        .iter()
-                        .filter(|slot| slot.enabled && modules::is_effect(&slot.plugin_name))
-                        .map(|slot| {
-                            slot.sidechain_track_id.and_then(|sc_id| {
-                                state.project.tracks.iter().position(|t| t.id == sc_id)
-                            })
-                        })
-                        .collect();
-
-                    // Build ModuleExtra (carries optional data like sampler buffers)
-                    let extra = if instrument_module.as_deref() == Some("Sampler") {
-                        if let Some(ref sample_path) = track.sampler_file {
-                            if !sample_path.is_empty() {
-                                // Load and cache sampler data
-                                if !audio_sample_cache.contains_key(sample_path) {
-                                    let path = std::path::Path::new(sample_path);
-                                    match audio::load_audio(path) {
-                                        Ok((samples, sr)) => {
-                                            audio_sample_cache.insert(
-                                                sample_path.clone(),
-                                                (std::sync::Arc::new(samples), sr),
-                                            );
-                                        }
-                                        Err(_) => {
-                                            audio_sample_cache.insert(
-                                                sample_path.clone(),
-                                                (std::sync::Arc::new(Vec::new()), 44100),
-                                            );
-                                        }
+                let extra = if instrument_module.as_deref() == Some("Sampler") {
+                    if let Some(ref sample_path) = track.sampler_file {
+                        if !sample_path.is_empty() {
+                            if !audio_sample_cache.contains_key(sample_path) {
+                                let path = std::path::Path::new(sample_path);
+                                match audio::load_audio(path) {
+                                    Ok((samples, sr)) => {
+                                        audio_sample_cache.insert(
+                                            sample_path.clone(),
+                                            (std::sync::Arc::new(samples), sr),
+                                        );
+                                    }
+                                    Err(_) => {
+                                        audio_sample_cache.insert(
+                                            sample_path.clone(),
+                                            (std::sync::Arc::new(Vec::new()), 44100),
+                                        );
                                     }
                                 }
-                                if let Some((samples, sr)) = audio_sample_cache.get(sample_path) {
-                                    modules::ModuleExtra {
-                                        sample_data: Some(samples.clone()),
-                                        sample_sr: *sr,
-                                    }
-                                } else {
-                                    modules::ModuleExtra::default()
+                            }
+                            if let Some((samples, sr)) = audio_sample_cache.get(sample_path) {
+                                modules::ModuleExtra {
+                                    sample_data: Some(samples.clone()),
+                                    sample_sr: *sr,
                                 }
                             } else {
                                 modules::ModuleExtra::default()
@@ -1353,98 +1477,157 @@ fn main() {
                         }
                     } else {
                         modules::ModuleExtra::default()
-                    };
+                    }
+                } else {
+                    modules::ModuleExtra::default()
+                };
 
-                    if track.track_type == models::TrackType::Midi {
-                        for clip in &track.clips {
-                            if let models::Clip::Midi(mc) = clip {
-                                let notes = mc
-                                    .notes
-                                    .iter()
-                                    .map(|n| audio::AudioNote {
-                                        pitch: n.pitch,
-                                        velocity: n.velocity,
-                                        start_beats: n.start,
-                                        length_beats: n.length,
-                                    })
-                                    .collect();
-                                midi_clips.push(audio::AudioMidiClip {
-                                    start_beats: mc.start_time,
-                                    length_beats: mc.length,
-                                    notes,
+                if track.track_type == models::TrackType::Midi {
+                    for clip in &track.clips {
+                        if let models::Clip::Midi(mc) = clip {
+                            let notes = mc
+                                .notes
+                                .iter()
+                                .map(|n| audio::AudioNote {
+                                    pitch: n.pitch,
+                                    velocity: n.velocity,
+                                    start_beats: n.start,
+                                    length_beats: n.length,
+                                })
+                                .collect();
+                            midi_clips.push(audio::AudioMidiClip {
+                                start_beats: mc.start_time,
+                                length_beats: mc.length,
+                                notes,
+                            });
+                        }
+                    }
+                }
+                for clip in &track.clips {
+                    if let models::Clip::Audio(ac) = clip {
+                        if ac.source_file.is_empty() {
+                            continue;
+                        }
+                        if !audio_sample_cache.contains_key(&ac.source_file) {
+                            let path = std::path::Path::new(&ac.source_file);
+                            match audio::load_audio(path) {
+                                Ok((samples, sr)) => {
+                                    audio_sample_cache.insert(
+                                        ac.source_file.clone(),
+                                        (std::sync::Arc::new(samples), sr),
+                                    );
+                                }
+                                Err(_) => {
+                                    audio_sample_cache.insert(
+                                        ac.source_file.clone(),
+                                        (std::sync::Arc::new(Vec::new()), 44100),
+                                    );
+                                }
+                            }
+                        }
+                        if let Some((samples, sr)) = audio_sample_cache.get(&ac.source_file) {
+                            if !samples.is_empty() {
+                                audio_clips_vec.push(audio::AudioSampleClip {
+                                    start_beats: ac.start_time,
+                                    length_beats: ac.length,
+                                    gain: ac.gain,
+                                    offset_secs: ac.offset,
+                                    samples: samples.clone(),
+                                    sample_rate: *sr,
                                 });
                             }
                         }
                     }
-                    // Collect ALL audio clips from this track, regardless of track type.
-                    // Audio clips can exist on any track type (e.g. dragged onto a MIDI track).
-                    for clip in &track.clips {
-                        if let models::Clip::Audio(ac) = clip {
-                            if ac.source_file.is_empty() {
-                                continue;
-                            }
-                            // Load sample data if not cached
-                            if !audio_sample_cache.contains_key(&ac.source_file) {
-                                let path = std::path::Path::new(&ac.source_file);
-                                match audio::load_audio(path) {
-                                    Ok((samples, sr)) => {
-                                        audio_sample_cache.insert(
-                                            ac.source_file.clone(),
-                                            (std::sync::Arc::new(samples), sr),
-                                        );
-                                    }
-                                    Err(_) => {
-                                        audio_sample_cache.insert(
-                                            ac.source_file.clone(),
-                                            (std::sync::Arc::new(Vec::new()), 44100),
-                                        );
-                                    }
-                                }
-                            }
-                            if let Some((samples, sr)) = audio_sample_cache.get(&ac.source_file) {
-                                if !samples.is_empty() {
-                                    audio_clips_vec.push(audio::AudioSampleClip {
-                                        start_beats: ac.start_time,
-                                        length_beats: ac.length,
-                                        gain: ac.gain,
-                                        offset_secs: ac.offset, // offset is in seconds
-                                        samples: samples.clone(), // Arc clone = cheap
-                                        sample_rate: *sr,
-                                    });
-                                }
-                            }
-                        }
-                    }
-
-                    audio.tracks.push(audio::AudioTrack {
-                        volume: track.volume,
-                        pan: track.pan,
-                        mute: track.mute,
-                        solo: track.solo,
-                        is_automation: track.track_type == models::TrackType::Automation,
-                        midi_clips,
-                        audio_clips: audio_clips_vec,
-                        instrument_module,
-                        instrument_params,
-                        effect_slots,
-                        midi_effect_slots,
-                        effect_sidechain_track,
-                        extra,
-                    });
                 }
 
-                // Push master rack effects to audio thread
-                audio.master_effects = state
-                    .project
-                    .master_rack
-                    .iter()
-                    .filter(|s| s.enabled && modules::is_effect(&s.plugin_name))
-                    .map(|s| {
-                        let params: Vec<(String, f32)> =
-                            s.params.iter().map(|p| (p.id.clone(), p.value)).collect();
-                        (s.plugin_name.clone(), params)
-                    })
-                    .collect();
+                prepared_tracks.push(audio::AudioTrack {
+                    volume: track.volume,
+                    pan: track.pan,
+                    mute: track.mute,
+                    solo: track.solo,
+                    is_automation: track.track_type == models::TrackType::Automation,
+                    midi_clips,
+                    audio_clips: audio_clips_vec,
+                    instrument_module,
+                    instrument_params,
+                    effect_slots,
+                    midi_effect_slots,
+                    effect_sidechain_track,
+                    extra,
+                });
+            }
+
+            // Prepare master rack effects outside the lock
+            let prepared_master_effects: Vec<(String, Vec<(String, f32)>)> = state
+                .project
+                .master_rack
+                .iter()
+                .filter(|s| s.enabled && modules::is_effect(&s.plugin_name))
+                .map(|s| {
+                    let params: Vec<(String, f32)> =
+                        s.params.iter().map(|p| (p.id.clone(), p.value)).collect();
+                    (s.plugin_name.clone(), params)
+                })
+                .collect();
+
+            // Prepare keyboard pitches outside the lock
+            let prepared_held_pitches: Vec<(usize, Vec<u8>)> = if state.piano_keyboard_mode && !state.piano_keyboard_held.is_empty() {
+                if let Some(tid) = state.selected_track.or_else(|| state.selected_clip.map(|(t, _)| t)) {
+                    if let Some(ti) = state.project.tracks.iter().position(|t| t.id == tid) {
+                        let mut pitches: Vec<u8> = state.piano_keyboard_held.iter().copied().collect();
+                        pitches.sort_unstable();
+                        vec![(ti, pitches)]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            // ── Now acquire the lock briefly just to swap data in/out ──
+            if let Ok(mut audio) = shared.lock() {
+                audio.playing = state.project.transport.playing;
+                audio.bpm = state.project.tempo_map.bpm_at(0.0);
+
+                if state.seek_pending {
+                    audio.position_beats = state.project.transport.position;
+                    audio.seek_pending = true;
+                    state.seek_pending = false;
+                } else if state.project.transport.playing {
+                    state.project.transport.position = audio.position_beats;
+                } else {
+                    audio.position_beats = state.project.transport.position;
+                }
+
+                audio.loop_enabled = state.project.transport.loop_enabled;
+                audio.loop_start = state.project.transport.loop_region.start;
+                audio.loop_end = state.project.transport.loop_region.end;
+                audio.master_volume = 0.8;
+
+                if !state.preview_notes.is_empty() {
+                    audio.preview_notes.append(&mut state.preview_notes);
+                }
+
+                audio.preview_sustain = state.piano_keyboard_mode;
+                audio.preview_held_pitches = prepared_held_pitches;
+
+                if !state.piano_note_off_queue.is_empty() {
+                    audio
+                        .preview_note_off
+                        .append(&mut state.piano_note_off_queue);
+                }
+
+                if state.panic_triggered {
+                    audio.panic = true;
+                    state.panic_triggered = false;
+                }
+
+                // Swap in pre-built track data (fast: just a Vec swap)
+                audio.tracks = prepared_tracks;
+                audio.master_effects = prepared_master_effects;
 
                 // Read metering data back into UI state
                 state.meters.track_rms = audio.track_rms.clone();

@@ -222,11 +222,9 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             if !state.project.transport.playing {
                 state.pre_play_position = state.project.transport.position;
                 state.seek_pending = true;
-            } else {
-                if state.auto_return {
-                    state.project.transport.position = state.pre_play_position;
-                    state.seek_pending = true;
-                }
+            } else if state.auto_return {
+                state.project.transport.position = state.pre_play_position;
+                state.seek_pending = true;
             }
             state.project.transport.playing = !state.project.transport.playing;
         }
@@ -1081,18 +1079,17 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
         let lx2 = header_w + ((loop_end - scroll) * zoom) as i32;
         let lc = state.theme.loop_color;
 
-        let outline_alpha = 180u8;
+        let edge_alpha = 180u8;
 
-        let lx_lo = lx1.max(header_w);
-        let lx_hi = lx2.min(w);
-        if lx_hi > lx_lo {
-            canvas.set_draw_color(sdl2::pixels::Color::RGBA(
-                lc[0],
-                lc[1],
-                lc[2],
-                outline_alpha,
-            ));
-            let _ = canvas.fill_rect(Rect::new(lx_lo, y, (lx_hi - lx_lo) as u32, h as u32));
+        // Left edge line
+        if lx1 >= header_w && lx1 <= w {
+            canvas.set_draw_color(sdl2::pixels::Color::RGBA(lc[0], lc[1], lc[2], edge_alpha));
+            let _ = canvas.fill_rect(Rect::new(lx1, y, 2, h as u32));
+        }
+        // Right edge line
+        if lx2 >= header_w && lx2 <= w {
+            canvas.set_draw_color(sdl2::pixels::Color::RGBA(lc[0], lc[1], lc[2], edge_alpha));
+            let _ = canvas.fill_rect(Rect::new(lx2 - 1, y, 2, h as u32));
         }
 
         let flag_w = 12i32;
@@ -1164,11 +1161,13 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
         }
 
         if ruler_area && input.right_mouse_pressed {
+            state.focused_panel = crate::state::FocusedPanel::Arrangement;
             state.project.transport.loop_enabled = false;
             input.consume();
         }
 
         if ruler_area && input.mouse_pressed && !near_end && input.drag_widget == WidgetId::None {
+            state.focused_panel = crate::state::FocusedPanel::Arrangement;
             if near_start {
                 state.loop_drag_orig = Some((loop_start, loop_end));
                 input.drag_widget = WidgetId::LoopStart;
@@ -1198,6 +1197,7 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
             && !near_start
             && input.drag_widget == WidgetId::None
         {
+            state.focused_panel = crate::state::FocusedPanel::Arrangement;
             state.loop_drag_orig = Some((loop_start, loop_end));
             input.drag_widget = WidgetId::LoopEnd;
             input.active_widget = WidgetId::LoopEnd;
@@ -1234,6 +1234,7 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
         // Allow drawing new loop region when disabled
         let ruler_area = input.mouse_in_rect(header_w, y, w - header_w, h);
         if ruler_area && input.mouse_pressed && input.drag_widget == WidgetId::None {
+            state.focused_panel = crate::state::FocusedPanel::Arrangement;
             state.loop_drag_orig = Some((
                 state.project.transport.loop_region.start,
                 state.project.transport.loop_region.end,
@@ -1356,6 +1357,7 @@ pub fn draw_timeline_ruler(
     let ruler_area = input.mouse_in_rect(header_w, y, w - header_w, h);
     let not_blocked = input.mouse_y < state.bottom_panel_y();
     if ruler_area && input.mouse_pressed && not_blocked {
+        state.focused_panel = crate::state::FocusedPanel::Arrangement;
         let raw = scroll + (input.mouse_x - header_w) as f64 / zoom;
         let beat = state.snap.snap(raw).max(0.0);
         state.project.transport.position = beat;
@@ -1434,6 +1436,7 @@ pub fn draw_track_headers(
 
     let mut y = top - scroll_y;
 
+    #[allow(clippy::type_complexity)]
     let track_infos: Vec<(
         u32,
         String,
@@ -1553,9 +1556,19 @@ pub fn draw_track_headers(
             state.text_field_cursor = cursor;
             if committed {
                 if let Some(new_name) = new_val {
-                    if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == id) {
-                        t.name = new_name;
-                        state.dirty = true;
+                    if let Some(t) = state.project.tracks.iter().find(|t| t.id == id) {
+                        let old_name = t.name.clone();
+                        if old_name != new_name {
+                            state.commands.execute(
+                                Box::new(crate::commands::SetTrackName {
+                                    track_id: id,
+                                    old_name,
+                                    new_name,
+                                }),
+                                &mut state.project,
+                            );
+                            state.dirty = true;
+                        }
                     }
                 }
             }
@@ -1601,15 +1614,14 @@ pub fn draw_track_headers(
                 &mut vol_pos,
             );
             if vol_changed {
-                let pos_delta = vol_pos - input.drag_start_value as f32;
-                volume = vol_pos_to_gain(vol_pos);
-                // Check if this track is part of a multi-selection
                 let is_multi = selected && state.selected_tracks.len() > 1;
+                volume = vol_pos_to_gain(vol_pos);
                 if is_multi {
-                    // On first change, snapshot origins for all selected tracks
-                    // Store original *positions* for relative delta
+                    // On first change, snapshot origins and record raw mouse X + slider width
                     if state.multi_vol_drag_origins.is_empty() {
                         state.multi_slider_snapshot = Some(state.project.clone());
+                        state.multi_vol_drag_start_x = input.mouse_x;
+                        state.multi_vol_slider_w = (knob_x - left - 12).max(1);
                         state.multi_vol_drag_origins = state
                             .project
                             .tracks
@@ -1618,6 +1630,9 @@ pub fn draw_track_headers(
                             .map(|t| (t.id, vol_gain_to_pos(t.volume)))
                             .collect();
                     }
+                    // Use raw pixel delta so clamp on one track doesn't freeze others
+                    let slider_w = state.multi_vol_slider_w as f32;
+                    let pos_delta = (input.mouse_x - state.multi_vol_drag_start_x) as f32 / slider_w;
                     // Apply relative delta in position space, then convert to gain
                     for &(tid, orig_pos) in &state.multi_vol_drag_origins {
                         let new_pos = (orig_pos + pos_delta).clamp(0.0, 1.0);
@@ -1626,10 +1641,8 @@ pub fn draw_track_headers(
                             t.volume = new_gain;
                         }
                     }
-                } else {
-                    if let Some(t) = state.project.tracks.iter_mut().find(|tx| tx.id == id) {
-                        t.volume = volume;
-                    }
+                } else if let Some(t) = state.project.tracks.iter_mut().find(|tx| tx.id == id) {
+                    t.volume = volume;
                 }
                 state.dirty = true;
             }
@@ -1681,13 +1694,13 @@ pub fn draw_track_headers(
                 &mut pan,
             );
             if pan_changed {
-                let delta = pan - input.drag_start_value as f32;
                 let is_multi = selected && state.selected_tracks.len() > 1;
                 if is_multi {
                     if state.multi_pan_drag_origins.is_empty() {
                         if state.multi_slider_snapshot.is_none() {
                             state.multi_slider_snapshot = Some(state.project.clone());
                         }
+                        state.multi_pan_drag_start_x = input.mouse_y;
                         state.multi_pan_drag_origins = state
                             .project
                             .tracks
@@ -1696,16 +1709,16 @@ pub fn draw_track_headers(
                             .map(|t| (t.id, t.pan))
                             .collect();
                     }
+                    // Use raw pixel delta (vertical drag for knob, sensitivity matches knob)
+                    let delta = (state.multi_pan_drag_start_x - input.mouse_y) as f32 * 0.008;
                     for &(tid, orig_pan) in &state.multi_pan_drag_origins {
                         let new_p = (orig_pan + delta).clamp(-1.0, 1.0);
                         if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == tid) {
                             t.pan = new_p;
                         }
                     }
-                } else {
-                    if let Some(t) = state.project.tracks.iter_mut().find(|tx| tx.id == id) {
-                        t.pan = pan;
-                    }
+                } else if let Some(t) = state.project.tracks.iter_mut().find(|tx| tx.id == id) {
+                    t.pan = pan;
                 }
                 state.dirty = true;
             }
@@ -2027,6 +2040,7 @@ pub fn draw_track_headers(
         // ── Track selection (deferred to after all buttons) ──
         // Only select the track if the click was not consumed by a button.
         if header_click && !input.consumed {
+            state.focused_panel = crate::state::FocusedPanel::Arrangement;
             if input.click_type == Some(crate::input::ClickType::Double) {
                 // Double-click: open rack panel for this track
                 state.selected_track = Some(id);
@@ -2062,8 +2076,8 @@ pub fn draw_track_headers(
                     if let Some(anchor) = anchor_idx {
                         let lo = anchor.min(clicked_idx);
                         let hi = anchor.max(clicked_idx);
-                        for idx in lo..=hi {
-                            state.selected_tracks.insert(track_ids[idx]);
+                        for &tid in &track_ids[lo..=hi] {
+                            state.selected_tracks.insert(tid);
                         }
                     } else {
                         state.selected_tracks.insert(id);
@@ -2570,20 +2584,23 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     state.text_field_cursor = cursor;
                     if committed {
                         if let Some(new_name) = new_val {
-                            match state.project.tracks[track_idx].clips.get_mut(ci) {
-                                Some(crate::models::Clip::Midi(m)) => {
-                                    m.name = new_name;
-                                    state.dirty = true;
+                            let old_name = state.project.tracks[track_idx].clips.get(ci).map(|c| c.name().to_string()).unwrap_or_default();
+                            if old_name != new_name {
+                                let snapshot = state.project.clone();
+                                match state.project.tracks[track_idx].clips.get_mut(ci) {
+                                    Some(crate::models::Clip::Midi(m)) => {
+                                        m.name = new_name;
+                                    }
+                                    Some(crate::models::Clip::Audio(a)) => {
+                                        a.name = new_name;
+                                    }
+                                    Some(crate::models::Clip::Automation(a)) => {
+                                        a.name = new_name;
+                                    }
+                                    None => {}
                                 }
-                                Some(crate::models::Clip::Audio(a)) => {
-                                    a.name = new_name;
-                                    state.dirty = true;
-                                }
-                                Some(crate::models::Clip::Automation(a)) => {
-                                    a.name = new_name;
-                                    state.dirty = true;
-                                }
-                                None => {}
+                                state.commands.push_undo_snapshot(snapshot, "Rename Clip");
+                                state.dirty = true;
                             }
                         }
                     }
@@ -3035,6 +3052,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             // Find the TOPMOST (last drawn = highest index) clip under the cursor
             // Delete on right-click press OR right-click drag (erase mode)
             // For drag-erase, require mouse movement to avoid cascade-deleting stacked clips
+            #[allow(clippy::nonminimal_bool)]
             if input.right_mouse_pressed
                 || (input.right_mouse_down
                     && !input.right_mouse_pressed
@@ -3074,12 +3092,16 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     state.selected_clips.clear();
                     for (tid, idx) in old_sel {
                         if tid == track_id {
-                            if idx == ci {
-                                // deleted — drop it
-                            } else if idx > ci {
-                                state.selected_clips.insert((tid, idx - 1));
-                            } else {
-                                state.selected_clips.insert((tid, idx));
+                            match idx.cmp(&ci) {
+                                std::cmp::Ordering::Equal => {
+                                    // deleted — drop it
+                                }
+                                std::cmp::Ordering::Greater => {
+                                    state.selected_clips.insert((tid, idx - 1));
+                                }
+                                std::cmp::Ordering::Less => {
+                                    state.selected_clips.insert((tid, idx));
+                                }
                             }
                         } else {
                             state.selected_clips.insert((tid, idx));
@@ -3383,9 +3405,11 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             if input.shift() {
                 // Shift+scroll: resize all tracks
                 let factor = if input.scroll_y > 0 { 1.1 } else { 0.9 };
+                let snapshot = state.project.clone();
                 for track in &mut state.project.tracks {
                     track.height = ((track.height as f32 * factor).max(80.0)) as i32;
                 }
+                state.commands.push_undo_snapshot(snapshot, "Resize All Tracks");
                 state.dirty = true;
             } else if input.ctrl() {
                 // Ctrl+scroll: zoom horizontally, keeping the beat under the cursor fixed
@@ -3834,6 +3858,20 @@ fn handle_clip_drag(
             let is_single_selected = state.selected_clips.len() == 1;
             let mut moves = Vec::new();
 
+            // For multi-clip drags, compute per-clip destination tracks
+            // based on relative track index offsets from the dragged clip.
+            let dragged_track_idx = state.project.tracks.iter().position(|t| t.id == tid);
+            let target_track_idx = target_track_id.and_then(|ttid|
+                state.project.tracks.iter().position(|t| t.id == ttid)
+            );
+            let track_idx_delta: i32 = match (dragged_track_idx, target_track_idx) {
+                (Some(d), Some(t)) => t as i32 - d as i32,
+                _ => 0,
+            };
+            // Build track id list for index-based lookup
+            let track_ids: Vec<u32> = state.project.tracks.iter().map(|t| t.id).collect();
+            let track_types: Vec<crate::models::TrackType> = state.project.tracks.iter().map(|t| t.track_type).collect();
+
             if is_multi {
                 for (&(t_id, c_idx), &old_start) in &state.drag_original_positions {
                     let new_start = (old_start + actual_delta).max(0.0);
@@ -3882,17 +3920,18 @@ fn handle_clip_drag(
                 state.clip_drag_ghost_positions.clear();
                 if is_multi {
                     // Multi-select drag: show ghost for all selected clips.
-                    // Move ghosts to target track whenever the mouse is over a different
-                    // track — whether that track is compatible (valid) or not.
-                    // The ghost drawing code will colour them red when target_valid is false.
-                    let is_cross_track =
-                        target_track_id.is_some() && target_track_id.unwrap() != tid;
+                    // Each clip gets its own destination track based on relative offset
+                    // from the dragged clip, preserving the lane layout.
                     for (&(t_id, c_idx), &old_start) in &state.drag_original_positions {
                         let new_start = (old_start + actual_delta).max(0.0);
-                        let ghost_tid = if is_cross_track {
-                            // Cross-track drag (copy OR move, valid OR invalid):
-                            // ghosts always follow the target track for visual feedback.
-                            target_track_id.unwrap()
+                        let ghost_tid = if track_idx_delta != 0 {
+                            // Resolve destination for this clip's track
+                            if let Some(src_idx) = track_ids.iter().position(|&id| id == t_id) {
+                                let dst_idx = (src_idx as i32 + track_idx_delta).max(0) as usize;
+                                track_ids.get(dst_idx).copied().unwrap_or(t_id)
+                            } else {
+                                t_id
+                            }
                         } else {
                             t_id
                         };
@@ -3938,14 +3977,14 @@ fn handle_clip_drag(
                             if let Some(orig) = track.clips.get(*c_idx).cloned() {
                                 let mut new_clip = orig;
                                 new_clip.set_start_time(*new_start);
-                                // For cross-track drag (valid target), place copies on the target track.
-                                // For multi-clip, only move to target if ALL clips share the same type
-                                // (target_valid already checks orig_track_type compatibility).
-                                let dest_tid = if target_valid
-                                    && target_track_id.is_some()
-                                    && target_track_id.unwrap() != *t_id
-                                {
-                                    target_track_id.unwrap()
+                                // Resolve per-clip destination using track index offset
+                                let dest_tid = if track_idx_delta != 0 && is_multi {
+                                    if let Some(src_idx) = track_ids.iter().position(|&id| id == *t_id) {
+                                        let dst_idx = (src_idx as i32 + track_idx_delta).max(0) as usize;
+                                        track_ids.get(dst_idx).copied().unwrap_or(*t_id)
+                                    } else {
+                                        *t_id
+                                    }
                                 } else if !is_multi {
                                     target_track_id.unwrap_or(*t_id)
                                 } else {
@@ -3984,15 +4023,13 @@ fn handle_clip_drag(
                         }
                     }
 
-                    // Check if this is a cross-track move (same track type required)
-                    let is_cross_track = target_track_id.is_some()
-                        && target_track_id.unwrap() != tid
-                        && target_valid;
+                    // Check if this is a cross-track move (using per-clip track offset)
+                    let is_cross_track = track_idx_delta != 0;
 
-                    if is_cross_track {
-                        let target_tid = target_track_id.unwrap();
+                    if is_cross_track && target_valid {
                         if is_single_selected {
                             // Single clip: use the simpler single-clip command
+                            let target_tid = target_track_id.unwrap();
                             let new_start = moves[0].2;
                             let old_start = moves[0].1;
                             state.commands.execute(
@@ -4019,32 +4056,45 @@ fn handle_clip_drag(
                                 state.selected_clips.insert((target_tid, dst_ci));
                             }
                         } else {
-                            // Multiple clips: move them all to target track
-                            let clip_entries: Vec<(u32, usize, f64, f64)> = moves
-                                .iter()
-                                .map(|&((t_id, c_idx), old, new)| (t_id, c_idx, old, new))
-                                .collect();
-                            let n_moved = clip_entries.len();
-                            state.commands.execute(
-                                Box::new(crate::commands::MoveClipsCrossTrack {
-                                    clips: clip_entries,
-                                    dst_track_id: target_tid,
-                                    dst_clip_indices: Vec::new(),
-                                    removed_src: Vec::new(),
-                                }),
-                                &mut state.project,
-                            );
-                            // The command always appends to dst_track.clips, so the last
-                            // n_moved entries are the newly moved clips.
-                            state.selected_clips.clear();
-                            if let Some(dst_track) =
-                                state.project.tracks.iter().find(|t| t.id == target_tid)
-                            {
-                                let len = dst_track.clips.len();
-                                for i in len.saturating_sub(n_moved)..len {
-                                    state.selected_clips.insert((target_tid, i));
+                            // Multiple clips: move each to its own destination track
+                            // based on relative track index offset.
+                            // Collect clips to remove and re-add at new positions.
+                            let mut clips_to_delete: Vec<(u32, usize, crate::models::Clip)> = Vec::new();
+                            let mut clips_to_add: Vec<(u32, crate::models::Clip)> = Vec::new();
+                            for &((t_id, c_idx), _old, new_start) in &moves {
+                                let dest_tid = if let Some(src_idx) = track_ids.iter().position(|&id| id == t_id) {
+                                    let dst_idx = (src_idx as i32 + track_idx_delta).max(0) as usize;
+                                    track_ids.get(dst_idx).copied().unwrap_or(t_id)
+                                } else {
+                                    t_id
+                                };
+                                // Verify destination track is compatible
+                                let src_tt = track_ids.iter().position(|&id| id == t_id).and_then(|i| track_types.get(i));
+                                let dst_tt = track_ids.iter().position(|&id| id == dest_tid).and_then(|i| track_types.get(i));
+                                if src_tt == dst_tt && dest_tid != t_id {
+                                    if let Some(track) = state.project.tracks.iter().find(|t| t.id == t_id) {
+                                        if let Some(clip) = track.clips.get(c_idx) {
+                                            clips_to_delete.push((t_id, c_idx, clip.clone()));
+                                            let mut new_clip = clip.clone();
+                                            new_clip.set_start_time(new_start);
+                                            clips_to_add.push((dest_tid, new_clip));
+                                        }
+                                    }
                                 }
-                                state.selected_clip = Some((target_tid, len.saturating_sub(1)));
+                            }
+                            if !clips_to_delete.is_empty() {
+                                // Use a composite of Delete + Add for proper undo
+                                let cmds: Vec<Box<dyn crate::commands::Command>> = vec![
+                                    Box::new(crate::commands::DeleteClips { clips: clips_to_delete }),
+                                    Box::new(crate::commands::AddClips { clips: clips_to_add, added_indices: Vec::new() }),
+                                ];
+                                state.commands.execute(
+                                    Box::new(crate::commands::CompositeCommand { desc: "Move Clips Cross-Track".to_string(), cmds }),
+                                    &mut state.project,
+                                );
+                                // Update selection to new locations
+                                state.selected_clips.clear();
+                                state.selected_clip = None;
                             }
                         }
                     } else {
@@ -4439,6 +4489,7 @@ pub fn draw_bottom_panel(
     };
     if close_clicked {
         state.bottom_panel_open = false;
+        state.focused_panel = crate::state::FocusedPanel::Arrangement;
     }
 
     // Drag to resize (only when close wasn't clicked AND mouse is not over a tab button)
@@ -4450,33 +4501,41 @@ pub fn draw_bottom_panel(
     let tabs_total_w = num_tabs * (tab_w + 3);
     let in_tab_area = input.mouse_in_rect(tab_start_x, panel_y, tabs_total_w, handle_h);
 
-    // Double-click on dots zone: maximize / restore / close / open
+    // Double-click on handle: maximize / restore / close / open
+    // Single-click on dots zone (when closed): open halfway
+    // Both actions only fire if the mouse didn't travel far (i.e., it wasn't a drag).
     let dots_zone = input.mouse_in_rect(w / 2 - 30, panel_y, 60, handle_h);
-    if dots_zone && input.mouse_pressed && !input.consumed {
-        if input.click_type == Some(crate::input::ClickType::Double) {
+    let handle_click_zone = handle_hover && !close_area && !in_tab_area;
+    // On press: remember click type (click_type is cleared by begin_frame before release fires)
+    if handle_click_zone && input.mouse_pressed && !input.consumed {
+        state.bottom_panel_click_type = input.click_type;
+    }
+    // On release: act if it wasn't a drag (single) or regardless of drift (double)
+    if handle_click_zone && input.mouse_released && !input.consumed {
+        if state.bottom_panel_click_type == Some(crate::input::ClickType::Double) {
             input.consumed = true;
             if state.bottom_panel_open {
-                if state.bottom_panel_height >= state.bottom_panel_max_h() - 2 {
-                    // Already maximized → close
-                    state.bottom_panel_open = false;
-                } else {
-                    // Open → maximize to top
-                    state.bottom_panel_height = state.bottom_panel_max_h();
-                }
+                // Open (any height) → maximize to top (X button handles closing)
+                state.bottom_panel_height = state.bottom_panel_max_h();
             } else {
-                // Closed + double-click → open fully
+                // Closed + double-click → open fully (maximized)
                 state.bottom_panel_height = state.bottom_panel_max_h();
                 state.bottom_panel_open = true;
             }
-        } else if !state.bottom_panel_open {
-            // Closed + single-click → open halfway
+        } else if state.bottom_panel_click_type == Some(crate::input::ClickType::Single)
+            && !input.dragging
+            && dots_zone
+            && !state.bottom_panel_open
+        {
+            // Closed + single-click on dots zone (no drag) → open halfway
             input.consumed = true;
             state.bottom_panel_height = 400;
             state.bottom_panel_open = true;
         }
     }
 
-    if handle_hover && !close_area && !in_tab_area && !dots_zone && input.mouse_pressed {
+    // Drag to resize: start drag anywhere on the handle (including dots zone)
+    if handle_hover && !close_area && !in_tab_area && input.mouse_pressed {
         state.bottom_panel_dragging = true;
     }
     if state.bottom_panel_dragging && input.mouse_down {
@@ -4487,6 +4546,7 @@ pub fn draw_bottom_panel(
             state.bottom_panel_height = new_h.clamp(min_h, state.bottom_panel_max_h());
         } else {
             state.bottom_panel_open = false;
+            state.focused_panel = crate::state::FocusedPanel::Arrangement;
         }
     }
     if !input.mouse_down {
@@ -4928,9 +4988,11 @@ fn draw_bottom_mixer(
             if solo_clicked {
                 if input.ctrl() {
                     // Ctrl+click: unsolo ALL tracks
+                    let snapshot = state.project.clone();
                     for t in &mut state.project.tracks {
                         t.solo = false;
                     }
+                    state.commands.push_undo_snapshot(snapshot, "Unsolo All");
                     state.dirty = true;
                 } else {
                     state.commands.execute(
@@ -5743,7 +5805,16 @@ fn draw_instrument_rack(
                     let path = dropped.clone();
                     let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
                     if ext == "wav" || ext == "flac" || ext == "ogg" || ext == "mp3" {
-                        state.project.tracks[ti].sampler_file = Some(path);
+                        let track_id = state.project.tracks[ti].id;
+                        let old_value = state.project.tracks[ti].sampler_file.clone();
+                        state.commands.execute(
+                            Box::new(crate::commands::SetSamplerFile {
+                                track_id,
+                                old_value,
+                                new_value: Some(path),
+                            }),
+                            &mut state.project,
+                        );
                         state.dirty = true;
                         state.push_status("Sample loaded".to_string());
                     }
@@ -5754,7 +5825,16 @@ fn draw_instrument_rack(
                         let path = drag_file.to_string_lossy().to_string();
                         let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
                         if ext == "wav" || ext == "flac" || ext == "ogg" || ext == "mp3" {
-                            state.project.tracks[ti].sampler_file = Some(path);
+                            let track_id = state.project.tracks[ti].id;
+                            let old_value = state.project.tracks[ti].sampler_file.clone();
+                            state.commands.execute(
+                                Box::new(crate::commands::SetSamplerFile {
+                                    track_id,
+                                    old_value,
+                                    new_value: Some(path),
+                                }),
+                                &mut state.project,
+                            );
                             state.dirty = true;
                             state.push_status("Sample loaded from browser".to_string());
                             state.sample_drag_path = None;
@@ -7206,7 +7286,9 @@ fn draw_master_rack(
             },
         );
         if toggle_clicked {
+            let snapshot = state.project.clone();
             state.project.master_rack[slot_idx].enabled = !slot_enabled;
+            state.commands.push_undo_snapshot(snapshot, "Toggle Master Effect");
             state.dirty = true;
         }
 
@@ -7230,7 +7312,9 @@ fn draw_master_rack(
             },
         );
         if del_clicked {
+            let snapshot = state.project.clone();
             state.project.master_rack.remove(slot_idx);
+            state.commands.push_undo_snapshot(snapshot, "Remove Master Effect");
             state.dirty = true;
             state.push_status("Master effect removed".to_string());
             break;
@@ -7352,8 +7436,21 @@ fn draw_master_rack(
                     if delta.abs() > 0.001 {
                         let old_val = state.project.master_rack[slot_idx].params[pi].value;
                         let new_val = (old_val + delta).clamp(p_min, p_max);
+                        let old_idx = old_val.round() as usize;
+                        let new_idx = new_val.round() as usize;
                         state.project.master_rack[slot_idx].params[pi].value = new_val;
                         state.dirty = true;
+                        if old_idx != new_idx {
+                            state.commands.execute(
+                                Box::new(crate::commands::SetMasterRackParam {
+                                    slot_idx,
+                                    param_idx: pi,
+                                    old_value: old_val,
+                                    new_value: new_val,
+                                }),
+                                &mut state.project,
+                            );
+                        }
                     }
                 }
                 if dragging && !input.mouse_down {
@@ -7367,6 +7464,7 @@ fn draw_master_rack(
                     && !input.consumed
                 {
                     let opts_len = opts.len();
+                    let old_val = val;
                     let new_idx = if input.shift() {
                         if idx == 0 {
                             opts_len - 1
@@ -7380,6 +7478,17 @@ fn draw_master_rack(
                     state.project.master_rack[slot_idx].params[pi].value = val;
                     state.dirty = true;
                     input.consume();
+                    if (old_val - val).abs() > 1e-4 {
+                        state.commands.execute(
+                            Box::new(crate::commands::SetMasterRackParam {
+                                slot_idx,
+                                param_idx: pi,
+                                old_value: old_val,
+                                new_value: val,
+                            }),
+                            &mut state.project,
+                        );
+                    }
                 }
             } else {
                 let changed = crate::widgets::knob(
@@ -7405,6 +7514,21 @@ fn draw_master_rack(
                 if changed {
                     state.project.master_rack[slot_idx].params[pi].value = val;
                     state.dirty = true;
+                }
+                // Commit master rack param change on mouse release
+                if input.mouse_released && input.drag_widget == knob_id {
+                    let old_val = input.drag_start_value as f32;
+                    if (old_val - val).abs() > 1e-4 {
+                        state.commands.execute(
+                            Box::new(crate::commands::SetMasterRackParam {
+                                slot_idx,
+                                param_idx: pi,
+                                old_value: old_val,
+                                new_value: val,
+                            }),
+                            &mut state.project,
+                        );
+                    }
                 }
             }
         }
@@ -8009,11 +8133,13 @@ fn draw_master_rack(
                     .unwrap_or(0)
                     + 1;
                 let new_slot = create_rack_slot_for_module(&module_name, new_slot_id);
+                let snapshot = state.project.clone();
 
                 if let Some(replace_idx) = state.module_drag_replace_idx.take() {
                     if replace_idx < state.project.master_rack.len() {
                         state.project.master_rack.remove(replace_idx);
                         state.project.master_rack.insert(replace_idx, new_slot);
+                        state.commands.push_undo_snapshot(snapshot, "Replace Master Effect");
                         state.push_status(format!(
                             "Replaced slot {} with {}",
                             replace_idx + 1,
@@ -8025,6 +8151,7 @@ fn draw_master_rack(
                     if let Some(idx) = insert_idx {
                         let idx = idx.min(state.project.master_rack.len());
                         state.project.master_rack.insert(idx, new_slot);
+                        state.commands.push_undo_snapshot(snapshot, "Add Master Effect");
                         state.push_status(format!(
                             "Added {} to master rack at position {}",
                             module_name,
@@ -8032,6 +8159,7 @@ fn draw_master_rack(
                         ));
                     } else {
                         state.project.master_rack.push(new_slot);
+                        state.commands.push_undo_snapshot(snapshot, "Add Master Effect");
                         state.push_status(format!("Added {} to master rack", module_name));
                     }
                 }
@@ -8194,7 +8322,14 @@ fn draw_left_panel(canvas: &mut Canvas<Window>, input: &mut InputState, state: &
             if let Some(new_name) = new_val {
                 let trimmed = new_name.trim().to_string();
                 if !trimmed.is_empty() {
-                    state.project.name = trimmed;
+                    let old_name = state.project.name.clone();
+                    state.commands.execute(
+                        Box::new(crate::commands::SetProjectName {
+                            old_name,
+                            new_name: trimmed,
+                        }),
+                        &mut state.project,
+                    );
                     state.dirty = true;
                 }
             }
@@ -9274,7 +9409,7 @@ fn flatten_tree_node(
 }
 
 /// Toggle expand/collapse of a tree node at the given address.
-fn toggle_tree_node(tree: &mut Vec<crate::state::SampleTreeNode>, addr: &[usize]) {
+fn toggle_tree_node(tree: &mut [crate::state::SampleTreeNode], addr: &[usize]) {
     if addr.is_empty() {
         return;
     }
@@ -10120,9 +10255,7 @@ pub fn draw_project_manager(
     // When the project browser overlay or new-project popup is open, the
     // underlying card must not react to input — use a dead InputState so
     // buttons are drawn but inert.
-    let mut dead_input = InputState::default();
-    dead_input.mouse_x = input.mouse_x;
-    dead_input.mouse_y = input.mouse_y;
+    let mut dead_input = InputState { mouse_x: input.mouse_x, mouse_y: input.mouse_y, ..Default::default() };
     let card_input = if state.project_browser_open || state.new_project_popup_open {
         &mut dead_input
     } else {
@@ -10607,12 +10740,10 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
     // Build a dead input for background draws: preserves mouse position (so
     // hover highlights still track the cursor visually) but has no events.
-    let mut dead_input = InputState::default();
-    dead_input.mouse_x = input.mouse_x;
-    dead_input.mouse_y = input.mouse_y;
-    dead_input.mouse_down = false; // no held-drag either — popups must not see drag state
+    let mut dead_input = InputState { mouse_x: input.mouse_x, mouse_y: input.mouse_y, mouse_down: false, ..Default::default() };
 
     // Helper: pick which input to give to a background draw function.
+    // Block input when an overlay is active (popups, dialogs, etc.).
     macro_rules! bg {
         ($inp:expr) => {
             if layer > crate::state::UiLayer::Base {
@@ -10621,6 +10752,34 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 $inp
             }
         };
+    }
+
+    // Additionally block arranger track/header input when the mouse is in the
+    // bottom panel area so clicks don't bleed through.
+    let mouse_below_panel = state.bottom_panel_open && input.mouse_y >= state.bottom_panel_y();
+    macro_rules! bg_track {
+        ($inp:expr) => {
+            if layer > crate::state::UiLayer::Base || mouse_below_panel {
+                &mut dead_input
+            } else {
+                $inp
+            }
+        };
+    }
+
+    // Pre-consume clicks inside the transport snap dropdown popup area so
+    // widgets drawn before the dropdown overlay can't steal the click.
+    // The dropdown overlay (draw_overlays) processes item-click via
+    // input.mouse_pressed directly, so consumed=true doesn't block it.
+    if state.dropdown_open_id == 200 && layer == crate::state::UiLayer::Base {
+        let dd_x = 424i32;
+        let dd_y = 10i32;
+        let dd_w = 52i32;
+        let dd_h = 28i32;
+        let popup_h = SNAP_RESOLUTIONS.len() as i32 * dd_h;
+        if input.mouse_in_rect(dd_x, dd_y, dd_w, dd_h + popup_h) {
+            input.consumed = true;
+        }
     }
 
     // Layer 0 — background elements (blocked when any overlay is active)
@@ -10638,8 +10797,8 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             draw_loop_ruler(canvas, &mut dead_input, state);
             draw_timeline_ruler(canvas, &mut dead_input, state);
         } else {
-            draw_loop_ruler(canvas, bg!(input), state);
-            draw_timeline_ruler(canvas, bg!(input), state);
+            draw_loop_ruler(canvas, bg_track!(input), state);
+            draw_timeline_ruler(canvas, bg_track!(input), state);
         }
     }
     draw_mode_tabs(canvas, bg!(input), state);
@@ -10649,8 +10808,8 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     // Reset viewport/clip_rect before track rendering
     canvas.set_viewport(None);
     canvas.set_clip_rect(None);
-    draw_track_headers(canvas, bg!(input), state);
-    draw_track_lanes(canvas, bg!(input), state);
+    draw_track_headers(canvas, bg_track!(input), state);
+    draw_track_lanes(canvas, bg_track!(input), state);
 
     // Re-draw rulers on top so they layer over the scrollbar that extends upward
     canvas.set_viewport(None);
@@ -10976,6 +11135,118 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 }
             }
         }
+
+        // ── Audio editor selection drag → arrangement drop ─────────────────────
+        if state.audio_drag_to_arranger {
+            let left = state.arrangement_left_offset();
+            let header_w = state.arrangement.track_header_width;
+            let lane_left = left + header_w;
+            let track_top = state.track_area_top();
+            let zoom = state.arrangement.zoom_x;
+            let scroll_x = state.arrangement.scroll_x;
+            let bpm = state.project.tempo_map.bpm_at(0.0);
+            let drag_len_beats = if bpm > 0.0 {
+                state.audio_drag_length_secs * bpm / 60.0
+            } else {
+                4.0
+            };
+
+            // Gather track y ranges
+            let mut track_rows: Vec<(i32, i32, u32, crate::models::TrackType)> = Vec::new();
+            {
+                let mut y_acc = track_top - state.arrangement.scroll_y;
+                for track in &state.project.tracks {
+                    track_rows.push((y_acc, y_acc + track.height, track.id, track.track_type));
+                    y_acc += track.height;
+                }
+            }
+
+            // Which row is mouse in?
+            let mut target_row: Option<usize> = None;
+            if input.mouse_x > lane_left && input.mouse_y > track_top {
+                for (ri, (yt, yb, _, _)) in track_rows.iter().enumerate() {
+                    if input.mouse_y >= *yt && input.mouse_y < *yb {
+                        target_row = Some(ri);
+                        break;
+                    }
+                }
+            }
+
+            if input.mouse_down {
+                // Draw ghost clip at mouse position in the arrangement
+                if input.mouse_x > lane_left && input.mouse_y > track_top {
+                    if let Some(row) = target_row {
+                        let beat = scroll_x + (input.mouse_x - lane_left) as f64 / zoom;
+                        let snapped = state.snap.snap(beat);
+                        let gx = lane_left + ((snapped - scroll_x) * zoom) as i32;
+                        let gw = (drag_len_beats * zoom) as i32;
+                        let mut gy = track_top - state.arrangement.scroll_y;
+                        for ti in 0..row {
+                            gy += state.project.tracks[ti].height;
+                        }
+                        let gh = state.project.tracks[row].height;
+                        canvas.set_clip_rect(Rect::new(
+                            lane_left,
+                            track_top,
+                            (state.window_width as i32 - lane_left) as u32,
+                            state.track_area_height() as u32,
+                        ));
+                        let is_audio_track = track_rows[row].3 == crate::models::TrackType::Audio;
+                        if is_audio_track {
+                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(100, 200, 140, 80));
+                            let _ = canvas.fill_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
+                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(100, 200, 140, 200));
+                            let _ = canvas.draw_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
+                        } else {
+                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 200, 60, 60));
+                            let _ = canvas.fill_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
+                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 200, 60, 180));
+                            let _ = canvas.draw_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
+                        }
+                        canvas.set_clip_rect(None);
+                    }
+                }
+            } else {
+                // Mouse released — drop
+                if input.mouse_x > lane_left && input.mouse_y > track_top {
+                    if let Some(row) = target_row {
+                        let beat = scroll_x + (input.mouse_x - lane_left) as f64 / zoom;
+                        let snapped = state.snap.snap(beat);
+                        let track_type = track_rows[row].3;
+                        let track_id = track_rows[row].2;
+
+                        if track_type == crate::models::TrackType::Audio {
+                            // Drop as an audio clip on this audio track
+                            let clip = crate::models::Clip::Audio(crate::models::AudioClip {
+                                source_file: state.audio_drag_source.clone(),
+                                start_time: snapped,
+                                offset: state.audio_drag_offset,
+                                length: drag_len_beats,
+                                gain: 1.0,
+                                name: {
+                                    let p = std::path::Path::new(&state.audio_drag_source);
+                                    p.file_stem().and_then(|s| s.to_str()).unwrap_or("audio").to_string()
+                                },
+                                color: [100, 200, 140, 255],
+                            });
+                            state.commands.execute(
+                                Box::new(crate::commands::AddClips {
+                                    clips: vec![(track_id, clip)],
+                                    added_indices: vec![],
+                                }),
+                                &mut state.project,
+                            );
+                            state.dirty = true;
+                            state.push_status("Dropped audio region as clip");
+                        } else {
+                            state.push_status("Drop audio regions on audio tracks");
+                        }
+                    }
+                }
+                state.audio_drag_to_arranger = false;
+                state.audio_drag_source.clear();
+            }
+        }
     } // end if layer == Base (drag-drop handlers)
 
     // Reset viewport/clip_rect before bottom panel
@@ -10991,6 +11262,12 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     if state.sample_drag_path.is_some() && !input.mouse_down {
         state.sample_drag_path = None;
         state.sample_drag_len_beats = None;
+    }
+
+    // Fallback: clear audio drag to arranger if mouse released
+    if state.audio_drag_to_arranger && !input.mouse_down {
+        state.audio_drag_to_arranger = false;
+        state.audio_drag_source.clear();
     }
 
     // ── Focus indicator: a 2-px accent border on the active panel ────
@@ -11259,6 +11536,16 @@ fn draw_overlays(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mu
     // Save As popup
     if state.save_as_popup_open {
         draw_save_as_popup(canvas, input, state);
+    }
+
+    // Audio Export popup
+    if state.audio_export_popup_open {
+        draw_audio_export_popup(canvas, input, state);
+    }
+
+    // MIDI Export popup
+    if state.midi_export_popup_open {
+        draw_midi_export_popup(canvas, input, state);
     }
 
     // ── Confirmation dialogs (ConfirmDialog layer — highest priority) ─────────
@@ -11726,7 +12013,14 @@ fn draw_project_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
         if let Some(new_name) = new_val {
             let trimmed = new_name.trim().to_string();
             if !trimmed.is_empty() {
-                state.project.name = trimmed;
+                let old_name = state.project.name.clone();
+                state.commands.execute(
+                    Box::new(crate::commands::SetProjectName {
+                        old_name,
+                        new_name: trimmed,
+                    }),
+                    &mut state.project,
+                );
                 state.dirty = true;
             }
         }
@@ -12336,6 +12630,593 @@ fn draw_save_as_popup(
         && input.active_widget == WidgetId::None
     {
         state.save_as_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    // Block all input from passing through
+    input.consumed = true;
+}
+
+fn draw_audio_export_popup(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    state: &mut AppState,
+) {
+    let w = state.window_width as i32;
+    let h = state.window_height as i32;
+    let popup_w = 500i32;
+    let popup_h = 170i32;
+    let popup_x = w / 2 - popup_w / 2;
+    let popup_y = h / 2 - popup_h / 2;
+
+    // Dimmed backdrop
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 140));
+    let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
+
+    // Panel shadow
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 120));
+    let _ = canvas.fill_rect(Rect::new(
+        popup_x + 4,
+        popup_y + 4,
+        popup_w as u32,
+        popup_h as u32,
+    ));
+
+    // Panel background
+    canvas.set_draw_color(Theme::c(state.theme.panel_bg));
+    let _ = canvas.fill_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+
+    // Panel border
+    canvas.set_draw_color(Theme::c(state.theme.accent));
+    let _ = canvas.draw_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+
+    // Title bar
+    canvas.set_draw_color(Theme::c(state.theme.bg_light));
+    let _ = canvas.fill_rect(Rect::new(popup_x, popup_y, popup_w as u32, 22));
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "EXPORT AUDIO",
+        popup_x + 10,
+        popup_y + 8,
+        popup_w - 20,
+        Theme::c(state.theme.text_primary),
+    );
+
+    let lx = popup_x + 14;
+    let vx = popup_x + 80;
+    let rw = popup_w - 94;
+    let row0_y = popup_y + 34;
+    let row_h = 28;
+
+    // ── Row 0: Directory ──────────────────────────────────────────
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "Folder",
+        lx,
+        row0_y + 3,
+        60,
+        Theme::c(state.theme.text_secondary),
+    );
+    let (dir_committed, dir_new_val) = text_field(
+        canvas,
+        input,
+        &state.theme,
+        &TextFieldParams {
+            id: 303,
+            x: vx,
+            y: row0_y,
+            width: rw,
+            height: 20,
+            hint: Some("/path/to/export/directory".into()),
+        },
+        &state.audio_export_dir.clone(),
+        &mut state.text_field_active_id,
+        &mut state.text_field_buffer,
+        &mut state.text_field_cursor,
+    );
+    if dir_committed {
+        if let Some(new_dir) = dir_new_val {
+            let trimmed = new_dir.trim().to_string();
+            if !trimmed.is_empty() {
+                state.audio_export_dir = trimmed;
+            }
+        }
+    }
+
+    // ── Row 1: File name ──────────────────────────────────────────
+    let row1_y = row0_y + row_h;
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "Name",
+        lx,
+        row1_y + 3,
+        60,
+        Theme::c(state.theme.text_secondary),
+    );
+    let (committed, new_val) = text_field(
+        canvas,
+        input,
+        &state.theme,
+        &TextFieldParams {
+            id: 302,
+            x: vx,
+            y: row1_y,
+            width: rw,
+            height: 20,
+            hint: Some("filename.wav".into()),
+        },
+        &state.audio_export_name.clone(),
+        &mut state.text_field_active_id,
+        &mut state.text_field_buffer,
+        &mut state.text_field_cursor,
+    );
+    if committed {
+        if let Some(new_name) = new_val {
+            let trimmed = new_name.trim().to_string();
+            if !trimmed.is_empty() {
+                state.audio_export_name = trimmed;
+            }
+        }
+    }
+
+    // Auto-activate directory text field on first open
+    if state.text_field_active_id == 0 {
+        state.text_field_active_id = 303;
+        state.text_field_buffer = state.audio_export_dir.clone();
+        state.text_field_cursor = state.text_field_buffer.len();
+    }
+
+    // ── Row 2: Preview path ───────────────────────────────────────
+    let row2_y = row1_y + row_h;
+    let preview_dir = if state.text_field_active_id == 303 {
+        state.text_field_buffer.clone()
+    } else {
+        state.audio_export_dir.clone()
+    };
+    let preview_name = if state.text_field_active_id == 302 {
+        state.text_field_buffer.clone()
+    } else {
+        state.audio_export_name.clone()
+    };
+    let preview_name = if preview_name.is_empty() {
+        state.audio_export_name.clone()
+    } else {
+        preview_name
+    };
+    let preview_path = std::path::Path::new(&preview_dir).join(&preview_name);
+    let preview_str = format!("→ {}", preview_path.display());
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        &preview_str,
+        vx,
+        row2_y + 3,
+        rw,
+        Theme::c(state.theme.text_secondary),
+    );
+
+    // ── Row 3: Buttons ────────────────────────────────────────────
+    let btn_y = row2_y + row_h - 4;
+    let btn_w = (rw - 6) / 2;
+
+    let export_btn_id = input.next_id();
+    let export_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: export_btn_id,
+            x: vx,
+            y: btn_y,
+            width: btn_w,
+            height: 26,
+            label: "Export".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Export audio to WAV file".into()),
+            ..Default::default()
+        },
+    );
+
+    let cancel_btn_id = input.next_id();
+    let cancel_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: cancel_btn_id,
+            x: vx + btn_w + 6,
+            y: btn_y,
+            width: btn_w,
+            height: 26,
+            label: "Cancel".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Cancel export".into()),
+            ..Default::default()
+        },
+    );
+
+    // Accept Enter as Export, Escape as Cancel
+    let enter_pressed = input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Return)
+        || input
+            .keys_pressed
+            .contains(&sdl2::keyboard::Keycode::KpEnter);
+    let esc_pressed = input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Escape);
+
+    if export_clicked || enter_pressed {
+        // Get the final directory from the text field
+        let export_dir = if state.text_field_active_id == 303 {
+            let s = state.text_field_buffer.trim().to_string();
+            if s.is_empty() {
+                state.audio_export_dir.clone()
+            } else {
+                state.audio_export_dir = s.clone();
+                s
+            }
+        } else {
+            state.audio_export_dir.clone()
+        };
+        // Get the final filename from the text field
+        let export_name = if state.text_field_active_id == 302 {
+            let s = state.text_field_buffer.trim().to_string();
+            if s.is_empty() {
+                state.audio_export_name.clone()
+            } else {
+                state.audio_export_name = s.clone();
+                s
+            }
+        } else {
+            state.audio_export_name.clone()
+        };
+        // Ensure .wav extension
+        let export_name = if !export_name.to_lowercase().ends_with(".wav") {
+            format!("{}.wav", export_name)
+        } else {
+            export_name
+        };
+        // Build export path from directory + filename
+        let export_path = std::path::Path::new(&export_dir).join(&export_name);
+        // Create directory if it doesn't exist
+        if let Some(parent) = export_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Copy the source file to the export path
+        match std::fs::copy(&state.audio_export_source, &export_path) {
+            Ok(_) => {
+                state.push_status(format!("Exported to {}", export_path.display()));
+                println!("[audio-export] Exported to {}", export_path.display());
+            }
+            Err(e) => {
+                state.push_status(format!("Export failed: {}", e));
+                eprintln!("[audio-export] Error: {}", e);
+            }
+        }
+        state.audio_export_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    if cancel_clicked || esc_pressed {
+        state.audio_export_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    // Block clicks outside popup (closing it)
+    if input.mouse_pressed
+        && !input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h)
+        && input.active_widget == WidgetId::None
+    {
+        state.audio_export_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    // Block all input from passing through
+    input.consumed = true;
+}
+
+fn draw_midi_export_popup(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    state: &mut AppState,
+) {
+    let w = state.window_width as i32;
+    let h = state.window_height as i32;
+    let popup_w = 500i32;
+    let popup_h = 170i32;
+    let popup_x = w / 2 - popup_w / 2;
+    let popup_y = h / 2 - popup_h / 2;
+
+    // Dimmed backdrop
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 140));
+    let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
+
+    // Panel shadow
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 120));
+    let _ = canvas.fill_rect(Rect::new(
+        popup_x + 4,
+        popup_y + 4,
+        popup_w as u32,
+        popup_h as u32,
+    ));
+
+    // Panel background
+    canvas.set_draw_color(Theme::c(state.theme.panel_bg));
+    let _ = canvas.fill_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+
+    // Panel border
+    canvas.set_draw_color(Theme::c(state.theme.accent));
+    let _ = canvas.draw_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
+
+    // Title bar
+    canvas.set_draw_color(Theme::c(state.theme.bg_light));
+    let _ = canvas.fill_rect(Rect::new(popup_x, popup_y, popup_w as u32, 22));
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "EXPORT MIDI",
+        popup_x + 10,
+        popup_y + 8,
+        popup_w - 20,
+        Theme::c(state.theme.text_primary),
+    );
+
+    let lx = popup_x + 14;
+    let vx = popup_x + 80;
+    let rw = popup_w - 94;
+    let row0_y = popup_y + 34;
+    let row_h = 28;
+
+    // ── Row 0: Directory ──────────────────────────────────────────
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "Folder",
+        lx,
+        row0_y + 3,
+        60,
+        Theme::c(state.theme.text_secondary),
+    );
+    let (dir_committed, dir_new_val) = text_field(
+        canvas,
+        input,
+        &state.theme,
+        &TextFieldParams {
+            id: 304,
+            x: vx,
+            y: row0_y,
+            width: rw,
+            height: 20,
+            hint: Some("/path/to/export/directory".into()),
+        },
+        &state.midi_export_dir.clone(),
+        &mut state.text_field_active_id,
+        &mut state.text_field_buffer,
+        &mut state.text_field_cursor,
+    );
+    if dir_committed {
+        if let Some(new_dir) = dir_new_val {
+            let trimmed = new_dir.trim().to_string();
+            if !trimmed.is_empty() {
+                state.midi_export_dir = trimmed;
+            }
+        }
+    }
+
+    // ── Row 1: File name ──────────────────────────────────────────
+    let row1_y = row0_y + row_h;
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "Name",
+        lx,
+        row1_y + 3,
+        60,
+        Theme::c(state.theme.text_secondary),
+    );
+    let (name_committed, name_new_val) = text_field(
+        canvas,
+        input,
+        &state.theme,
+        &TextFieldParams {
+            id: 305,
+            x: vx,
+            y: row1_y,
+            width: rw,
+            height: 20,
+            hint: Some("filename.mid".into()),
+        },
+        &state.midi_export_name.clone(),
+        &mut state.text_field_active_id,
+        &mut state.text_field_buffer,
+        &mut state.text_field_cursor,
+    );
+    if name_committed {
+        if let Some(new_name) = name_new_val {
+            let trimmed = new_name.trim().to_string();
+            if !trimmed.is_empty() {
+                state.midi_export_name = trimmed;
+            }
+        }
+    }
+
+    // Auto-activate directory text field on first open
+    if state.text_field_active_id == 0 {
+        state.text_field_active_id = 304;
+        state.text_field_buffer = state.midi_export_dir.clone();
+        state.text_field_cursor = state.text_field_buffer.len();
+    }
+
+    // ── Row 2: Preview path ───────────────────────────────────────
+    let row2_y = row1_y + row_h;
+    let preview_dir = if state.text_field_active_id == 304 {
+        state.text_field_buffer.clone()
+    } else {
+        state.midi_export_dir.clone()
+    };
+    let preview_name = if state.text_field_active_id == 305 {
+        state.text_field_buffer.clone()
+    } else {
+        state.midi_export_name.clone()
+    };
+    let preview_name = if preview_name.is_empty() {
+        state.midi_export_name.clone()
+    } else {
+        preview_name
+    };
+    let preview_path = std::path::Path::new(&preview_dir).join(&preview_name);
+    let preview_str = format!("→ {}", preview_path.display());
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        &preview_str,
+        vx,
+        row2_y + 3,
+        rw,
+        Theme::c(state.theme.text_secondary),
+    );
+
+    // ── Row 3: Buttons ────────────────────────────────────────────
+    let btn_y = row2_y + row_h - 4;
+    let btn_w = (rw - 6) / 2;
+
+    let export_btn_id = input.next_id();
+    let export_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: export_btn_id,
+            x: vx,
+            y: btn_y,
+            width: btn_w,
+            height: 26,
+            label: "Export".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Export MIDI file".into()),
+            ..Default::default()
+        },
+    );
+
+    let cancel_btn_id = input.next_id();
+    let cancel_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: cancel_btn_id,
+            x: vx + btn_w + 6,
+            y: btn_y,
+            width: btn_w,
+            height: 26,
+            label: "Cancel".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Cancel export".into()),
+            ..Default::default()
+        },
+    );
+
+    // Accept Enter as Export, Escape as Cancel
+    let enter_pressed = input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Return)
+        || input
+            .keys_pressed
+            .contains(&sdl2::keyboard::Keycode::KpEnter);
+    let esc_pressed = input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Escape);
+
+    if export_clicked || enter_pressed {
+        // Get the final directory from the text field
+        let export_dir = if state.text_field_active_id == 304 {
+            let s = state.text_field_buffer.trim().to_string();
+            if s.is_empty() {
+                state.midi_export_dir.clone()
+            } else {
+                state.midi_export_dir = s.clone();
+                s
+            }
+        } else {
+            state.midi_export_dir.clone()
+        };
+        // Get the final filename from the text field
+        let export_name = if state.text_field_active_id == 305 {
+            let s = state.text_field_buffer.trim().to_string();
+            if s.is_empty() {
+                state.midi_export_name.clone()
+            } else {
+                state.midi_export_name = s.clone();
+                s
+            }
+        } else {
+            state.midi_export_name.clone()
+        };
+        // Ensure .mid extension
+        let export_name = if !export_name.to_lowercase().ends_with(".mid") {
+            format!("{}.mid", export_name)
+        } else {
+            export_name
+        };
+        // Build export path
+        let export_path = std::path::Path::new(&export_dir).join(&export_name);
+        // Create directory if it doesn't exist
+        if let Some(parent) = export_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Export the selected clip
+        let bpm = state.project.tempo_map.bpm_at(0.0);
+        let mut export_result: Result<(), String> = Err("No MIDI clip selected".to_string());
+        if let Some((tid, ci)) = state.selected_clip {
+            if let Some(track) = state.project.tracks.iter().find(|t| t.id == tid) {
+                if let Some(crate::models::Clip::Midi(m)) = track.clips.get(ci) {
+                    let clip_name = if m.name.is_empty() {
+                        format!("clip_{}", ci)
+                    } else {
+                        m.name.clone()
+                    };
+                    export_result = crate::models::export_midi_file(
+                        m,
+                        &export_path.to_string_lossy(),
+                        bpm,
+                        &clip_name,
+                    );
+                }
+            }
+        }
+        match export_result {
+            Ok(()) => {
+                state.push_status(format!("MIDI exported to {}", export_path.display()));
+                println!("[midi-export] Exported to {}", export_path.display());
+            }
+            Err(e) => {
+                state.push_status(format!("MIDI export failed: {}", e));
+                eprintln!("[midi-export] Error: {}", e);
+            }
+        }
+        state.midi_export_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    if cancel_clicked || esc_pressed {
+        state.midi_export_popup_open = false;
+        state.text_field_active_id = 0;
+    }
+
+    // Block clicks outside popup
+    if input.mouse_pressed
+        && !input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h)
+        && input.active_widget == WidgetId::None
+    {
+        state.midi_export_popup_open = false;
         state.text_field_active_id = 0;
     }
 
@@ -13305,12 +14186,13 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
             &mut vol_pos,
         );
         if vol_changed {
-            let pos_delta = vol_pos - input.drag_start_value as f32;
             let volume = vol_pos_to_gain(vol_pos);
             if is_multi {
-                // Multi-track: snapshot origins on first change, apply relative delta
+                // Multi-track: snapshot origins on first change, apply raw-pixel delta
                 if state.multi_vol_drag_origins.is_empty() {
                     state.multi_slider_snapshot = Some(state.project.clone());
+                    state.multi_vol_drag_start_x = input.mouse_y; // vertical slider → use Y
+                    state.multi_vol_slider_w = (sh - 120).max(1);
                     state.multi_vol_drag_origins = state
                         .project
                         .tracks
@@ -13319,6 +14201,9 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
                         .map(|t| (t.id, vol_gain_to_pos(t.volume)))
                         .collect();
                 }
+                // Vertical slider: upward movement = increase (invert Y delta)
+                let slider_h = state.multi_vol_slider_w as f32;
+                let pos_delta = (state.multi_vol_drag_start_x - input.mouse_y) as f32 / slider_h;
                 for &(tid, orig_pos) in &state.multi_vol_drag_origins {
                     let new_pos = (orig_pos + pos_delta).clamp(0.0, 1.0);
                     let new_gain = vol_pos_to_gain(new_pos);
@@ -13380,10 +14265,10 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
             &mut pan_val,
         );
         if pan_changed {
-            let pan_delta = pan_val - input.drag_start_value as f32;
             if is_multi {
                 if state.multi_pan_drag_origins.is_empty() {
                     state.multi_slider_snapshot = Some(state.project.clone());
+                    state.multi_pan_drag_start_x = input.mouse_y;
                     state.multi_pan_drag_origins = state
                         .project
                         .tracks
@@ -13392,6 +14277,7 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
                         .map(|t| (t.id, t.pan))
                         .collect();
                 }
+                let pan_delta = (state.multi_pan_drag_start_x - input.mouse_y) as f32 * 0.008;
                 for &(tid, orig_pan) in &state.multi_pan_drag_origins {
                     let new_pan = (orig_pan + pan_delta).clamp(-1.0, 1.0);
                     if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == tid) {
@@ -13556,8 +14442,8 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
                     if let Some(anchor) = anchor_idx {
                         let lo = anchor.min(clicked_idx);
                         let hi = anchor.max(clicked_idx);
-                        for idx in lo..=hi {
-                            state.selected_tracks.insert(track_ids[idx]);
+                        for &tid in &track_ids[lo..=hi] {
+                            state.selected_tracks.insert(tid);
                         }
                     } else {
                         state.selected_tracks.insert(track_id);
@@ -13681,6 +14567,7 @@ fn draw_clip_manager(
     state.sync_clip_library();
 
     // Build display list: (track_id, lib_idx, display_name, color, length, clip_type, in_arrangement)
+    #[allow(clippy::type_complexity)]
     let mut all_clips: Vec<(u32, usize, String, [u8; 4], f64, u8, bool)> = Vec::new();
     for (lib_idx, (track_id, clip)) in state.clip_library.iter().enumerate() {
         let (name, color, len, ctype) = match clip {
@@ -14249,7 +15136,7 @@ fn draw_piano_roll_impl(
     const TOOLBAR_H: i32 = 22; // piano roll toolbar
     const RULER_H: i32 = 20; // beat/bar ruler at top
     const NOTE_H: i32 = 12; // height of each semitone row
-    const SCROLL_T: i32 = 10; // scrollbar thickness
+    const SCROLL_T: i32 = 14; // scrollbar thickness
     const TOTAL: i32 = 128; // MIDI pitches
     let vel_h: i32 = if state.velocity_editor_visible { 68 } else { 0 };
 
@@ -14444,31 +15331,6 @@ fn draw_piano_roll_impl(
         tb_x += 36;
     }
 
-    // AUD (Audition) toggle button — play sound when drawing notes
-    {
-        let aud_btn = button(
-            canvas,
-            input,
-            &state.theme,
-            &ButtonParams {
-                id: WidgetId::Auto(80030),
-                x: tb_x,
-                y: tb_y,
-                width: 32,
-                height: tb_h,
-                label: "AUD".to_string(),
-                toggled: state.piano_roll_audition_on_draw,
-                icon: ButtonIcon::None,
-                hint: Some("Toggle note audition while drawing".into()),
-                ..Default::default()
-            },
-        );
-        if aud_btn {
-            state.piano_roll_audition_on_draw = !state.piano_roll_audition_on_draw;
-        }
-        tb_x += 36;
-    }
-
     // Select All button
     {
         let sel_all_btn = button(
@@ -14523,6 +15385,64 @@ fn draw_piano_roll_impl(
         if desel_btn {
             state.piano_roll_selected_notes.clear();
         }
+    }
+
+    // MIDI Export button
+    {
+        tb_x += 22;
+        // Separator
+        canvas.set_draw_color(Theme::c(state.theme.panel_border));
+        let _ = canvas.draw_line(
+            sdl2::rect::Point::new(tb_x, toolbar_top + 3),
+            sdl2::rect::Point::new(tb_x, toolbar_top + TOOLBAR_H - 4),
+        );
+        tb_x += 6;
+
+        let midi_exp_btn = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: WidgetId::Auto(80026),
+                x: tb_x,
+                y: tb_y,
+                width: 36,
+                height: tb_h,
+                label: "MID".to_string(),
+                toggled: false,
+                icon: ButtonIcon::None,
+                hint: Some("Export clip as MIDI file (.mid)".into()),
+                ..Default::default()
+            },
+        );
+        if midi_exp_btn {
+            if let Some((tid, ci, _, _)) = clip_info {
+                if let Some(track) = state.project.tracks.iter().find(|t| t.id == tid) {
+                    if let Some(crate::models::Clip::Midi(m)) = track.clips.get(ci) {
+                        let clip_name = if m.name.is_empty() {
+                            format!("clip_{}", ci)
+                        } else {
+                            m.name.clone()
+                        };
+                        state.midi_export_name = format!("{}.mid", clip_name);
+                        // Default export directory: project file dir or home
+                        state.midi_export_dir = if let Some(ref p) = state.last_save_path {
+                            std::path::Path::new(p)
+                                .parent()
+                                .map(|d| d.to_string_lossy().to_string())
+                                .unwrap_or_else(|| ".".to_string())
+                        } else {
+                            std::env::current_dir()
+                                .map(|d| d.to_string_lossy().to_string())
+                                .unwrap_or_else(|_| ".".to_string())
+                        };
+                        state.midi_export_popup_open = true;
+                    }
+                }
+            }
+        }
+        tb_x += 40;
+        let _ = tb_x; // suppress unused-assignment warning
     }
 
     // ── No clip selected message ──────────────────────────────────────
@@ -14619,9 +15539,13 @@ fn draw_piano_roll_impl(
         }
         let ny = pitch_to_y(pitch);
         let is_black = matches!(pitch % 12, 1 | 3 | 6 | 8 | 10);
+        let is_kbd_held = state.piano_keyboard_mode
+            && state.piano_keyboard_held.contains(&(pitch as u8));
 
         // Row background
-        let row_col = if is_black {
+        let row_col = if is_kbd_held {
+            sdl2::pixels::Color::RGBA(60, 120, 180, 255) // keyboard-played note highlight
+        } else if is_black {
             sdl2::pixels::Color::RGBA(24, 24, 30, 255)
         } else if pitch % 12 == 0 {
             sdl2::pixels::Color::RGBA(32, 38, 42, 255) // C notes slightly highlighted
@@ -14658,6 +15582,8 @@ fn draw_piano_roll_impl(
             }
             let ny = pitch_to_y(pitch);
             let is_black = matches!(pitch % 12, 1 | 3 | 6 | 8 | 10);
+            let is_kbd_held = state.piano_keyboard_mode
+                && state.piano_keyboard_held.contains(&(pitch as u8));
 
             // Note name lookup
             let note_names = [
@@ -14668,7 +15594,12 @@ fn draw_piano_roll_impl(
             let note_label = format!("{}{}", note_names[note_idx], octave);
 
             if is_black {
-                canvas.set_draw_color(sdl2::pixels::Color::RGBA(30, 30, 35, 255));
+                let key_col = if is_kbd_held {
+                    sdl2::pixels::Color::RGBA(60, 140, 220, 255)
+                } else {
+                    sdl2::pixels::Color::RGBA(30, 30, 35, 255)
+                };
+                canvas.set_draw_color(key_col);
                 let _ = canvas.fill_rect(Rect::new(
                     2,
                     ny + 1,
@@ -14686,7 +15617,12 @@ fn draw_piano_roll_impl(
                     sdl2::pixels::Color::RGBA(140, 140, 155, 180),
                 );
             } else {
-                canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 200, 210, 230));
+                let key_col = if is_kbd_held {
+                    sdl2::pixels::Color::RGBA(80, 160, 240, 255)
+                } else {
+                    sdl2::pixels::Color::RGBA(200, 200, 210, 230)
+                };
+                canvas.set_draw_color(key_col);
                 let _ = canvas.fill_rect(Rect::new(
                     2,
                     ny + 1,
@@ -14694,7 +15630,9 @@ fn draw_piano_roll_impl(
                     (NOTE_H - 2) as u32,
                 ));
                 // Note name on white key (C notes highlighted)
-                let text_col = if pitch % 12 == 0 {
+                let text_col = if is_kbd_held {
+                    sdl2::pixels::Color::RGBA(255, 255, 255, 230)
+                } else if pitch % 12 == 0 {
                     sdl2::pixels::Color::RGBA(40, 60, 80, 220)
                 } else {
                     sdl2::pixels::Color::RGBA(60, 60, 75, 190)
@@ -14906,8 +15844,7 @@ fn draw_piano_roll_impl(
         // Velocity brightness strip (top 2px)
         let vel_t = velocity as f32 / 127.0;
         let strip_h = ((vel_t * (NOTE_H - 2) as f32) as i32)
-            .max(1)
-            .min(NOTE_H - 2);
+            .clamp(1, NOTE_H - 2);
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 255, 255, 50));
         let _ = canvas.fill_rect(Rect::new(nx, ny + 1, nw as u32, strip_h as u32));
 
@@ -15142,47 +16079,6 @@ fn draw_piano_roll_impl(
                     }
                 }
             }
-
-            // Audition the dragged pitch when it changes
-            if state.piano_roll_audition_on_draw {
-                // Pick one representative pitch (lowest selected note's new pitch)
-                let new_pitch = origins
-                    .values()
-                    .map(|&(_, orig_p)| ((orig_p as i32 + dy_semi).clamp(0, 127)) as u8)
-                    .min();
-                if let Some(new_pitch) = new_pitch {
-                    let last_pitch = state
-                        .preview_notes
-                        .iter()
-                        .find(|&&(t, _, _)| {
-                            t == state
-                                .project
-                                .tracks
-                                .iter()
-                                .position(|tr| tr.id == track_id)
-                                .unwrap_or(usize::MAX)
-                        })
-                        .map(|&(_, p, _)| p);
-                    if last_pitch != Some(new_pitch) {
-                        if let Some(ti) =
-                            state.project.tracks.iter().position(|t| t.id == track_id)
-                        {
-                            // Stop old preview pitch
-                            for &(_, p, _) in state
-                                .preview_notes
-                                .iter()
-                                .filter(|&&(t, _, _)| t == ti)
-                                .collect::<Vec<_>>()
-                            {
-                                state.piano_note_off_queue.push(p);
-                            }
-                            state.preview_notes.retain(|&(t, _, _)| t != ti);
-                            // Trigger new pitch
-                            state.preview_notes.push((ti, new_pitch, 100));
-                        }
-                    }
-                }
-            }
         }
         if input.mouse_released {
             if state.piano_roll_clone_drag {
@@ -15256,18 +16152,6 @@ fn draw_piano_roll_impl(
             }
             state.piano_roll_moving = false;
             state.piano_roll_move_origins.clear();
-            // Stop any preview notes triggered during drag
-            if let Some(ti) = state.project.tracks.iter().position(|t| t.id == track_id) {
-                for &(_, p, _) in state
-                    .preview_notes
-                    .iter()
-                    .filter(|&&(t, _, _)| t == ti)
-                    .collect::<Vec<_>>()
-                {
-                    state.piano_note_off_queue.push(p);
-                }
-                state.preview_notes.retain(|&(t, _, _)| t != ti);
-            }
         }
     }
 
@@ -15304,9 +16188,6 @@ fn draw_piano_roll_impl(
                 &mut state.project,
             );
             state.piano_roll_draw_drag = None;
-            // Stop the preview note
-            state.preview_notes.retain(|&(_, p, _)| p != note_pitch);
-            state.piano_note_off_queue.push(note_pitch);
             let _ = drag_sx;
         }
     }
@@ -15517,13 +16398,6 @@ fn draw_piano_roll_impl(
                     let beat_in_clip = pr_snap(cur_beat).max(0.0);
                     state.piano_roll_draw_drag =
                         Some((beat_in_clip, cur_pitch, input.mouse_x, cur_beat));
-                    // Preview the note being drawn (if audition enabled)
-                    if state.piano_roll_audition_on_draw {
-                        if let Some(ti) = state.project.tracks.iter().position(|t| t.id == track_id)
-                        {
-                            state.preview_notes.push((ti, cur_pitch, 100));
-                        }
-                    }
                 }
             }
         }
@@ -15699,69 +16573,6 @@ fn draw_piano_roll_impl(
         if down {
             input.consume_key(sdl2::keyboard::Keycode::Down);
         }
-    }
-
-    // ── Scrollbars ────────────────────────────────────────────────────
-    // Horizontal (with squeeze handles to zoom)
-    {
-        let total_content_beats = clip_len + 2.0; // clip length + small margin
-        let visible_beats = grid_w as f64 / zoom;
-        let thumb_ratio = (visible_beats / total_content_beats).clamp(0.02, 1.0) as f32;
-        let max_scroll = (total_content_beats - visible_beats).max(0.0);
-        let cur = if max_scroll > 0.0 {
-            (scroll_x / max_scroll) as f32
-        } else {
-            0.0
-        };
-        let (new_s, new_ratio) = scrollbar_with_squeeze(
-            canvas,
-            input,
-            &state.theme,
-            WidgetId::Auto(80010),
-            WidgetId::Auto(80012),
-            WidgetId::Auto(80013),
-            KEY_W,
-            hscroll_y,
-            grid_w,
-            SCROLL_T,
-            ScrollbarDir::Horizontal,
-            cur.clamp(0.0, 1.0),
-            thumb_ratio,
-        );
-        // new_ratio controls zoom: larger ratio = more beats visible = zoom out
-        if (new_ratio - thumb_ratio).abs() > 0.001 {
-            let new_visible_beats = (new_ratio as f64 * total_content_beats).max(0.25);
-            state.piano_roll_zoom_x = (grid_w as f64 / new_visible_beats).clamp(8.0, 2000.0);
-        }
-        let new_visible_beats = grid_w as f64 / state.piano_roll_zoom_x;
-        let new_max_scroll = (total_content_beats - new_visible_beats).max(0.0);
-        state.piano_roll_scroll_x = (new_s as f64 * new_max_scroll).max(0.0);
-    }
-    // Vertical (with squeeze handles to zoom row height — not implemented yet, regular scroll)
-    {
-        let total_semitones = TOTAL as f32;
-        let visible_semitones = (grid_h / NOTE_H) as f32;
-        let thumb_ratio = (visible_semitones / total_semitones).clamp(0.02, 1.0);
-        let max_scroll = (TOTAL - grid_h / NOTE_H).max(0);
-        let cur = if max_scroll > 0 {
-            scroll_y as f32 / max_scroll as f32
-        } else {
-            0.0
-        };
-        let new_s = scrollbar(
-            canvas,
-            input,
-            &state.theme,
-            WidgetId::Auto(80011),
-            vscroll_x,
-            grid_top,
-            grid_h,
-            SCROLL_T,
-            ScrollbarDir::Vertical,
-            cur.clamp(0.0, 1.0),
-            thumb_ratio,
-        );
-        state.piano_roll_scroll_y = (new_s * max_scroll as f32) as i32;
     }
 
     // ── Mouse-wheel scroll/zoom ───────────────────────────────────────
@@ -15953,7 +16764,7 @@ fn draw_piano_roll_impl(
         canvas.set_clip_rect(None);
         let sb_x = KEY_W;
         let sb_y = hscroll_y;
-        let sb_len = grid_w - SCROLL_T;
+        let sb_len = grid_w; // full width from piano keys to vertical scrollbar
         let sb_h = SCROLL_T;
 
         let clip_len_beats = clip_info.map(|(_, _, _, l)| l).unwrap_or(32.0);
@@ -16054,6 +16865,40 @@ fn draw_piano_roll_impl(
     }
 }
 
+/// Find the nearest zero crossing to `idx` in `samples`, searching up to `max_search`
+/// samples in each direction. A zero crossing is where the sample value crosses zero
+/// (sign change) or is exactly zero. Returns the adjusted index.
+fn nearest_zero_crossing(samples: &[f32], idx: usize, max_search: usize) -> usize {
+    let len = samples.len();
+    if idx >= len {
+        return idx;
+    }
+    // If the sample at idx is already very close to zero, use it
+    if samples[idx].abs() < 0.001 {
+        return idx;
+    }
+    // Search outward from idx in both directions
+    for offset in 1..=max_search {
+        // Search forward
+        if idx + offset < len {
+            let prev = samples[idx + offset - 1];
+            let curr = samples[idx + offset];
+            if curr.abs() < 0.001 || (prev.signum() != curr.signum() && prev != 0.0) {
+                return idx + offset;
+            }
+        }
+        // Search backward
+        if offset <= idx {
+            let curr = samples[idx - offset];
+            let next = samples[idx - offset + 1];
+            if curr.abs() < 0.001 || (curr.signum() != next.signum() && next != 0.0) {
+                return idx - offset;
+            }
+        }
+    }
+    idx // no crossing found within range, keep original
+}
+
 fn draw_audio_editor(
     canvas: &mut Canvas<Window>,
     input: &mut InputState,
@@ -16069,8 +16914,12 @@ fn draw_audio_editor(
     canvas.set_draw_color(bg);
     let _ = canvas.fill_rect(Rect::new(0, top, w as u32, h as u32));
 
+    // ── Click anywhere in audio editor to focus it ───────────────────
+    if input.mouse_in_rect(0, top, w, h) && input.mouse_pressed {
+        state.focused_panel = crate::state::FocusedPanel::AudioEditor;
+    }
+
     // ── Gather clip info ─────────────────────────────────────────────
-    // Collect all fields we need then release the borrow immediately
     let clip_info: Option<(String, String, f64, f64, f32)> =
         if let Some((track_id, clip_idx)) = state.selected_clip {
             state
@@ -16090,7 +16939,6 @@ fn draw_audio_editor(
                         } else {
                             ac.name.clone()
                         };
-                        // offset is in seconds (start of clip window within file)
                         Some((name, ac.source_file.clone(), ac.length, ac.offset, ac.gain))
                     } else {
                         None
@@ -16117,24 +16965,18 @@ fn draw_audio_editor(
     };
 
     // ── Full audio file duration (seconds) ───────────────────────────
-    // The audio editor ALWAYS shows the raw audio file. Clips are just windows
-    // into it. BPM is NEVER used to compute what portion of the waveform is shown —
-    // it only affects the beat-grid overlay drawn on top.
     let file_dur_secs = state
         .waveform_cache
         .get(&source_file)
         .map(|(_, dur)| *dur)
         .unwrap_or(0.0);
 
-    // total_secs = full file length. If waveform not yet loaded, fall back to the
-    // clip offset + a generous default so the view is not empty.
     let total_secs = if file_dur_secs > 0.0 {
         file_dur_secs
     } else {
         (clip_offset_secs + 10.0).max(1.0)
     };
 
-    // clip_len_secs: beat-length of this clip converted to seconds.
     let bpm_early = state.project.tempo_map.bpm_at(0.0);
     let clip_len_secs = if bpm_early > 0.0 {
         clip_len_beats * 60.0 / bpm_early
@@ -16142,26 +16984,22 @@ fn draw_audio_editor(
         total_secs
     };
 
-    // Clip window: the actual region of the audio file this clip plays back.
-    // clip_win_start_secs = where in the file the clip begins (the offset).
-    // clip_win_end_secs   = where in the file the clip ends.
     let clip_win_start_secs = clip_offset_secs.min(total_secs);
     let clip_win_end_secs = (clip_offset_secs + clip_len_secs).min(total_secs);
 
     // ── Layout constants ─────────────────────────────────────────────
     let toolbar_h = 28i32;
+    let loop_ruler_h = 14i32;  // NEW: loop region bar
     let ruler_h = 20i32;
     let info_h = 18i32;
     let scroll_bar_h = 14i32;
-    let wave_top = top + toolbar_h + ruler_h;
-    let wave_h = (h - toolbar_h - ruler_h - info_h - scroll_bar_h).max(30);
+    let wave_top = top + toolbar_h + loop_ruler_h + ruler_h;
+    let wave_h = (h - toolbar_h - loop_ruler_h - ruler_h - info_h - scroll_bar_h).max(30);
     let wave_left = 10i32;
     let wave_w = (w - 20).max(10);
-    let ch_h = (wave_h / 2).max(10); // height per channel
+    let ch_h = (wave_h / 2).max(10);
 
     // ── Viewport (zoom + scroll) in SECONDS ──────────────────────────
-    // zoom = pixels per second;  scroll = first visible second
-    // Auto-fit on first open: fit full file
     if total_secs > 0.0 && state.audio_editor_zoom == 1.0 {
         state.audio_editor_zoom = (wave_w as f64 / total_secs).clamp(4.0, 1000.0);
     }
@@ -16171,17 +17009,10 @@ fn draw_audio_editor(
     let scroll = state.audio_editor_scroll.clamp(0.0, max_scroll_secs);
     state.audio_editor_scroll = scroll;
 
-    // Helpers to convert seconds ↔ pixel x
     let sec_to_x = |s: f64| -> i32 { wave_left + ((s - scroll) * zoom) as i32 };
     let x_to_sec = |x: i32| -> f64 { (x - wave_left) as f64 / zoom + scroll };
 
-    // BPM is kept for the trim tool (converts seconds → beats) and for the beat-grid overlay.
-    // BPM and clip_len_secs are used for the beat-grid overlay and info bar.
-    // clip_len_secs was already computed above (before clip_win_end_secs).
     let bpm = bpm_early;
-
-    // ── Clip window bounds — BPM-independent ─────────────────────────
-    // These are already computed above (clip_win_start_secs / clip_win_end_secs).
 
     // ── Toolbar ──────────────────────────────────────────────────────
     canvas.set_draw_color(Theme::c(state.theme.panel_bg));
@@ -16192,8 +17023,74 @@ fn draw_audio_editor(
         sdl2::rect::Point::new(w, top + toolbar_h - 1),
     );
 
-    // Play/Stop preview button
-    let is_previewing = state.sample_preview_path.is_some();
+    // ── Audio editor mini transport controls ───────────────────────
+    // Rewind (|◀) — resets playhead to 0
+    let is_previewing = state.audio_editor_playing;
+    {
+        let __auto_id_rw = input.next_id();
+        let rewind_clicked = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: __auto_id_rw,
+                x: 6,
+                y: top + 4,
+                width: 22,
+                height: 20,
+                label: "|◀".into(),
+                toggled: false,
+                icon: ButtonIcon::None,
+                hint: Some("Rewind to start".into()),
+                ..Default::default()
+            },
+        );
+        if rewind_clicked {
+            state.audio_editor_playhead = 0.0;
+            // If playing, restart from beginning
+            if is_previewing && !source_file.is_empty() {
+                let preview_sr = 44100usize;
+                state.sample_preview_start_sample = 0;
+                if state.audio_editor_loop_enabled && state.audio_editor_loop_end > state.audio_editor_loop_start {
+                    state.sample_preview_end_sample = (state.audio_editor_loop_end * preview_sr as f64) as usize;
+                } else {
+                    state.sample_preview_end_sample = 0;
+                }
+                state.sample_preview_path = Some(std::path::PathBuf::from(&source_file));
+                state.sample_preview_trigger = true;
+            }
+        }
+    }
+
+    // Stop (■) — stops playback and rewinds playhead to where play started
+    {
+        let __auto_id_stop = input.next_id();
+        let stop_clicked = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: __auto_id_stop,
+                x: 30,
+                y: top + 4,
+                width: 22,
+                height: 20,
+                label: "■".into(),
+                toggled: false,
+                icon: ButtonIcon::None,
+                hint: Some("Stop playback".into()),
+                ..Default::default()
+            },
+        );
+        if stop_clicked && is_previewing {
+            state.audio_editor_playing = false;
+            state.sample_preview_path = None;
+            state.sample_preview_start_sample = 0;
+            state.sample_preview_end_sample = 0;
+        }
+    }
+
+    // Play (▶) — starts/stops playback
     let __auto_id_56 = input.next_id();
     let play_clicked = button(
         canvas,
@@ -16201,34 +17098,133 @@ fn draw_audio_editor(
         &state.theme,
         &ButtonParams {
             id: __auto_id_56,
-            x: 6,
+            x: 54,
             y: top + 4,
-            width: 30,
+            width: 22,
             height: 20,
-            label: if is_previewing {
-                "■".into()
-            } else {
-                "▶".into()
-            },
+            label: "▶".into(),
             toggled: is_previewing,
             icon: ButtonIcon::None,
-            hint: None,
+            hint: Some("Play / pause preview".into()),
             ..Default::default()
         },
     );
     if play_clicked {
         if is_previewing {
+            // Stop
+            state.audio_editor_playing = false;
             state.sample_preview_path = None;
+            state.sample_preview_start_sample = 0;
+            state.sample_preview_end_sample = 0;
         } else if !source_file.is_empty() {
+            // Start playback from playhead (or selection if any)
+            let preview_sr = 44100usize;
+            if let Some((sel_s, sel_e)) = state.audio_editor_selection {
+                let s = sel_s.min(sel_e).max(0.0);
+                let e = sel_s.max(sel_e);
+                state.audio_editor_playhead = s;
+                state.sample_preview_start_sample = (s * preview_sr as f64) as usize;
+                state.sample_preview_end_sample = (e * preview_sr as f64) as usize;
+            } else if state.audio_editor_loop_enabled && state.audio_editor_loop_end > state.audio_editor_loop_start {
+                // Play from playhead (or loop start), loop between loop_start and loop_end
+                let loop_s = state.audio_editor_loop_start;
+                let loop_e = state.audio_editor_loop_end;
+                let start = if state.audio_editor_playhead >= loop_s && state.audio_editor_playhead < loop_e {
+                    state.audio_editor_playhead
+                } else {
+                    loop_s
+                };
+                state.audio_editor_playhead = start;
+                state.sample_preview_start_sample = (start * preview_sr as f64) as usize;
+                state.sample_preview_end_sample = (loop_e * preview_sr as f64) as usize;
+            } else {
+                // Play from playhead to end
+                let start = state.audio_editor_playhead;
+                state.sample_preview_start_sample = (start * preview_sr as f64) as usize;
+                state.sample_preview_end_sample = 0; // play to end
+            }
+            state.audio_editor_playing = true;
             state.sample_preview_path = Some(std::path::PathBuf::from(&source_file));
             state.sample_preview_trigger = true;
         }
     }
 
-    // Toolbar buttons — SELECT ALL, NORMALIZE, TRIM, FIT
-    let tool_labels = ["SEL", "NORM", "TRIM", "FIT"];
-    let _tool_ids: [u32; 4] = [7010, 7011, 7014, 7015];
-    let mut bx = 42i32;
+    // Loop toggle button
+    {
+        let loop_id = input.next_id();
+        let loop_clicked = toggle_button(
+            canvas,
+            input,
+            &state.theme,
+            80,
+            top + 4,
+            20,
+            state.theme.loop_color,
+            state.audio_editor_loop_enabled,
+            loop_id,
+            "L",
+            Some("Toggle audio editor loop"),
+        );
+        if loop_clicked {
+            state.audio_editor_loop_enabled = !state.audio_editor_loop_enabled;
+        }
+    }
+
+    // Toolbar buttons — SEL, NORM, TRIM, FIT, CUT, PASTE
+    let tool_labels = ["SEL", "NORM", "TRIM", "FIT", "CUT", "PASTE"];
+    let mut bx = 106i32;
+
+    // ── Keyboard shortcuts for toolbar tools (left-hand keys) ────────
+    // Q=SEL(all), W=NORM, E=TRIM, R=FIT, T=CUT, Y=PASTE
+    let key_triggered_tool: Option<usize> = if state.focused_panel == crate::state::FocusedPanel::AudioEditor
+        && state.text_field_active_id == 0
+    {
+        if input.key_available(sdl2::keyboard::Keycode::Q) {
+            input.consume_key(sdl2::keyboard::Keycode::Q); Some(0)
+        } else if input.key_available(sdl2::keyboard::Keycode::W) && !input.ctrl() {
+            input.consume_key(sdl2::keyboard::Keycode::W); Some(1)
+        } else if input.key_available(sdl2::keyboard::Keycode::E) {
+            input.consume_key(sdl2::keyboard::Keycode::E); Some(2)
+        } else if input.key_available(sdl2::keyboard::Keycode::R) {
+            input.consume_key(sdl2::keyboard::Keycode::R); Some(3)
+        } else if input.key_available(sdl2::keyboard::Keycode::T) {
+            input.consume_key(sdl2::keyboard::Keycode::T); Some(4)
+        } else if input.key_available(sdl2::keyboard::Keycode::Y) {
+            input.consume_key(sdl2::keyboard::Keycode::Y); Some(5)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Helper: create an undo backup of the source file before destructive operations.
+    // Returns Ok(backup_path) or Err(message).
+    let make_undo_backup = |src: &str| -> Result<String, String> {
+        let src_path = std::path::Path::new(src);
+        let dir = src_path.parent().unwrap_or(std::path::Path::new("."));
+        let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+        let ext = src_path.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+        // Use a timestamp-based backup name to avoid collisions
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let backup_name = format!(".{}_undo_{}.{}", stem, ts, ext);
+        let backup_path = dir.join(backup_name);
+        std::fs::copy(src, &backup_path)
+            .map(|_| backup_path.to_string_lossy().to_string())
+            .map_err(|e| format!("Backup failed: {}", e))
+    };
+
+    let tool_hints: [&str; 6] = [
+        "Select entire waveform (Q)",
+        "Normalize selection to 0 dB peak (W)",
+        "Trim — remove audio outside selection, keeps selected region (E)",
+        "Fit — set clip window to selection without modifying audio (R)",
+        "Cut — remove selection from file and copy to clipboard (T)",
+        "Paste — insert clipboard audio at playhead position (Y)",
+    ];
     for (i, &label) in tool_labels.iter().enumerate() {
         let bw = (label.len() as i32 * 8 + 12).max(40);
         let __auto_id_57 = input.next_id();
@@ -16245,82 +17241,158 @@ fn draw_audio_editor(
                 label: label.into(),
                 toggled: false,
                 icon: ButtonIcon::None,
-                hint: None,
+                hint: Some(tool_hints.get(i).unwrap_or(&"").to_string()),
                 ..Default::default()
             },
         );
-        if clicked {
+        if clicked || key_triggered_tool == Some(i) {
             match i {
                 0 => {
-                    // Select all (selects full file)
+                    // Select all
                     state.audio_editor_selection = Some((0.0, total_secs));
                 }
                 1 => {
-                    // Normalize — operates only on selected range (falls back to full file)
-                    if let Some((track_id, clip_idx)) = state.selected_clip {
-                        // Determine sample range to scan
+                    // Normalize — destructive: scales samples in selected region to peak at 0dB
+                    if let Some((_track_id, _clip_idx)) = state.selected_clip {
                         let (sel_s, sel_e) = state
                             .audio_editor_selection
                             .map(|(a, b)| (a.min(b), a.max(b)))
                             .unwrap_or((0.0, total_secs));
-                        let sample_rate = state
-                            .waveform_stereo_cache
-                            .get(&source_file)
-                            .map(|_| 44100u32) // use a fallback; real rate from clip
-                            .unwrap_or(44100);
-                        // Use waveform overview buckets to estimate peak in range
-                        let peak = state
-                            .waveform_stereo_cache
-                            .get(&source_file)
-                            .map(|(l_max, l_min, r_max, r_min)| {
-                                let num = l_max.len();
-                                if num == 0 {
-                                    return 1.0f32;
-                                }
-                                // Map sel range → bucket indices
-                                let i0 = ((sel_s / total_secs.max(0.001)) * num as f64) as usize;
-                                let i1 = (((sel_e / total_secs.max(0.001)) * num as f64) as usize
-                                    + 1)
-                                .min(num);
-                                let range = &l_max[i0..i1];
-                                let ml = range.iter().cloned().fold(0.0f32, f32::max).max(
-                                    l_min[i0..i1]
-                                        .iter()
-                                        .cloned()
-                                        .map(f32::abs)
-                                        .fold(0.0f32, f32::max),
-                                );
-                                let mr = r_max[i0..i1].iter().cloned().fold(0.0f32, f32::max).max(
-                                    r_min[i0..i1]
-                                        .iter()
-                                        .cloned()
-                                        .map(f32::abs)
-                                        .fold(0.0f32, f32::max),
-                                );
-                                ml.max(mr)
-                            })
-                            .unwrap_or(1.0);
-                        let _ = sample_rate; // suppress warning
-                        if peak > 0.001 {
-                            if let Some(t) =
-                                state.project.tracks.iter_mut().find(|t| t.id == track_id)
-                            {
-                                if let Some(crate::models::Clip::Audio(ac)) =
-                                    t.clips.get_mut(clip_idx)
-                                {
-                                    ac.gain = 1.0 / peak;
+                        if (sel_e - sel_s) > 0.001 {
+                            let path = std::path::Path::new(&source_file);
+                            if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                                let total_frames = raw.len() / channels.max(1);
+                                let start_frame = ((sel_s * sr as f64) as usize).min(total_frames);
+                                let end_frame = ((sel_e * sr as f64) as usize).min(total_frames);
+                                if end_frame > start_frame {
+                                    // Find peak in selected region
+                                    let region = &raw[start_frame * channels..end_frame * channels];
+                                    let peak = region.iter().cloned().map(f32::abs).fold(0.0f32, f32::max);
+                                    if peak > 0.001 {
+                                        // Create undo backup
+                                        match make_undo_backup(&source_file) {
+                                            Ok(backup) => {
+                                                state.audio_redo_stack.clear();
+                                                state.audio_undo_stack.push((
+                                                    source_file.clone(),
+                                                    backup,
+                                                    "Normalize".to_string(),
+                                                    None,
+                                                ));
+                                                // Scale the selected region
+                                                let gain = 1.0 / peak;
+                                                let mut modified = raw.clone();
+                                                for s in &mut modified[start_frame * channels..end_frame * channels] {
+                                                    *s *= gain;
+                                                }
+                                                let save_result = if channels >= 2 {
+                                                    crate::audio::save_wav_stereo(path, &modified, sr)
+                                                } else {
+                                                    crate::audio::save_wav_mono(path, &modified, sr)
+                                                };
+                                                match save_result {
+                                                    Ok(()) => {
+                                                        state.waveform_cache.remove(&source_file);
+                                                        state.waveform_stereo_cache.remove(&source_file);
+                                                        state.waveform_raw_cache.remove(&source_file);
+                                                        state.audio_sample_invalidate.push(source_file.clone());
+                                                        state.push_status(format!("Normalized selection (peak {:.1}dB → 0dB)", 20.0 * peak.log10()));
+                                                    }
+                                                    Err(e) => state.push_status(format!("Normalize failed: {}", e)),
+                                                }
+                                            }
+                                            Err(e) => state.push_status(e),
+                                        }
+                                    } else {
+                                        state.push_status("Selection is silent, nothing to normalize");
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 2 => {
-                    // Trim clip window to selection (adjusts offset + length in beats)
+                    // TRIM — destructive: removes audio OUTSIDE selection from file
+                    if let Some((sel_s, sel_e)) = state.audio_editor_selection {
+                        let s = sel_s.min(sel_e);
+                        let e = sel_s.max(sel_e);
+                        if (e - s) > 0.01 {
+                            let path = std::path::Path::new(&source_file);
+                            if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                                let ch = channels.max(1);
+                                let total_frames = raw.len() / ch;
+                                let start_frame_raw = ((s * sr as f64) as usize).min(total_frames);
+                                let end_frame_raw = ((e * sr as f64) as usize).min(total_frames);
+                                // Snap to zero crossings only when snap is off
+                                let (start_frame, end_frame) = if !state.audio_editor_snap_enabled {
+                                    let mono: Vec<f32> = raw.iter().step_by(ch).copied().collect();
+                                    let zc_search = (sr as usize / 100).max(64);
+                                    (nearest_zero_crossing(&mono, start_frame_raw, zc_search),
+                                     nearest_zero_crossing(&mono, end_frame_raw, zc_search))
+                                } else {
+                                    (start_frame_raw, end_frame_raw)
+                                };
+                                if end_frame > start_frame {
+                                    match make_undo_backup(&source_file) {
+                                        Ok(backup) => {
+                                            state.audio_redo_stack.clear();
+                                            state.audio_undo_stack.push((
+                                                source_file.clone(),
+                                                backup,
+                                                "Trim".to_string(),
+                                                Some(state.project.clone()),
+                                            ));
+                                            let trimmed: Vec<f32> = raw[start_frame * ch..end_frame * ch].to_vec();
+                                            let save_result = if ch >= 2 {
+                                                crate::audio::save_wav_stereo(path, &trimmed, sr)
+                                            } else {
+                                                crate::audio::save_wav_mono(path, &trimmed, sr)
+                                            };
+                                            match save_result {
+                                                Ok(()) => {
+                                                    state.waveform_cache.remove(&source_file);
+                                                    state.waveform_stereo_cache.remove(&source_file);
+                                                    state.waveform_raw_cache.remove(&source_file);
+                                                    state.audio_sample_invalidate.push(source_file.clone());
+                                                    if let Some((track_id, clip_idx)) = state.selected_clip {
+                                                        if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
+                                                            if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                                                                let old_offset = ac.offset;
+                                                                ac.offset = (old_offset - s).max(0.0);
+                                                                let new_dur = e - s;
+                                                                let max_len_beats = new_dur * bpm / 60.0;
+                                                                if ac.length > max_len_beats {
+                                                                    ac.length = max_len_beats;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    state.audio_editor_selection = None;
+                                                    state.audio_editor_scroll = 0.0;
+                                                    state.audio_editor_zoom = 1.0;
+                                                    state.audio_editor_playhead = 0.0;
+                                                    state.push_status("Audio trimmed to selection (file modified)");
+                                                }
+                                                Err(e) => state.push_status(format!("Trim failed: {}", e)),
+                                            }
+                                        }
+                                        Err(e) => state.push_status(e),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                3 => {
+                    // FIT — adjusts clip window (offset + length) to match selection (non-destructive, undoable)
                     if let Some((sel_s, sel_e)) = state.audio_editor_selection {
                         let s = sel_s.min(sel_e);
                         let e = sel_s.max(sel_e);
                         if (e - s) > 0.01 && bpm > 0.0 {
                             if let Some((track_id, clip_idx)) = state.selected_clip {
+                                // Snapshot project state before modifying clip (undoable via Ctrl+Z)
+                                let snapshot = state.project.clone();
+                                state.commands.push_undo_snapshot(snapshot, "Fit clip to selection");
                                 if let Some(t) =
                                     state.project.tracks.iter_mut().find(|t| t.id == track_id)
                                 {
@@ -16328,21 +17400,190 @@ fn draw_audio_editor(
                                         t.clips.get_mut(clip_idx)
                                     {
                                         let new_len_secs = e - s;
-                                        ac.offset = s; // offset in seconds
-                                        ac.length = new_len_secs * bpm / 60.0; // convert to beats
+                                        ac.offset = s;
+                                        ac.length = new_len_secs * bpm / 60.0;
+                                    }
+                                }
+                                state.dirty = true;
+                            }
+                            state.audio_editor_selection = None;
+                            state.push_status("Clip window fitted to selection");
+                        }
+                    } else if total_secs > 0.0 {
+                        // No selection: zoom to fit view
+                        state.audio_editor_zoom =
+                            (wave_w as f64 / total_secs).clamp(1.0, 4000.0);
+                        state.audio_editor_scroll = 0.0;
+                    }
+                }
+                4 => {
+                    // CUT — destructive: removes selected audio from file, stores in clipboard
+                    if let Some((sel_s, sel_e)) = state.audio_editor_selection {
+                        let s = sel_s.min(sel_e);
+                        let e = sel_s.max(sel_e);
+                        if (e - s) > 0.001 {
+                            let path = std::path::Path::new(&source_file);
+                            if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                                let ch = channels.max(1);
+                                let total_frames = raw.len() / ch;
+                                let start_frame_raw = ((s * sr as f64) as usize).min(total_frames);
+                                let end_frame_raw = ((e * sr as f64) as usize).min(total_frames);
+                                // Snap to zero crossings only when snap is off
+                                let (start_frame, end_frame) = if !state.audio_editor_snap_enabled {
+                                    let mono: Vec<f32> = raw.iter().step_by(ch).copied().collect();
+                                    let zc_search = (sr as usize / 100).max(64);
+                                    (nearest_zero_crossing(&mono, start_frame_raw, zc_search),
+                                     nearest_zero_crossing(&mono, end_frame_raw, zc_search))
+                                } else {
+                                    (start_frame_raw, end_frame_raw)
+                                };
+                                if end_frame > start_frame {
+                                    match make_undo_backup(&source_file) {
+                                        Ok(backup) => {
+                                            state.audio_redo_stack.clear();
+                                            state.audio_undo_stack.push((
+                                                source_file.clone(),
+                                                backup,
+                                                "Cut".to_string(),
+                                                Some(state.project.clone()),
+                                            ));
+                                            // Copy cut region to clipboard (mono mix)
+                                            let cut_region: Vec<f32> = if ch >= 2 {
+                                                raw[start_frame * ch..end_frame * ch]
+                                                    .chunks(ch)
+                                                    .map(|frame| frame.iter().sum::<f32>() / ch as f32)
+                                                    .collect()
+                                            } else {
+                                                raw[start_frame..end_frame].to_vec()
+                                            };
+                                            state.audio_clipboard = Some(cut_region);
+                                            state.audio_clipboard_sr = sr;
+
+                                            let mut remaining = Vec::with_capacity(raw.len() - (end_frame - start_frame) * ch);
+                                            remaining.extend_from_slice(&raw[..start_frame * ch]);
+                                            remaining.extend_from_slice(&raw[end_frame * ch..]);
+
+                                            let save_result = if ch >= 2 {
+                                                crate::audio::save_wav_stereo(path, &remaining, sr)
+                                            } else {
+                                                crate::audio::save_wav_mono(path, &remaining, sr)
+                                            };
+                                            match save_result {
+                                                Ok(()) => {
+                                                    state.waveform_cache.remove(&source_file);
+                                                    state.waveform_stereo_cache.remove(&source_file);
+                                                    state.waveform_raw_cache.remove(&source_file);
+                                                    state.audio_sample_invalidate.push(source_file.clone());
+                                                    let cut_dur = e - s;
+                                                    if let Some((track_id, clip_idx)) = state.selected_clip {
+                                                        if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
+                                                            if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                                                                if ac.offset >= e {
+                                                                    ac.offset -= cut_dur;
+                                                                } else if ac.offset > s {
+                                                                    ac.offset = s;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    state.audio_editor_selection = None;
+                                                    state.audio_editor_playhead = s;
+                                                    state.push_status("Audio cut to clipboard (file modified)");
+                                                }
+                                                Err(err) => state.push_status(format!("Cut failed: {}", err)),
+                                            }
+                                        }
+                                        Err(e) => state.push_status(e),
                                     }
                                 }
                             }
-                            state.audio_editor_selection = None;
-                            state.push_status("Clip window trimmed to selection");
                         }
                     }
                 }
-                3 => {
-                    // Zoom to fit entire audio file
-                    if total_secs > 0.0 {
-                        state.audio_editor_zoom = (wave_w as f64 / total_secs).clamp(1.0, 4000.0);
-                        state.audio_editor_scroll = 0.0;
+                5 => {
+                    // PASTE — inserts clipboard audio at playhead position
+                    if let Some(ref clip_data) = state.audio_clipboard.clone() {
+                        let paste_sec = state.audio_editor_playhead;
+                        let path = std::path::Path::new(&source_file);
+                        if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                            match make_undo_backup(&source_file) {
+                                Ok(backup) => {
+                                    state.audio_redo_stack.clear();
+                                    state.audio_undo_stack.push((
+                                        source_file.clone(),
+                                        backup,
+                                        "Paste".to_string(),
+                                        Some(state.project.clone()),
+                                    ));
+                                    let ch = channels.max(1);
+                                    let total_frames = raw.len() / ch;
+                                    let insert_frame_raw = ((paste_sec * sr as f64) as usize).min(total_frames);
+                                    // Snap insertion point to zero crossing only when snap is off
+                                    let insert_frame = if !state.audio_editor_snap_enabled {
+                                        let mono: Vec<f32> = raw.iter().step_by(ch).copied().collect();
+                                        let zc_search = (sr as usize / 100).max(64);
+                                        nearest_zero_crossing(&mono, insert_frame_raw, zc_search)
+                                    } else {
+                                        insert_frame_raw
+                                    };
+                                    let clip_sr = state.audio_clipboard_sr;
+
+                                    let resampled: Vec<f32> = if clip_sr != sr {
+                                        let ratio = sr as f64 / clip_sr as f64;
+                                        let new_len = (clip_data.len() as f64 * ratio) as usize;
+                                        (0..new_len)
+                                            .map(|i| {
+                                                let src_idx = ((i as f64 / ratio) as usize).min(clip_data.len().saturating_sub(1));
+                                                clip_data[src_idx]
+                                            })
+                                            .collect()
+                                    } else {
+                                        clip_data.clone()
+                                    };
+
+                                    let interleaved_paste: Vec<f32> = if ch >= 2 {
+                                        resampled.iter().flat_map(|&s| vec![s; ch]).collect()
+                                    } else {
+                                        resampled
+                                    };
+
+                                    let mut result = Vec::with_capacity(raw.len() + interleaved_paste.len());
+                                    result.extend_from_slice(&raw[..insert_frame * ch]);
+                                    result.extend_from_slice(&interleaved_paste);
+                                    result.extend_from_slice(&raw[insert_frame * ch..]);
+
+                                    let save_result = if ch >= 2 {
+                                        crate::audio::save_wav_stereo(path, &result, sr)
+                                    } else {
+                                        crate::audio::save_wav_mono(path, &result, sr)
+                                    };
+                                    match save_result {
+                                        Ok(()) => {
+                                            state.waveform_cache.remove(&source_file);
+                                            state.waveform_stereo_cache.remove(&source_file);
+                                            state.waveform_raw_cache.remove(&source_file);
+                                            state.audio_sample_invalidate.push(source_file.clone());
+                                            let paste_dur = interleaved_paste.len() as f64 / (sr as f64 * ch as f64);
+                                            if let Some((track_id, clip_idx)) = state.selected_clip {
+                                                if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
+                                                    if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                                                        if ac.offset >= paste_sec {
+                                                            ac.offset += paste_dur;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            state.audio_editor_playhead = paste_sec + paste_dur;
+                                            state.push_status("Audio pasted from clipboard (file modified)");
+                                        }
+                                        Err(err) => state.push_status(format!("Paste failed: {}", err)),
+                                    }
+                                }
+                                Err(e) => state.push_status(e),
+                            }
+                        }
+                    } else {
+                        state.push_status("Nothing in audio clipboard");
                     }
                 }
                 _ => {}
@@ -16371,6 +17612,27 @@ fn draw_audio_editor(
             state.audio_editor_snap_enabled = !state.audio_editor_snap_enabled;
         }
         bx += 24;
+    }
+
+    // ── Audio editor snap resolution dropdown ─────────────────────────
+    let snap_dropdown_x = bx;
+    {
+        let snap_labels: Vec<&str> = SNAP_RESOLUTIONS.iter().map(|(l, _)| *l).collect();
+        let changed = dropdown(
+            canvas,
+            input,
+            &state.theme,
+            7073,
+            snap_dropdown_x,
+            top + 4,
+            56,
+            20,
+            &snap_labels,
+            &mut state.audio_editor_snap_idx,
+            &mut state.dropdown_open_id,
+        );
+        let _ = changed;
+        bx += 60;
     }
 
     // ── Gain slider in toolbar ────────────────────────────────────────
@@ -16417,10 +17679,316 @@ fn draw_audio_editor(
                 }
             }
         }
+        // Commit clip gain change on release
+        if input.mouse_released && input.drag_widget == WidgetId::Auto(7070) {
+            if let Some((track_id, clip_idx)) = state.selected_clip {
+                let old_gain = input.drag_start_value as f32;
+                let new_gain = gain_val;
+                if (old_gain - new_gain).abs() > 1e-4 {
+                    state.commands.execute(
+                        Box::new(crate::commands::SetClipGain {
+                            track_id,
+                            clip_idx,
+                            old_gain,
+                            new_gain,
+                        }),
+                        &mut state.project,
+                    );
+                }
+            }
+        }
         bx += 30 + slider_w + 8;
     }
 
-    // Clip name + info on the right side of toolbar
+    // ── Fade In slider ────────────────────────────────────────────────
+    {
+        let slider_w = 50i32;
+        let slider_h = 16i32;
+        let slider_x = bx;
+        let slider_y = top + 6;
+        let max_fade = total_secs.min(10.0) as f32;
+        let mut fade_val = (state.audio_editor_fade_in as f32).clamp(0.0, max_fade);
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            "FIN",
+            slider_x,
+            slider_y - 1,
+            20,
+            Theme::c(state.theme.text_secondary),
+        );
+        let fade_changed = slider(
+            canvas,
+            input,
+            &state.theme,
+            &SliderParams {
+                id: WidgetId::Auto(7075),
+                x: slider_x + 22,
+                y: slider_y,
+                width: slider_w,
+                height: slider_h,
+                min: 0.0,
+                max: max_fade,
+                orientation: SliderOrientation::Horizontal,
+                label: Some(format!("{:.2}s", fade_val)),
+                default_value: Some(0.0),
+            },
+            &mut fade_val,
+        );
+        if fade_changed {
+            state.audio_editor_fade_in = fade_val as f64;
+        }
+        bx += 22 + slider_w + 6;
+    }
+
+    // ── Fade Out slider ───────────────────────────────────────────────
+    {
+        let slider_w = 50i32;
+        let slider_h = 16i32;
+        let slider_x = bx;
+        let slider_y = top + 6;
+        let max_fade = total_secs.min(10.0) as f32;
+        let mut fade_val = (state.audio_editor_fade_out as f32).clamp(0.0, max_fade);
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            "FOUT",
+            slider_x,
+            slider_y - 1,
+            28,
+            Theme::c(state.theme.text_secondary),
+        );
+        let fade_changed = slider(
+            canvas,
+            input,
+            &state.theme,
+            &SliderParams {
+                id: WidgetId::Auto(7076),
+                x: slider_x + 30,
+                y: slider_y,
+                width: slider_w,
+                height: slider_h,
+                min: 0.0,
+                max: max_fade,
+                orientation: SliderOrientation::Horizontal,
+                label: Some(format!("{:.2}s", fade_val)),
+                default_value: Some(0.0),
+            },
+            &mut fade_val,
+        );
+        if fade_changed {
+            state.audio_editor_fade_out = fade_val as f64;
+        }
+        bx += 30 + slider_w + 8;
+    }
+
+    // ── Export button ────────────────────────────────────────────────
+    {
+        let export_id = input.next_id();
+        let export_w = 52i32;
+        let export_clicked = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: export_id,
+                x: bx,
+                y: top + 4,
+                width: export_w,
+                height: 20,
+                label: "EXP".into(),
+                toggled: false,
+                icon: ButtonIcon::None,
+                hint: Some("Export audio clip to WAV file".into()),
+                ..Default::default()
+            },
+        );
+        if export_clicked && !source_file.is_empty() {
+            // Populate the export popup with a default filename
+            let src_path = std::path::Path::new(&source_file);
+            let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+            state.audio_export_name = format!("{}_export.wav", stem);
+            state.audio_export_source = source_file.clone();
+            // Default export directory to source file's parent
+            state.audio_export_dir = src_path
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            state.audio_export_popup_open = true;
+        }
+        bx += export_w + 4;
+    }
+
+    // ── Effects dropdown + APPLY button (right side of toolbar) ──────
+    let audio_fx_labels: Vec<&str> = vec!["Reverse", "Fade In", "Fade Out", "Silence", "Gain +6dB", "Gain -6dB", "Invert"];
+    let fx_dropdown_w = 80i32;
+    let apply_w = 50i32;
+    let fx_area_w = fx_dropdown_w + 4 + apply_w;
+    let fx_x = w - fx_area_w - 8;
+    {
+        let _changed = dropdown(
+            canvas,
+            input,
+            &state.theme,
+            7074,
+            fx_x,
+            top + 4,
+            fx_dropdown_w,
+            20,
+            &audio_fx_labels,
+            &mut state.audio_editor_effect_idx,
+            &mut state.dropdown_open_id,
+        );
+    }
+    {
+        let apply_id = input.next_id();
+        // Shift+A triggers apply when audio editor is visible (no text field active)
+        let apply_key_triggered = state.text_field_active_id == 0
+            && input.shift()
+            && input.key_available(sdl2::keyboard::Keycode::A);
+        if apply_key_triggered {
+            input.consume_key(sdl2::keyboard::Keycode::A);
+        }
+        let apply_clicked = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: apply_id,
+                x: fx_x + fx_dropdown_w + 4,
+                y: top + 4,
+                width: apply_w,
+                height: 20,
+                label: "APPLY".into(),
+                toggled: false,
+                icon: ButtonIcon::None,
+                hint: Some("Apply selected effect to selection (Shift+A)".into()),
+                ..Default::default()
+            },
+        );
+        if apply_clicked || apply_key_triggered {
+            let (sel_s, sel_e) = state
+                .audio_editor_selection
+                .map(|(a, b)| (a.min(b), a.max(b)))
+                .unwrap_or((0.0, total_secs));
+            if (sel_e - sel_s) > 0.001 {
+                let path = std::path::Path::new(&source_file);
+                if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                    let total_frames = raw.len() / channels.max(1);
+                    let start_frame = ((sel_s * sr as f64) as usize).min(total_frames);
+                    let end_frame = ((sel_e * sr as f64) as usize).min(total_frames);
+                    if end_frame > start_frame {
+                        let make_undo_backup_fx = |src: &str| -> Result<String, String> {
+                            let sp = std::path::Path::new(src);
+                            let dir = sp.parent().unwrap_or(std::path::Path::new("."));
+                            let stem = sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+                            let ext = sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0);
+                            let backup_name = format!(".{}_undo_{}.{}", stem, ts, ext);
+                            let backup_path = dir.join(backup_name);
+                            std::fs::copy(src, &backup_path)
+                                .map(|_| backup_path.to_string_lossy().to_string())
+                                .map_err(|e| format!("Backup failed: {}", e))
+                        };
+                        let fx_idx = state.audio_editor_effect_idx;
+                        let fx_name = audio_fx_labels.get(fx_idx).unwrap_or(&"Unknown");
+                        match make_undo_backup_fx(&source_file) {
+                            Ok(backup) => {
+                                state.audio_redo_stack.clear();
+                                state.audio_undo_stack.push((
+                                    source_file.clone(),
+                                    backup,
+                                    format!("Apply {}", fx_name),
+                                    None,
+                                ));
+                                let mut modified = raw.clone();
+                                let region = &mut modified[start_frame * channels..end_frame * channels];
+                                match fx_idx {
+                                    0 => {
+                                        // Reverse
+                                        if channels >= 2 {
+                                            let frame_count = region.len() / channels;
+                                            for i in 0..frame_count / 2 {
+                                                let j = frame_count - 1 - i;
+                                                for ch in 0..channels {
+                                                    region.swap(i * channels + ch, j * channels + ch);
+                                                }
+                                            }
+                                        } else {
+                                            region.reverse();
+                                        }
+                                    }
+                                    1 => {
+                                        // Fade In
+                                        let frame_count = region.len() / channels;
+                                        for i in 0..frame_count {
+                                            let gain = i as f32 / frame_count as f32;
+                                            for ch in 0..channels {
+                                                region[i * channels + ch] *= gain;
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        // Fade Out
+                                        let frame_count = region.len() / channels;
+                                        for i in 0..frame_count {
+                                            let gain = 1.0 - (i as f32 / frame_count as f32);
+                                            for ch in 0..channels {
+                                                region[i * channels + ch] *= gain;
+                                            }
+                                        }
+                                    }
+                                    3 => {
+                                        // Silence
+                                        for s in region.iter_mut() { *s = 0.0; }
+                                    }
+                                    4 => {
+                                        // Gain +6dB (~2x)
+                                        let gain = 2.0f32;
+                                        for s in region.iter_mut() { *s = (*s * gain).clamp(-1.0, 1.0); }
+                                    }
+                                    5 => {
+                                        // Gain -6dB (~0.5x)
+                                        let gain = 0.5f32;
+                                        for s in region.iter_mut() { *s *= gain; }
+                                    }
+                                    6 => {
+                                        // Invert (phase flip)
+                                        for s in region.iter_mut() { *s = -*s; }
+                                    }
+                                    _ => {}
+                                }
+                                let save_result = if channels >= 2 {
+                                    crate::audio::save_wav_stereo(path, &modified, sr)
+                                } else {
+                                    crate::audio::save_wav_mono(path, &modified, sr)
+                                };
+                                match save_result {
+                                    Ok(()) => {
+                                        state.waveform_cache.remove(&source_file);
+                                        state.waveform_stereo_cache.remove(&source_file);
+                                        state.waveform_raw_cache.remove(&source_file);
+                                        state.audio_sample_invalidate.push(source_file.clone());
+                                        state.push_status(format!("{} applied to selection", fx_name));
+                                    }
+                                    Err(e) => state.push_status(format!("Apply failed: {}", e)),
+                                }
+                            }
+                            Err(e) => state.push_status(e),
+                        }
+                    }
+                }
+            } else {
+                state.push_status("Select a region first to apply an effect");
+            }
+        }
+    }
+
+    // Clip name + info (between left controls and right FX area)
+    let info_max_w = (fx_x - bx - 16).max(10);
     let info_str = format!(
         "{}   file:{:.1}s  window:{:.2}s",
         clip_name, total_secs, clip_len_secs,
@@ -16431,12 +17999,67 @@ fn draw_audio_editor(
         &info_str,
         bx + 8,
         top + 8,
-        w - bx - 16,
+        info_max_w,
         Theme::c(state.theme.text_primary),
     );
 
+    // ── Loop ruler bar ───────────────────────────────────────────────
+    let loop_ruler_top = top + toolbar_h;
+    {
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(28, 30, 38, 255));
+        let _ = canvas.fill_rect(Rect::new(
+            wave_left,
+            loop_ruler_top,
+            wave_w as u32,
+            loop_ruler_h as u32,
+        ));
+
+        // Draw loop region if enabled
+        let loop_enabled = state.audio_editor_loop_enabled;
+        let loop_s = state.audio_editor_loop_start;
+        let loop_e = state.audio_editor_loop_end;
+        if loop_enabled && loop_e > loop_s {
+            let lx1 = sec_to_x(loop_s);
+            let lx2 = sec_to_x(loop_e);
+            let lc = state.theme.loop_color;
+
+            // Left edge line
+            if lx1 >= wave_left && lx1 <= wave_left + wave_w {
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(lc[0], lc[1], lc[2], 200));
+                let _ = canvas.fill_rect(Rect::new(lx1, loop_ruler_top, 2, loop_ruler_h as u32));
+            }
+            // Right edge line
+            if lx2 >= wave_left && lx2 <= wave_left + wave_w {
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(lc[0], lc[1], lc[2], 200));
+                let _ = canvas.fill_rect(Rect::new(lx2 - 1, loop_ruler_top, 2, loop_ruler_h as u32));
+            }
+        }
+
+        // "LOOP" label
+        canvas.set_clip_rect(Some(Rect::new(wave_left, loop_ruler_top, wave_w as u32, loop_ruler_h as u32)));
+        if !loop_enabled || loop_e <= loop_s {
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                "LOOP",
+                wave_left + 2,
+                loop_ruler_top + 2,
+                40,
+                sdl2::pixels::Color::RGBA(60, 65, 80, 120),
+            );
+        }
+        canvas.set_clip_rect(None);
+
+        // Bottom border
+        canvas.set_draw_color(Theme::c(state.theme.panel_border));
+        let _ = canvas.draw_line(
+            sdl2::rect::Point::new(wave_left, loop_ruler_top + loop_ruler_h - 1),
+            sdl2::rect::Point::new(wave_left + wave_w, loop_ruler_top + loop_ruler_h - 1),
+        );
+    }
+
     // ── Time ruler (in seconds) ───────────────────────────────────────
-    let ruler_top = top + toolbar_h;
+    let ruler_top = loop_ruler_top + loop_ruler_h;
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(35, 38, 48, 255));
     let _ = canvas.fill_rect(Rect::new(
         wave_left,
@@ -16452,7 +18075,6 @@ fn draw_audio_editor(
         ruler_h as u32,
     )));
     if total_secs > 0.0 {
-        // Choose step in seconds based on zoom
         let step = if zoom < 10.0 {
             10.0
         } else if zoom < 50.0 {
@@ -16501,7 +18123,6 @@ fn draw_audio_editor(
     );
 
     // ── Selection range handles on ruler ────────────────────────────
-    // Draws selection highlight and edge markers on the ruler.
     if let Some((sel_s, sel_e)) = state.audio_editor_selection {
         let s = sel_s.min(sel_e);
         let e = sel_s.max(sel_e);
@@ -16516,7 +18137,6 @@ fn draw_audio_editor(
             ruler_h as u32,
         )));
 
-        // Fill between handles — selection highlight
         let fill_x0 = sx.max(ruler_left);
         let fill_x1 = ex.min(ruler_right);
         if fill_x1 > fill_x0 {
@@ -16529,18 +18149,14 @@ fn draw_audio_editor(
             ));
         }
 
-        // Left edge marker
         let accent = sdl2::pixels::Color::RGBA(255, 160, 40, 230);
         canvas.set_draw_color(accent);
         if sx >= ruler_left && sx < ruler_right {
             let _ = canvas.fill_rect(Rect::new(sx, ruler_top, 2, ruler_h as u32));
-            // Small tab at top
             let _ = canvas.fill_rect(Rect::new(sx, ruler_top, 6, 3));
         }
-        // Right edge marker
         if ex >= ruler_left && ex <= ruler_right && ex != sx {
             let _ = canvas.fill_rect(Rect::new(ex - 1, ruler_top, 2, ruler_h as u32));
-            // Small tab at top
             let _ = canvas.fill_rect(Rect::new(ex - 5, ruler_top, 6, 3));
         }
         canvas.set_clip_rect(None);
@@ -16548,11 +18164,9 @@ fn draw_audio_editor(
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(18, 20, 26, 255));
     let _ = canvas.fill_rect(Rect::new(wave_left, wave_top, wave_w as u32, wave_h as u32));
 
-    // ── Clip window shading (area OUTSIDE the clip window is darker) ─
-    // Regions outside clip window
+    // ── Clip window shading ──────────────────────────────────────────
     let win_x0 = sec_to_x(clip_win_start_secs).clamp(wave_left, wave_left + wave_w);
     let win_x1 = sec_to_x(clip_win_end_secs).clamp(wave_left, wave_left + wave_w);
-    // Left shadow (before clip start)
     if win_x0 > wave_left {
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 100));
         let _ = canvas.fill_rect(Rect::new(
@@ -16562,7 +18176,6 @@ fn draw_audio_editor(
             wave_h as u32,
         ));
     }
-    // Right shadow (after clip end)
     if win_x1 < wave_left + wave_w {
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 100));
         let _ = canvas.fill_rect(Rect::new(
@@ -16572,7 +18185,6 @@ fn draw_audio_editor(
             wave_h as u32,
         ));
     }
-    // Clip window border lines
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 200, 80, 200));
     if win_x0 > wave_left && win_x0 < wave_left + wave_w {
         let _ = canvas.fill_rect(Rect::new(win_x0, wave_top, 2, wave_h as u32));
@@ -16598,13 +18210,12 @@ fn draw_audio_editor(
         );
     }
 
-    // ── dB grid lines at -6 and -12 dB ──
+    // ── dB grid lines ──
     {
         let half = (ch_h / 2 - 2).max(1) as f32;
         let db_levels = [("-6", 0.5f32), ("-12", 0.25f32)];
         for &(label, linear) in db_levels.iter() {
             let amp = (linear * half) as i32;
-            // For each channel
             for &center_y in &[ch0_center, ch1_center] {
                 for offset in &[amp, -amp] {
                     let ly = center_y - offset;
@@ -16615,7 +18226,6 @@ fn draw_audio_editor(
                     );
                 }
             }
-            // Label at top of top channel only
             let ly = ch0_center - (linear * half) as i32;
             draw_pixel_label(
                 canvas,
@@ -16628,27 +18238,10 @@ fn draw_audio_editor(
             );
         }
     }
-    // Channel labels
-    draw_pixel_label(
-        canvas,
-        &state.theme,
-        "L",
-        wave_left + 2,
-        wave_top + 2,
-        10,
-        sdl2::pixels::Color::RGBA(80, 90, 110, 180),
-    );
-    draw_pixel_label(
-        canvas,
-        &state.theme,
-        "R",
-        wave_left + 2,
-        ch_sep_y + 2,
-        10,
-        sdl2::pixels::Color::RGBA(80, 90, 110, 180),
-    );
+    draw_pixel_label(canvas, &state.theme, "L", wave_left + 2, wave_top + 2, 10, sdl2::pixels::Color::RGBA(80, 90, 110, 180));
+    draw_pixel_label(canvas, &state.theme, "R", wave_left + 2, ch_sep_y + 2, 10, sdl2::pixels::Color::RGBA(80, 90, 110, 180));
 
-    // ── Selection highlight (in seconds) ─────────────────────────────
+    // ── Selection highlight ──────────────────────────────────────────
     if let Some((sel_s, sel_e)) = state.audio_editor_selection {
         let s = sel_s.min(sel_e);
         let e = sel_s.max(sel_e);
@@ -16669,47 +18262,84 @@ fn draw_audio_editor(
         }
     }
 
-    // ── Draw waveform — filled min/max envelope per pixel column ────
-    canvas.set_clip_rect(Some(Rect::new(
-        wave_left,
-        wave_top,
-        wave_w as u32,
-        wave_h as u32,
-    )));
-    let stereo_data = state.waveform_stereo_cache.get(&source_file).cloned();
-    if let Some((l_max, l_min, r_max, r_min)) = stereo_data {
+    // ── Draw waveform ────────────────────────────────────────────────
+    canvas.set_clip_rect(Some(Rect::new(wave_left, wave_top, wave_w as u32, wave_h as u32)));
+    let raw_data = state.waveform_raw_cache.get(&source_file);
+    let stereo_data = state.waveform_stereo_cache.get(&source_file);
+    if let Some((ref left_raw, ref right_raw, raw_sr)) = raw_data {
+        // High-resolution rendering from raw samples
+        let num_samples = left_raw.len();
+        if num_samples > 0 && wave_w > 2 && total_secs > 0.0 {
+            let half0 = (ch_h / 2 - 2).max(1) as f32;
+            let half1 = half0;
+            let sr_f64 = *raw_sr as f64;
+            for px_i in 0..wave_w as usize {
+                let sec0 = x_to_sec(wave_left + px_i as i32);
+                let sec1 = x_to_sec(wave_left + px_i as i32 + 1);
+                if sec1 < 0.0 || sec0 > total_secs { continue; }
+                let s0 = ((sec0 * sr_f64) as usize).min(num_samples.saturating_sub(1));
+                let s1 = ((sec1 * sr_f64) as usize).min(num_samples).max(s0 + 1);
+                // Compute per-pixel min/max from raw samples
+                let mut l_px_max = f32::NEG_INFINITY;
+                let mut l_px_min = f32::INFINITY;
+                let mut r_px_max = f32::NEG_INFINITY;
+                let mut r_px_min = f32::INFINITY;
+                for si in s0..s1 {
+                    let ls = left_raw[si];
+                    let rs = right_raw[si];
+                    if ls > l_px_max { l_px_max = ls; }
+                    if ls < l_px_min { l_px_min = ls; }
+                    if rs > r_px_max { r_px_max = rs; }
+                    if rs < r_px_min { r_px_min = rs; }
+                }
+                if l_px_max == f32::NEG_INFINITY { continue; }
+                let in_window = sec0 >= clip_win_start_secs && sec0 <= clip_win_end_secs;
+                let (wave_r, wave_g, wave_b, alpha) = if in_window {
+                    (70u8, 200u8, 130u8, 230u8)
+                } else {
+                    (50u8, 110u8, 80u8, 140u8)
+                };
+                let bx = wave_left + px_i as i32;
+                let lmx = ((l_px_max * clip_gain).min(1.0) * half0) as i32;
+                let lmn = ((l_px_min * clip_gain).max(-1.0) * half0) as i32;
+                let l_top = ch0_center - lmx;
+                let l_bot = ch0_center - lmn;
+                let lh = (l_bot - l_top).max(1);
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(wave_r, wave_g, wave_b, alpha));
+                let _ = canvas.fill_rect(Rect::new(bx, l_top, 1, lh as u32));
+                let rmx = ((r_px_max * clip_gain).min(1.0) * half1) as i32;
+                let rmn = ((r_px_min * clip_gain).max(-1.0) * half1) as i32;
+                let r_top = ch1_center - rmx;
+                let r_bot = ch1_center - rmn;
+                let rh = (r_bot - r_top).max(1);
+                let _ = canvas.fill_rect(Rect::new(bx, r_top, 1, rh as u32));
+            }
+        }
+    } else if let Some((ref l_max, ref l_min, ref r_max, ref r_min)) = stereo_data {
+        // Fallback: use cached peaks (lower resolution)
         let num_peaks = l_max.len();
         if num_peaks > 0 && wave_w > 2 && total_secs > 0.0 {
             let half0 = (ch_h / 2 - 2).max(1) as f32;
             let half1 = half0;
             for px_i in 0..wave_w as usize {
                 let sec = x_to_sec(wave_left + px_i as i32);
-                if sec < 0.0 || sec > total_secs {
-                    continue;
-                }
+                if sec < 0.0 || sec > total_secs { continue; }
                 let frac = sec / total_secs;
                 let idx = ((frac * num_peaks as f64) as usize).min(num_peaks - 1);
-
-                // Determine color: inside clip window = bright, outside = dim
                 let in_window = sec >= clip_win_start_secs && sec <= clip_win_end_secs;
                 let (wave_r, wave_g, wave_b, alpha) = if in_window {
                     (70u8, 200u8, 130u8, 230u8)
                 } else {
                     (50u8, 110u8, 80u8, 140u8)
                 };
-
                 let bx = wave_left + px_i as i32;
-
-                // Left channel: filled envelope from min to max
                 let lmx = ((l_max[idx] * clip_gain).min(1.0) * half0) as i32;
-                let lmn = ((l_min[idx] * clip_gain).max(-1.0) * half0) as i32; // negative
+                let lmn = ((l_min[idx] * clip_gain).max(-1.0) * half0) as i32;
                 let l_top = ch0_center - lmx;
                 let l_bot = ch0_center - lmn;
                 let lh = (l_bot - l_top).max(1);
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(wave_r, wave_g, wave_b, alpha));
                 let _ = canvas.fill_rect(Rect::new(bx, l_top, 1, lh as u32));
-
-                // Right channel
                 let rmx = ((r_max[idx] * clip_gain).min(1.0) * half1) as i32;
                 let rmn = ((r_min[idx] * clip_gain).max(-1.0) * half1) as i32;
                 let r_top = ch1_center - rmx;
@@ -16719,37 +18349,17 @@ fn draw_audio_editor(
             }
         }
     } else if !source_file.is_empty() {
-        draw_pixel_label(
-            canvas,
-            &state.theme,
-            "loading waveform...",
-            wave_left + wave_w / 2 - 60,
-            ch0_center - 5,
-            140,
-            sdl2::pixels::Color::RGBA(100, 180, 130, 150),
-        );
+        draw_pixel_label(canvas, &state.theme, "loading waveform...", wave_left + wave_w / 2 - 60, ch0_center - 5, 140, sdl2::pixels::Color::RGBA(100, 180, 130, 150));
     }
     canvas.set_clip_rect(None);
 
-    // ── Second grid lines ────────────────────────────────────────────
-    canvas.set_clip_rect(Some(Rect::new(
-        wave_left,
-        wave_top,
-        wave_w as u32,
-        wave_h as u32,
-    )));
+    // ── Grid lines (time-based, always stable; plus subtle beat grid) ─
+    canvas.set_clip_rect(Some(Rect::new(wave_left, wave_top, wave_w as u32, wave_h as u32)));
     if total_secs > 0.0 {
-        let step = if zoom < 10.0 {
-            10.0
-        } else if zoom < 50.0 {
-            2.0
-        } else if zoom < 200.0 {
-            0.5
-        } else {
-            0.1
-        };
-        let first = ((scroll / step).floor() * step).max(step * 0.5);
-        let mut t = first;
+        // Primary time-based grid — step is zoom-dependent and NEVER changes with snap
+        let step = if zoom < 10.0 { 10.0 } else if zoom < 50.0 { 2.0 } else if zoom < 200.0 { 0.5 } else { 0.1 };
+        let first = (scroll / step).floor() * step;
+        let mut t = if first <= 0.0 { step } else { first };
         while t < total_secs && t <= scroll + visible_secs + step {
             let x = sec_to_x(t);
             let is_sec = (t - t.floor()).abs() < 0.01;
@@ -16764,40 +18374,114 @@ fn draw_audio_editor(
             );
             t += step;
         }
+
+        // Subtle beat grid — always drawn based on BPM, independent of snap
+        if bpm_early > 0.0 {
+            let beat_step = 60.0 / bpm_early;
+            // Only draw beat lines if they're spaced far enough apart to be legible
+            let beat_px_width = beat_step * zoom;
+            if beat_px_width >= 4.0 {
+                let first_beat = (scroll / beat_step).floor() * beat_step;
+                let mut tb = if first_beat <= 0.0 { beat_step } else { first_beat };
+                while tb < total_secs && tb <= scroll + visible_secs + beat_step {
+                    let x = sec_to_x(tb);
+                    // Detect bar lines (every 4 beats)
+                    let beat_num = (tb / beat_step).round() as i64;
+                    let is_bar = beat_num % 4 == 0;
+                    canvas.set_draw_color(if is_bar {
+                        sdl2::pixels::Color::RGBA(70, 75, 95, 60)
+                    } else {
+                        sdl2::pixels::Color::RGBA(55, 60, 78, 35)
+                    });
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(x, wave_top),
+                        sdl2::rect::Point::new(x, wave_top + wave_h),
+                    );
+                    tb += beat_step;
+                }
+            }
+        }
     }
     canvas.set_clip_rect(None);
 
-    // ── Playhead ─────────────────────────────────────────────────────
+    // ── Playhead (independent audio editor playhead) ─────────────────
     {
-        let pos_beats = state.project.transport.position;
-        if let Some((track_id, clip_idx)) = state.selected_clip {
-            if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                if let Some(crate::models::Clip::Audio(ac)) = track.clips.get(clip_idx) {
-                    // Convert transport beat position → seconds within audio file
-                    let rel_beats = pos_beats - ac.start_time;
-                    let rel_secs = rel_beats * 60.0 / bpm + ac.offset;
-                    if rel_secs >= 0.0 && rel_secs <= total_secs {
-                        let cx = sec_to_x(rel_secs);
-                        if cx >= wave_left && cx <= wave_left + wave_w {
-                            canvas.set_draw_color(Theme::c(state.theme.playhead));
-                            let _ = canvas.fill_rect(Rect::new(
-                                cx,
-                                ruler_top,
-                                1,
-                                (ruler_h + wave_h) as u32,
-                            ));
-                            let tri_sz = 4i32;
-                            for dy in 0..tri_sz {
-                                let half = dy;
-                                let _ = canvas.fill_rect(Rect::new(
-                                    cx - half,
-                                    ruler_top + dy,
-                                    (half * 2 + 1) as u32,
-                                    1,
-                                ));
-                            }
-                        }
-                    }
+        let ph_sec = state.audio_editor_playhead;
+        if ph_sec >= 0.0 && ph_sec <= total_secs {
+            let cx = sec_to_x(ph_sec);
+            if cx >= wave_left && cx <= wave_left + wave_w {
+                canvas.set_draw_color(Theme::c(state.theme.playhead));
+                let _ = canvas.fill_rect(Rect::new(
+                    cx,
+                    ruler_top,
+                    1,
+                    (ruler_h + wave_h) as u32,
+                ));
+                // Triangle indicator at top of time ruler
+                let tri_sz = 4i32;
+                for dy in 0..tri_sz {
+                    let half = dy;
+                    let _ = canvas.fill_rect(Rect::new(
+                        cx - half,
+                        ruler_top + dy,
+                        (half * 2 + 1) as u32,
+                        1,
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── Also draw loop region highlight on waveform (edge lines only) ──
+    if state.audio_editor_loop_enabled && state.audio_editor_loop_end > state.audio_editor_loop_start {
+        let lx1 = sec_to_x(state.audio_editor_loop_start).max(wave_left);
+        let lx2 = sec_to_x(state.audio_editor_loop_end).min(wave_left + wave_w);
+        if lx2 > lx1 {
+            let lc = state.theme.loop_color;
+            // Left edge
+            canvas.set_draw_color(sdl2::pixels::Color::RGBA(lc[0], lc[1], lc[2], 120));
+            let _ = canvas.fill_rect(Rect::new(lx1, wave_top, 2, wave_h as u32));
+            // Right edge
+            let _ = canvas.fill_rect(Rect::new(lx2 - 1, wave_top, 2, wave_h as u32));
+        }
+    }
+
+    // ── Fade in/out visual overlays ─────────────────────────────────
+    {
+        let fade_in_secs = state.audio_editor_fade_in;
+        let fade_out_secs = state.audio_editor_fade_out;
+
+        // Fade in: thin ramp line from bottom-left to top at fade_in_secs
+        if fade_in_secs > 0.0 {
+            let x_start = sec_to_x(0.0).max(wave_left);
+            let x_end = sec_to_x(fade_in_secs).min(wave_left + wave_w);
+            if x_end > x_start {
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 200, 80, 200));
+                let steps = (x_end - x_start).max(1);
+                for i in 0..steps {
+                    let x = x_start + i;
+                    let frac = i as f32 / steps as f32;
+                    let y = wave_top + wave_h - (frac * wave_h as f32) as i32;
+                    // Draw 2px wide for visibility
+                    let _ = canvas.fill_rect(Rect::new(x, y, 1, 2));
+                }
+            }
+        }
+
+        // Fade out: thin ramp line from top at (total_secs - fade_out) to bottom-right
+        if fade_out_secs > 0.0 {
+            let fo_start = (total_secs - fade_out_secs).max(0.0);
+            let x_start = sec_to_x(fo_start).max(wave_left);
+            let x_end = sec_to_x(total_secs).min(wave_left + wave_w);
+            if x_end > x_start {
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 120, 80, 200));
+                let steps = (x_end - x_start).max(1);
+                for i in 0..steps {
+                    let x = x_start + i;
+                    let frac = i as f32 / steps as f32;
+                    let y = wave_top + (frac * wave_h as f32) as i32;
+                    // Draw 2px wide for visibility
+                    let _ = canvas.fill_rect(Rect::new(x, y, 1, 2));
                 }
             }
         }
@@ -16813,23 +18497,17 @@ fn draw_audio_editor(
         let s = ss.min(se);
         let e = ss.max(se);
         format!(
-            "Sel: {:.3}s – {:.3}s  ({:.2}s)  |  Clip window: {:.3}s – {:.3}s  |  Zoom: {:.0}px/s",
-            s,
-            e,
-            e - s,
-            clip_win_start_secs,
-            clip_win_end_secs,
-            zoom
+            "Sel: {:.3}s – {:.3}s  ({:.2}s)  |  Playhead: {:.3}s  |  Zoom: {:.0}px/s",
+            s, e, e - s, state.audio_editor_playhead, zoom
         )
     } else {
-        format!("File: {:.2}s  |  Clip window: {:.3}s – {:.3}s  |  View: {:.2}s – {:.2}s  |  Zoom: {:.0}px/s",
-            total_secs, clip_win_start_secs, clip_win_end_secs, scroll, scroll + visible_secs, zoom)
+        format!("File: {:.2}s  |  Playhead: {:.3}s  |  View: {:.2}s – {:.2}s  |  Zoom: {:.0}px/s",
+            total_secs, state.audio_editor_playhead, scroll, scroll + visible_secs, zoom)
     };
-    let info_str_ref = sel_info.as_str();
     draw_pixel_label(
         canvas,
         &state.theme,
-        info_str_ref,
+        &sel_info,
         wave_left + 4,
         info_y + 3,
         wave_w - 8,
@@ -16862,7 +18540,6 @@ fn draw_audio_editor(
                 scroll_frac,
                 thumb_ratio,
             );
-            // Only update zoom/scroll from scroomer when actively interacted with
             let ratio_changed = (new_ratio - thumb_ratio).abs() > 0.001;
             let frac_changed = (new_frac - scroll_frac).abs() > 0.001;
             if ratio_changed {
@@ -16880,29 +18557,77 @@ fn draw_audio_editor(
     }
 
     // ── Mouse interaction ────────────────────────────────────────────
+    let in_loop_ruler = input.mouse_in_rect(wave_left, loop_ruler_top, wave_w, loop_ruler_h);
     let in_ruler = input.mouse_in_rect(wave_left, ruler_top, wave_w, ruler_h);
     let in_wave = input.mouse_in_rect(wave_left, wave_top, wave_w, wave_h);
 
-    // Snapping helper: snap seconds to nearest grid division based on zoom
-    // zoom = px/sec. At low zoom snap coarser.
+    // Snapping helper
+    let snap_div_beats = SNAP_RESOLUTIONS[state.audio_editor_snap_idx].1;
+    let snap_div_secs = snap_div_beats * 60.0 / bpm.max(1.0);
+    let audio_snap_enabled = state.audio_editor_snap_enabled;
     let snap_sec = |sec: f64| -> f64 {
-        let snap_div = if zoom >= 200.0 {
-            0.05
-        } else if zoom >= 50.0 {
-            0.1
-        } else if zoom >= 10.0 {
-            0.25
+        if audio_snap_enabled {
+            (sec / snap_div_secs).round() * snap_div_secs
         } else {
-            0.5
-        };
-        (sec / snap_div).round() * snap_div
+            sec
+        }
     };
 
-    // ── Selection handle dragging (on ruler) ─────────────────────────
-    // Widget 7051 = left handle, 7052 = right handle
-    let handle_hit_px = 7i32; // pixels either side of handle that counts as a hit
+    // ── Loop ruler interaction ───────────────────────────────────────
+    // Click-drag on loop ruler creates/adjusts loop region
+    let handle_hit_loop = 6i32;
+    if in_loop_ruler && input.mouse_pressed && input.drag_widget == WidgetId::None {
+        let mx = input.mouse_x;
+        let loop_s = state.audio_editor_loop_start;
+        let loop_e = state.audio_editor_loop_end;
+        let ls_x = sec_to_x(loop_s);
+        let le_x = sec_to_x(loop_e);
+        let near_start = state.audio_editor_loop_enabled && loop_e > loop_s && (mx - ls_x).abs() <= handle_hit_loop;
+        let near_end = state.audio_editor_loop_enabled && loop_e > loop_s && (mx - le_x).abs() <= handle_hit_loop;
 
-    // Check if pressing on a handle
+        if near_start && !near_end {
+            input.drag_widget = WidgetId::Auto(7080);
+            input.active_widget = WidgetId::Auto(7080);
+        } else if near_end && !near_start {
+            input.drag_widget = WidgetId::Auto(7081);
+            input.active_widget = WidgetId::Auto(7081);
+        } else {
+            // Start new loop region
+            let sec = snap_sec(x_to_sec(mx).clamp(0.0, total_secs));
+            state.audio_editor_loop_start = sec;
+            state.audio_editor_loop_end = sec;
+            state.audio_editor_loop_enabled = true;
+            input.drag_widget = WidgetId::Auto(7082);
+            input.active_widget = WidgetId::Auto(7082);
+            input.drag_start_value = sec;
+        }
+        state.focused_panel = crate::state::FocusedPanel::AudioEditor;
+    }
+    // Drag loop start handle
+    if input.drag_widget == WidgetId::Auto(7080) && input.mouse_down {
+        let sec = snap_sec(x_to_sec(input.mouse_x).clamp(0.0, total_secs));
+        state.audio_editor_loop_start = sec.min(state.audio_editor_loop_end - 0.01);
+    }
+    // Drag loop end handle
+    if input.drag_widget == WidgetId::Auto(7081) && input.mouse_down {
+        let sec = snap_sec(x_to_sec(input.mouse_x).clamp(0.0, total_secs));
+        state.audio_editor_loop_end = sec.max(state.audio_editor_loop_start + 0.01);
+    }
+    // Drag new loop region (from click)
+    if input.drag_widget == WidgetId::Auto(7082) && input.mouse_down {
+        let sec = snap_sec(x_to_sec(input.mouse_x).clamp(0.0, total_secs));
+        let anchor = input.drag_start_value;
+        let (lo, hi) = if sec < anchor { (sec, anchor) } else { (anchor, sec) };
+        state.audio_editor_loop_start = lo.max(0.0);
+        state.audio_editor_loop_end = hi.max(lo + 0.01);
+    }
+    // Right-click on loop ruler: disable loop
+    if in_loop_ruler && input.right_mouse_pressed {
+        state.audio_editor_loop_enabled = false;
+    }
+
+    // ── Selection handle dragging (on ruler) ─────────────────────────
+    let handle_hit_px = 7i32;
     if in_ruler && input.mouse_pressed && input.drag_widget == WidgetId::None {
         if let Some((sel_s, sel_e)) = state.audio_editor_selection {
             let s = sel_s.min(sel_e);
@@ -16911,14 +18636,11 @@ fn draw_audio_editor(
             let ex = sec_to_x(e);
             let mx = input.mouse_x;
             if (mx - sx).abs() <= handle_hit_px {
-                // Grab left handle
                 input.drag_widget = WidgetId::Auto(7051);
                 input.active_widget = WidgetId::Auto(7051);
                 input.drag_start_value = s;
-                // Normalize: sel.0 = the end (fixed), sel.1 = moving
                 state.audio_editor_selection = Some((e, s));
             } else if (mx - ex).abs() <= handle_hit_px {
-                // Grab right handle
                 input.drag_widget = WidgetId::Auto(7052);
                 input.active_widget = WidgetId::Auto(7052);
                 input.drag_start_value = e;
@@ -16926,15 +18648,12 @@ fn draw_audio_editor(
             }
         }
     }
-
-    // Drag left handle
     if input.drag_widget == WidgetId::Auto(7051) && input.mouse_down {
         let sec = snap_sec(x_to_sec(input.mouse_x).clamp(0.0, total_secs));
         if let Some(ref mut sel) = state.audio_editor_selection {
-            sel.1 = sec; // sel.0 = fixed end, sel.1 = moving
+            sel.1 = sec;
         }
     }
-    // Drag right handle
     if input.drag_widget == WidgetId::Auto(7052) && input.mouse_down {
         let sec = snap_sec(x_to_sec(input.mouse_x).clamp(0.0, total_secs));
         if let Some(ref mut sel) = state.audio_editor_selection {
@@ -16942,7 +18661,7 @@ fn draw_audio_editor(
         }
     }
 
-    // Ruler click (not on handle): set playhead
+    // Ruler click (not on handle): set audio editor playhead
     let on_handle = if let Some((sel_s, sel_e)) = state.audio_editor_selection {
         let s = sel_s.min(sel_e);
         let e = sel_s.max(sel_e);
@@ -16959,23 +18678,45 @@ fn draw_audio_editor(
         && input.drag_widget != WidgetId::Auto(7052)
     {
         let sec = x_to_sec(input.mouse_x).clamp(0.0, total_secs);
-        if let Some((track_id, clip_idx)) = state.selected_clip {
-            if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                if let Some(crate::models::Clip::Audio(ac)) = track.clips.get(clip_idx) {
-                    // sec relative to file start → beat on timeline
-                    let rel_secs = (sec - ac.offset).max(0.0);
-                    state.project.transport.position = ac.start_time + rel_secs * bpm / 60.0;
-                }
+        state.audio_editor_playhead = sec;
+        state.focused_panel = crate::state::FocusedPanel::AudioEditor;
+        // Start a drag so subsequent mouse_down frames also update the playhead
+        input.drag_widget = WidgetId::Auto(7095);
+        input.active_widget = WidgetId::Auto(7095);
+    }
+    // Playhead drag: update position while mouse held on ruler
+    if input.drag_widget == WidgetId::Auto(7095) && input.mouse_down {
+        let sec = x_to_sec(input.mouse_x).clamp(0.0, total_secs);
+        state.audio_editor_playhead = sec;
+    }
+
+    // Wave: Ctrl+click-drag with existing selection → drag region to arranger
+    if in_wave
+        && input.mouse_pressed
+        && input.ctrl()
+        && !source_file.is_empty()
+    {
+        if let Some((sel_s, sel_e)) = state.audio_editor_selection {
+            let s = sel_s.min(sel_e);
+            let e = sel_s.max(sel_e);
+            if (e - s) > 0.001 {
+                state.audio_drag_to_arranger = true;
+                state.audio_drag_source = source_file.clone();
+                state.audio_drag_offset = s;
+                state.audio_drag_length_secs = e - s;
+                input.drag_widget = WidgetId::Auto(7090);
+                input.active_widget = WidgetId::Auto(7090);
             }
         }
     }
 
-    // Wave: click-drag to select range (stores as seconds in file)
-    // Only start a new selection if no handle drag is active
+    // Wave: click-drag to select range (only when not Ctrl+dragging to arranger)
     if in_wave
         && input.mouse_pressed
+        && !input.ctrl()
         && input.drag_widget != WidgetId::Auto(7051)
         && input.drag_widget != WidgetId::Auto(7052)
+        && input.drag_widget != WidgetId::Auto(7090)
     {
         let sec = snap_sec(x_to_sec(input.mouse_x).clamp(0.0, total_secs));
         state.audio_editor_selection = Some((sec, sec));
@@ -16995,7 +18736,7 @@ fn draw_audio_editor(
     }
 
     // ── Scroll / Zoom ────────────────────────────────────────────────
-    if (in_wave || in_ruler) && input.scroll_y != 0 && !input.scroll_consumed {
+    if (in_wave || in_ruler || in_loop_ruler) && input.scroll_y != 0 && !input.scroll_consumed {
         if input.ctrl() {
             let factor = if input.scroll_y > 0 { 1.15 } else { 0.87 };
             let old_z = state.audio_editor_zoom;
@@ -17013,7 +18754,7 @@ fn draw_audio_editor(
     }
 
     if input.middle_mouse_down
-        && (in_wave || in_ruler)
+        && (in_wave || in_ruler || in_loop_ruler)
         && input.middle_drag_widget == WidgetId::None
     {
         input.middle_drag_widget = WidgetId::Auto(86100);
@@ -17024,8 +18765,57 @@ fn draw_audio_editor(
             (state.audio_editor_scroll - dx_secs).clamp(0.0, max_scroll_secs);
     }
 
-    if (in_wave || in_ruler) && input.mouse_pressed {
+    if (in_wave || in_ruler || in_loop_ruler) && input.mouse_pressed {
         state.focused_panel = crate::state::FocusedPanel::AudioEditor;
+    }
+
+    // ── Update playhead from preview position ────────────────────────
+    // When playing, advance the audio editor playhead based on preview_pos
+    if state.audio_editor_playing && state.sample_preview_path.is_none() {
+        // Preview finished
+        state.audio_editor_playing = false;
+    }
+
+    // ── Dropdown popup overlays (draw on top of everything) ──────────
+    {
+        let snap_labels: Vec<&str> = SNAP_RESOLUTIONS.iter().map(|(l, _)| *l).collect();
+        dropdown_popup_overlay(
+            canvas,
+            &state.theme,
+            7073,
+            snap_dropdown_x,
+            top + 4,
+            56,
+            20,
+            56,
+            &snap_labels,
+            state.audio_editor_snap_idx,
+            state.dropdown_open_id,
+            input.mouse_x,
+            input.mouse_y,
+        );
+    }
+    {
+        let fx_labels: Vec<&str> = vec!["Reverse", "Fade In", "Fade Out", "Silence", "Gain +6dB", "Gain -6dB", "Invert"];
+        let fx_dropdown_w = 80i32;
+        let apply_w = 50i32;
+        let fx_area_w = fx_dropdown_w + 4 + apply_w;
+        let fx_x = w - fx_area_w - 8;
+        dropdown_popup_overlay(
+            canvas,
+            &state.theme,
+            7074,
+            fx_x,
+            top + 4,
+            fx_dropdown_w,
+            20,
+            fx_dropdown_w,
+            &fx_labels,
+            state.audio_editor_effect_idx,
+            state.dropdown_open_id,
+            input.mouse_x,
+            input.mouse_y,
+        );
     }
 }
 
@@ -17041,7 +18831,7 @@ fn draw_automation_editor(
     const TOOLBAR_H: i32 = 22;
     const RULER_H: i32 = 20;
     const LABEL_W: i32 = 40; // left value axis width
-    const SCROLL_T: i32 = 10;
+    const SCROLL_T: i32 = 14;
 
     let toolbar_top = top;
     let ruler_top = top + TOOLBAR_H;
@@ -17205,6 +18995,27 @@ fn draw_automation_editor(
         tb_x += 46;
     }
 
+    // Automation snap resolution dropdown
+    let auto_snap_dropdown_x = tb_x;
+    {
+        let snap_labels: Vec<&str> = SNAP_RESOLUTIONS.iter().map(|(l, _)| *l).collect();
+        let changed = dropdown(
+            canvas,
+            input,
+            &state.theme,
+            80031,
+            tb_x,
+            tb_y,
+            52,
+            tb_h,
+            &snap_labels,
+            &mut state.automation_snap_idx,
+            &mut state.dropdown_open_id,
+        );
+        let _ = changed;
+        tb_x += 56;
+    }
+
     // Hint
     draw_pixel_label(
         canvas,
@@ -17362,7 +19173,7 @@ fn draw_automation_editor(
         state.theme.grid_line[0].min(200),
         state.theme.grid_line[1].min(200),
         state.theme.grid_line[2].min(200),
-        40,
+        110,
     ));
     for i in 0..8 {
         let val = 1.0 - i as f32 / 8.0;
@@ -17375,7 +19186,12 @@ fn draw_automation_editor(
         }
     }
     // Horizontal value grid lines — strong (quarters)
-    canvas.set_draw_color(Theme::c(state.theme.grid_line));
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+        state.theme.grid_line_strong[0].min(200),
+        state.theme.grid_line_strong[1].min(200),
+        state.theme.grid_line_strong[2].min(200),
+        200,
+    ));
     for i in 0..=4 {
         let val = 1.0 - i as f32 / 4.0;
         let gy = val_to_y(val);
@@ -17389,7 +19205,7 @@ fn draw_automation_editor(
 
     // Vertical beat grid lines
     {
-        let snap_res = state.snap.resolution_beats();
+        let snap_res = SNAP_RESOLUTIONS[state.automation_snap_idx].1;
         let start_beat = (scroll_x / snap_res).floor() * snap_res;
         let end_beat = scroll_x + grid_w as f64 / zoom + 2.0;
         let mut b = start_beat;
@@ -17464,29 +19280,29 @@ fn draw_automation_editor(
                     // Check if another node is at the same pixel position (overlap)
                     let is_overlapped = auto.points.iter().enumerate().any(|(j, q)| {
                         j != i
-                            && (beat_to_x(q.time) - px).abs() < 4
-                            && (val_to_y(q.value) - py).abs() < 4
+                            && (beat_to_x(q.time) - px).abs() < 6
+                            && (val_to_y(q.value) - py).abs() < 6
                     });
-                    let hover = (input.mouse_x - px).abs() < 6 && (input.mouse_y - py).abs() < 6;
+                    let hover = (input.mouse_x - px).abs() < 9 && (input.mouse_y - py).abs() < 9;
                     let is_sel = selected.contains(&i);
                     if is_sel {
                         // Selected: brighter, larger
                         canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 255, 120, 255));
-                        let _ = canvas.fill_rect(Rect::new(px - 5, py - 5, 10, 10));
+                        let _ = canvas.fill_rect(Rect::new(px - 7, py - 7, 14, 14));
                         canvas.set_draw_color(Theme::c(state.theme.accent));
-                        let _ = canvas.draw_rect(Rect::new(px - 5, py - 5, 10, 10));
+                        let _ = canvas.draw_rect(Rect::new(px - 7, py - 7, 14, 14));
                     } else if hover {
                         canvas.set_draw_color(Theme::c(state.theme.accent));
-                        let _ = canvas.fill_rect(Rect::new(px - 5, py - 5, 10, 10));
+                        let _ = canvas.fill_rect(Rect::new(px - 7, py - 7, 14, 14));
                     } else if is_overlapped {
                         // Overlapping node: draw with a bright orange ring so both are visible
                         canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 160, 40, 220));
-                        let _ = canvas.draw_rect(Rect::new(px - 5, py - 5, 10, 10));
+                        let _ = canvas.draw_rect(Rect::new(px - 7, py - 7, 14, 14));
                         canvas.set_draw_color(Theme::c(state.theme.accent));
-                        let _ = canvas.fill_rect(Rect::new(px - 3, py - 3, 6, 6));
+                        let _ = canvas.fill_rect(Rect::new(px - 5, py - 5, 10, 10));
                     } else {
                         canvas.set_draw_color(Theme::c(state.theme.accent));
-                        let _ = canvas.fill_rect(Rect::new(px - 3, py - 3, 6, 6));
+                        let _ = canvas.fill_rect(Rect::new(px - 5, py - 5, 10, 10));
                     }
                 }
             }
@@ -17561,7 +19377,7 @@ fn draw_automation_editor(
                             if let Some(idx) = close_idx {
                                 let dp = beat_to_x(auto.points[idx].time) - mx;
                                 let dv = val_to_y(auto.points[idx].value) - my;
-                                if (dp * dp + dv * dv) < 400 {
+                                if (dp * dp + dv * dv) < 625 {
                                     info = Some(idx);
                                 }
                             }
@@ -17586,7 +19402,7 @@ fn draw_automation_editor(
 
         // Right-click drag: erase all points near the cursor path
         if input.right_mouse_down && !input.right_mouse_pressed {
-            let erase_radius_sq = 12i32 * 12; // 12px erase radius
+            let erase_radius_sq = 16i32 * 16; // 16px erase radius
             let to_delete: Vec<usize> = {
                 let mut indices = Vec::new();
                 if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
@@ -17632,7 +19448,7 @@ fn draw_automation_editor(
                                 let dx = beat_to_x(p.time) - mx;
                                 let dy = val_to_y(p.value) - my;
                                 let d2 = dx * dx + dy * dy;
-                                if d2 < 400 {
+                                if d2 < 625 {
                                     Some((i, d2))
                                 } else {
                                     None
@@ -17703,7 +19519,8 @@ fn draw_automation_editor(
                     state.automation_selected.clear();
                 } else {
                     let snapped_beat = if state.automation_snap_enabled {
-                        state.snap.snap(beat.max(0.0))
+                        let r = SNAP_RESOLUTIONS[state.automation_snap_idx].1;
+                        (beat.max(0.0) / r).round() * r
                     } else {
                         beat.max(0.0)
                     };
@@ -17764,7 +19581,8 @@ fn draw_automation_editor(
                     if si < auto.points.len() && oi < state.automation_group_drag_orig.len() {
                         let (orig_t, orig_v) = state.automation_group_drag_orig[oi];
                         let new_t = if state.automation_snap_enabled {
-                            state.snap.snap((orig_t + dx_beats).max(0.0))
+                            let r = SNAP_RESOLUTIONS[state.automation_snap_idx].1;
+                            ((orig_t + dx_beats).max(0.0) / r).round() * r
                         } else {
                             (orig_t + dx_beats).max(0.0)
                         };
@@ -17788,7 +19606,8 @@ fn draw_automation_editor(
                     {
                         if drag_idx < auto.points.len() {
                             let snapped_beat = if state.automation_snap_enabled {
-                                state.snap.snap(beat.max(0.0))
+                                let r = SNAP_RESOLUTIONS[state.automation_snap_idx].1;
+                                (beat.max(0.0) / r).round() * r
                             } else {
                                 beat.max(0.0)
                             };
@@ -17930,7 +19749,7 @@ fn draw_automation_editor(
         }
     }
 
-    // ── Horizontal scrollbar (interactive) ──
+    // ── Horizontal scrollbar / scroomer ──────────────────────────────
     {
         // Account for automation points beyond clip end
         let max_point_beat = {
@@ -17950,25 +19769,39 @@ fn draw_automation_editor(
         let visible_beats = grid_w as f64 / zoom;
         let thumb_ratio = (visible_beats / total_beats).clamp(0.02, 1.0) as f32;
         let max_scroll_beats = (total_beats - visible_beats).max(0.0);
-        let cur = if max_scroll_beats > 0.0 {
-            (scroll_x / max_scroll_beats) as f32
+        let scroll_frac = if max_scroll_beats > 0.0 {
+            (scroll_x / max_scroll_beats).clamp(0.0, 1.0) as f32
         } else {
             0.0
         };
-        let new_s = scrollbar(
+
+        let (new_frac, new_ratio) = scrollbar_with_squeeze(
             canvas,
             input,
             &state.theme,
             WidgetId::Auto(80040),
+            WidgetId::Auto(80041),
+            WidgetId::Auto(80042),
             LABEL_W,
             grid_top + grid_h,
             grid_w,
             SCROLL_T,
             ScrollbarDir::Horizontal,
-            cur.clamp(0.0, 1.0),
+            scroll_frac,
             thumb_ratio,
         );
-        state.automation_scroll_x = (new_s as f64 * max_scroll_beats).max(0.0);
+        let ratio_changed = (new_ratio - thumb_ratio).abs() > 0.001;
+        let frac_changed = (new_frac - scroll_frac).abs() > 0.001;
+        if ratio_changed {
+            let new_visible_beats = (new_ratio as f64 * total_beats).max(1.0);
+            let new_zoom = (grid_w as f64 / new_visible_beats).clamp(8.0, 2000.0);
+            state.automation_zoom_x = new_zoom;
+        }
+        if ratio_changed || frac_changed {
+            let cur_zoom = state.automation_zoom_x;
+            let new_max_scroll = (total_beats - grid_w as f64 / cur_zoom).max(0.0);
+            state.automation_scroll_x = (new_frac as f64 * new_max_scroll).max(0.0);
+        }
     }
 
     // ── Borders ──
@@ -17978,9 +19811,29 @@ fn draw_automation_editor(
         sdl2::rect::Point::new(LABEL_W - 1, grid_top + grid_h),
     );
     let _ = canvas.draw_rect(Rect::new(LABEL_W, grid_top, grid_w as u32, grid_h as u32));
+
+    // ── Dropdown popup overlay (draw on top of everything) ───────────
+    {
+        let snap_labels: Vec<&str> = SNAP_RESOLUTIONS.iter().map(|(l, _)| *l).collect();
+        dropdown_popup_overlay(
+            canvas,
+            &state.theme,
+            80031,
+            auto_snap_dropdown_x,
+            tb_y,
+            52,
+            tb_h,
+            52,
+            &snap_labels,
+            state.automation_snap_idx,
+            state.dropdown_open_id,
+            input.mouse_x,
+            input.mouse_y,
+        );
+    }
 }
 
-/// Draw a semi-transparent help/shortcut overlay
+/// Draw a semi-transparent help/shortcut overlay with tabbed sidebar
 pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
     let w = state.window_width as i32;
     let h = state.window_height as i32;
@@ -17989,9 +19842,8 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 200));
     let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
 
-    // Two-column panel — wide enough to show both columns comfortably
     let pw = (w - 40).min(980);
-    let ph = (h - 40).min(h - 40);
+    let ph = (h - 60).min(h - 40);
     let px = (w - pw) / 2;
     let py = (h - ph) / 2;
 
@@ -18007,187 +19859,328 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     draw_pixel_label(
         canvas,
         &state.theme,
-        "Eden DAW  —  Help  (F1 or click anywhere to close)",
+        "Eden DAW  —  Help  (F1 to close)",
         px + 8,
         py + 5,
         pw - 16,
         sdl2::pixels::Color::RGBA(140, 190, 255, 255),
     );
 
-    // ── Content ──────────────────────────────────────────────────────────
-    // Left column: shortcuts / transport / arrangement
-    // Right column: widgets / mixer / piano roll / piano keyboard
+    // ── Tab sidebar ──────────────────────────────────────────────────
+    let tab_w = 120i32;
+    let tab_labels = ["General", "Arrangement", "Piano Roll", "Audio Editor", "Automation", "Rack", "Mixer"];
+    let tab_top = py + 24;
+    let tab_h = 22i32;
 
-    let col_w = pw / 2 - 8;
-    let lx = px + 8;
-    let rx = px + pw / 2 + 4;
-    let line_h = 13i32;
-    let content_top = py + 26;
-    let content_bot = py + ph - 6;
+    // Sidebar background
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(30, 33, 42, 255));
+    let _ = canvas.fill_rect(Rect::new(px, tab_top, tab_w as u32, (ph - 24) as u32));
 
-    // Helper colours (captured as variables, not closures, to avoid borrow issues)
-    let c_section  = sdl2::pixels::Color::RGBA(200, 165, 80,  255);
-    let c_key      = sdl2::pixels::Color::RGBA(255, 220, 140, 230);
-    let c_desc     = sdl2::pixels::Color::RGBA(178, 184, 200, 220);
-    let c_note     = sdl2::pixels::Color::RGBA(130, 200, 130, 200);
+    for (i, label) in tab_labels.iter().enumerate() {
+        let ty = tab_top + i as i32 * tab_h;
+        let is_active = state.help_screen_tab == i;
+        let hover = input.mouse_in_rect(px, ty, tab_w, tab_h);
 
-    // Left column entries: (key, description, is_section)
-    // Empty key + empty desc = small spacer
-    #[allow(clippy::type_complexity)]
-    let left: &[(&str, &str, bool)] = &[
-        // ── Transport ──────────────────────────────────────────────
-        ("── Transport ──",                  "",  true),
-        ("Space",                            "Play / Stop",                                                false),
-        ("Space  (preview playing)",         "Stops sample preview instead",                               false),
-        ("Enter",                            "Stop and rewind to start (or loop start)",                   false),
-        ("L",                                "Toggle loop on / off",                                       false),
-        ("",                                 "",  false),
-        // ── Views ──────────────────────────────────────────────────
-        ("── Views ──",                      "",  true),
-        ("1",                                "Arrangement view",                                           false),
-        ("2",                                "Mixer view",                                                 false),
-        ("3",                                "Edit / piano-roll view",                                     false),
-        ("F1",                               "Toggle this help screen",                                    false),
-        ("Escape",                           "Deselect / close popup / close help",                        false),
-        ("T",                                "Cycle colour theme",                                         false),
-        ("",                                 "",  false),
-        // ── Global ─────────────────────────────────────────────────
-        ("── Global ──",                     "",  true),
-        ("Ctrl+S",                           "Save project",                                               false),
-        ("Right-click Save btn",             "Open Save As… dialog",                                       false),
-        ("Ctrl+Z",                           "Undo",                                                       false),
-        ("Ctrl+Shift+Z  /  Ctrl+R",          "Redo",                                                       false),
-        ("",                                 "",  false),
-        // ── Arrangement ────────────────────────────────────────────
-        ("── Arrangement ──",                "",  true),
-        ("Middle-drag (timeline area)",      "Pan view left/right and up/down simultaneously",             false),
-        ("Scroll wheel",                     "Scroll tracks up / down",                                    false),
-        ("Shift+Scroll",                     "Scroll timeline left / right",                               false),
-        ("Ctrl+Scroll",                      "Zoom timeline in / out (anchored to cursor)",                false),
-        ("+ / =  or  -",                     "Zoom in / out",                                              false),
-        ("",                                 "",  false),
-        ("Left-click clip",                  "Select clip",                                                false),
-        ("Shift+Click clip",                 "Add / remove from multi-selection",                          false),
-        ("Ctrl+A",                           "Select all clips",                                           false),
-        ("Ctrl+C / Ctrl+V",                  "Copy / Paste selected clips at playhead",                   false),
-        ("Ctrl+D",                           "Duplicate selected clips",                                   false),
-        ("Delete / Backspace",               "Delete selected clips",                                      false),
-        ("Drag clip",                        "Move clip; hold Ctrl to copy instead",                       false),
-        ("Drag clip up / down",              "Move clip to another track",                                 false),
-        ("Drag clip left / right edge",      "Resize clip (trim start or end)",                            false),
-        ("Double-click clip",                "Open clip in Piano Roll",                                    false),
-        ("Double-click empty lane",          "Create new clip at that position",                           false),
-        ("Right-click clip",                 "Delete clip; hold+drag to erase a range",                   false),
-        ("Drag ruler",                       "Set loop region start / end",                                false),
-        ("Right-click ruler",                "Clear loop region",                                          false),
-        ("Shift+Up / Down",                  "Reorder selected track up / down",                          false),
-    ];
-
-    #[allow(clippy::type_complexity)]
-    let right: &[(&str, &str, bool)] = &[
-        // ── Knobs ──────────────────────────────────────────────────
-        ("── Knobs ──",                      "",  true),
-        ("Left-drag up / down",              "Adjust value",                                               false),
-        ("Middle-drag up / down",            "Fine adjustment (5× slower)",                                false),
-        ("Shift+Click",                      "Reset to default value",                                     false),
-        ("Hover",                            "Shows current value as tooltip",                             false),
-        ("",                                 "",  false),
-        // ── Sliders ────────────────────────────────────────────────
-        ("── Sliders ──",                    "",  true),
-        ("Left-drag",                        "Adjust value",                                               false),
-        ("Shift+Click",                      "Reset to default value",                                     false),
-        ("",                                 "",  false),
-        // ── Dropdowns & Buttons ────────────────────────────────────
-        ("── Dropdowns & Buttons ──",        "",  true),
-        ("Left-click dropdown",              "Cycle forward through options",                              false),
-        ("Right-click dropdown",             "Cycle backward through options",                             false),
-        ("",                                 "",  false),
-        // ── Mixer / Effect Rack ────────────────────────────────────
-        ("── Mixer & Effect Rack ──",        "",  true),
-        ("Drag from browser",                "Add effect / instrument to rack",                            false),
-        ("Right-drag module header",         "Reorder modules in the rack",                               false),
-        ("Middle-click effect slot",         "Open sidechain source dropdown",                             false),
-        ("Right-click knob",                 "Assign knob to an automation lane",                          false),
-        ("",                                 "",  false),
-        // ── Piano Roll ─────────────────────────────────────────────
-        ("── Piano Roll ──",                 "",  true),
-        ("Middle-drag",                      "Pan view in any direction",                                  false),
-        ("Scroll wheel",                     "Scroll pitch up / down",                                     false),
-        ("Shift+Scroll",                     "Scroll timeline left / right",                               false),
-        ("Ctrl+Scroll",                      "Zoom timeline in / out (anchored to cursor)",                false),
-        ("",                                 "",  false),
-        ("Left-click (draw mode)",           "Place new note",                                             false),
-        ("Left-drag (draw mode)",            "Draw note and set length",                                   false),
-        ("Right-click note",                 "Delete note; drag to erase multiple",                        false),
-        ("Ctrl+Drag (select mode)",          "Rubber-band select notes",                                   false),
-        ("Ctrl+A",                           "Select all notes",                                           false),
-        ("Ctrl+D",                           "Duplicate selected notes",                                   false),
-        ("Delete / Backspace",               "Delete selected notes",                                      false),
-        ("Arrow Up / Down",                  "Transpose selected ±1 semitone",                             false),
-        ("Shift+Up / Down",                  "Transpose selected ±1 octave",                               false),
-        ("Arrow Left / Right",               "Nudge selected notes by snap unit",                          false),
-        ("Left-click piano key strip",       "Audition / preview a note",                                  false),
-        ("",                                 "",  false),
-        // ── Computer Keyboard Piano ────────────────────────────────
-        ("── Computer Keyboard Piano ──",    "",  true),
-        ("A  W  S  E  D  F  T",             "C  C#  D  D#  E  F  F#",                                     false),
-        ("G  Y  H  U  J",                   "G  G#  A  A#  B",                                             false),
-        ("K  O  L",                          "C  C#  D  (next octave)",                                    false),
-        ("Z / X",                            "Octave down / up",                                           false),
-        ("",                                 "",  false),
-        ("  * Piano mode active when",       "keyboard icon is lit in the toolbar",                        false),
-    ];
-
-    // Draw left column
-    let mut ly = content_top;
-    for (key, desc, is_section) in left {
-        if ly + line_h > content_bot { break; }
-        if key.is_empty() && desc.is_empty() {
-            ly += 4;
-            continue;
+        if is_active {
+            canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 60, 80, 255));
+            let _ = canvas.fill_rect(Rect::new(px, ty, tab_w as u32, tab_h as u32));
+            canvas.set_draw_color(sdl2::pixels::Color::RGBA(100, 160, 255, 255));
+            let _ = canvas.fill_rect(Rect::new(px, ty, 3, tab_h as u32));
+        } else if hover {
+            canvas.set_draw_color(sdl2::pixels::Color::RGBA(40, 46, 58, 255));
+            let _ = canvas.fill_rect(Rect::new(px, ty, tab_w as u32, tab_h as u32));
         }
-        if *is_section {
-            draw_pixel_label(canvas, &state.theme, key, lx, ly, col_w, c_section);
+
+        let col = if is_active {
+            sdl2::pixels::Color::RGBA(180, 210, 255, 255)
         } else {
-            let key_w = (col_w as f32 * 0.47) as i32;
-            let desc_x = lx + key_w + 4;
-            let desc_w = col_w - key_w - 4;
-            draw_pixel_label(canvas, &state.theme, key,  lx,     ly, key_w,  c_key);
-            draw_pixel_label(canvas, &state.theme, desc, desc_x, ly, desc_w, c_desc);
+            sdl2::pixels::Color::RGBA(150, 155, 170, 220)
+        };
+        draw_pixel_label(canvas, &state.theme, label, px + 10, ty + 6, tab_w - 14, col);
+
+        if hover && input.mouse_pressed {
+            state.help_screen_tab = i;
+            input.mouse_pressed = false;
         }
-        ly += line_h;
     }
 
-    // Vertical divider
-    canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 90, 110, 160));
+    // Sidebar divider
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(70, 80, 100, 160));
     let _ = canvas.draw_line(
-        sdl2::rect::Point::new(px + pw / 2, content_top),
-        sdl2::rect::Point::new(px + pw / 2, content_bot),
+        sdl2::rect::Point::new(px + tab_w, tab_top),
+        sdl2::rect::Point::new(px + tab_w, py + ph),
     );
 
-    // Draw right column
-    let mut ry = content_top;
-    for (key, desc, is_section) in right {
-        if ry + line_h > content_bot { break; }
+    // ── Content area ─────────────────────────────────────────────────
+    let content_x = px + tab_w + 8;
+    let content_w = pw - tab_w - 16;
+    let content_top = py + 28;
+    let content_bot = py + ph - 6;
+    let line_h = 13i32;
+
+    let c_section = sdl2::pixels::Color::RGBA(200, 165, 80, 255);
+    let c_key     = sdl2::pixels::Color::RGBA(255, 220, 140, 230);
+    let c_desc    = sdl2::pixels::Color::RGBA(178, 184, 200, 220);
+    let c_note    = sdl2::pixels::Color::RGBA(130, 200, 130, 200);
+
+    // Build content for the active tab
+    type HelpEntry = (&'static str, &'static str, bool);
+    let entries: Vec<HelpEntry> = match state.help_screen_tab {
+        0 => vec![
+            // General
+            ("── Transport ──",              "",  true),
+            ("Space",                        "Play / Stop",  false),
+            ("Space (preview playing)",      "Stops sample preview instead",  false),
+            ("Enter",                        "Stop and rewind to start (or loop start)",  false),
+            ("L",                            "Toggle loop on / off",  false),
+            ("",                             "",  false),
+            ("── Views ──",                  "",  true),
+            ("1",                            "Arrangement view",  false),
+            ("2",                            "Mixer view",  false),
+            ("3",                            "Edit / piano-roll view",  false),
+            ("F1",                           "Toggle this help screen",  false),
+            ("Escape",                       "Deselect / close popup / close help",  false),
+            ("T",                            "Cycle colour theme",  false),
+            ("",                             "",  false),
+            ("── Global ──",                 "",  true),
+            ("Ctrl+S",                       "Save project",  false),
+            ("Right-click Save btn",         "Open Save As dialog",  false),
+            ("Ctrl+Z",                       "Undo",  false),
+            ("Ctrl+Shift+Z / Ctrl+R",        "Redo",  false),
+            ("",                             "",  false),
+            ("── Knobs ──",                  "",  true),
+            ("Left-drag up / down",          "Adjust value",  false),
+            ("Middle-drag up / down",        "Fine adjustment (5x slower)",  false),
+            ("Shift+Click",                  "Reset to default value",  false),
+            ("Hover",                        "Shows current value as tooltip",  false),
+            ("",                             "",  false),
+            ("── Sliders ──",                "",  true),
+            ("Left-drag",                    "Adjust value",  false),
+            ("Shift+Click",                  "Reset to default value",  false),
+            ("",                             "",  false),
+            ("── Dropdowns ──",              "",  true),
+            ("Left-click",                   "Open dropdown / cycle options",  false),
+            ("Scroll wheel (on dropdown)",   "Cycle through options",  false),
+        ],
+        1 => vec![
+            // Arrangement
+            ("── Navigation ──",             "",  true),
+            ("Middle-drag",                  "Pan view left/right and up/down",  false),
+            ("Scroll wheel",                 "Scroll tracks up / down",  false),
+            ("Shift+Scroll",                 "Scroll timeline left / right",  false),
+            ("Ctrl+Scroll",                  "Zoom timeline (anchored to cursor)",  false),
+            ("+ / =  or  -",                 "Zoom in / out",  false),
+            ("",                             "",  false),
+            ("── Clip Selection ──",         "",  true),
+            ("Left-click clip",              "Select clip",  false),
+            ("Shift+Click clip",             "Add / remove from multi-selection",  false),
+            ("Ctrl+A",                       "Select all clips",  false),
+            ("Ctrl+C / Ctrl+V",              "Copy / Paste at playhead",  false),
+            ("Ctrl+D",                       "Duplicate selected clips",  false),
+            ("Delete / Backspace",           "Delete selected clips",  false),
+            ("",                             "",  false),
+            ("── Clip Editing ──",           "",  true),
+            ("Drag clip",                    "Move clip; hold Ctrl to copy",  false),
+            ("Drag clip up / down",          "Move clip to another track",  false),
+            ("Drag clip edge",               "Resize clip (trim start/end)",  false),
+            ("Double-click clip",            "Open in Piano Roll / Audio Editor",  false),
+            ("Double-click empty lane",      "Create new clip",  false),
+            ("Right-click clip",             "Delete; hold+drag to erase range",  false),
+            ("",                             "",  false),
+            ("── Loop Region ──",            "",  true),
+            ("Drag ruler",                   "Set loop region start / end",  false),
+            ("Right-click ruler",            "Clear loop region",  false),
+            ("",                             "",  false),
+            ("── Tracks ──",                 "",  true),
+            ("Shift+Up / Down",              "Reorder selected track",  false),
+            ("",                             "",  false),
+            ("── Join ──",                   "",  true),
+            ("J",                            "Join adjacent selected clips into one",  false),
+        ],
+        2 => vec![
+            // Piano Roll
+            ("── Navigation ──",             "",  true),
+            ("Middle-drag",                  "Pan view in any direction",  false),
+            ("Scroll wheel",                 "Scroll pitch up / down",  false),
+            ("Shift+Scroll",                 "Scroll timeline left / right",  false),
+            ("Ctrl+Scroll",                  "Zoom timeline (anchored to cursor)",  false),
+            ("",                             "",  false),
+            ("── Note Editing ──",           "",  true),
+            ("Left-click (draw mode)",       "Place new note",  false),
+            ("Left-drag (draw mode)",        "Draw note and set length",  false),
+            ("Right-click note",             "Delete note; drag to erase multiple",  false),
+            ("Ctrl+Drag (select mode)",      "Rubber-band select notes",  false),
+            ("Ctrl+A",                       "Select all notes",  false),
+            ("Ctrl+D",                       "Duplicate selected notes",  false),
+            ("Delete / Backspace",           "Delete selected notes",  false),
+            ("",                             "",  false),
+            ("── Note Movement ──",          "",  true),
+            ("Arrow Up / Down",              "Transpose +/- 1 semitone",  false),
+            ("Shift+Up / Down",              "Transpose +/- 1 octave",  false),
+            ("Arrow Left / Right",           "Nudge by snap unit",  false),
+            ("",                             "",  false),
+            ("── Keyboard Piano ──",         "",  true),
+            ("Left-click piano key strip",   "Audition / preview a note",  false),
+            ("",                             "",  false),
+            ("── Computer Keyboard ──",      "",  true),
+            ("A  W  S  E  D  F  T",          "C  C#  D  D#  E  F  F#",  false),
+            ("G  Y  H  U  J",               "G  G#  A  A#  B",  false),
+            ("K  O  L",                      "C  C#  D (next octave)",  false),
+            ("Z / X",                        "Octave down / up",  false),
+            ("",                             "",  false),
+            ("  * Piano keyboard mode",      "active when KBD icon is lit",  false),
+            ("",                             "",  false),
+            ("── MIDI Export ──",            "",  true),
+            ("MID button (toolbar)",         "Export current clip as .mid file",  false),
+        ],
+        3 => vec![
+            // Audio Editor
+            ("── Overview ──",               "",  true),
+            ("  The audio editor opens",     "when you select an audio clip",  false),
+            ("  in the arrangement view.",   "It shows the waveform for editing.",  false),
+            ("",                             "",  false),
+            ("── Navigation ──",             "",  true),
+            ("Middle-drag",                  "Pan waveform left / right",  false),
+            ("Ctrl+Scroll",                  "Zoom in / out (horizontal)",  false),
+            ("Shift+Scroll",                 "Scroll left / right",  false),
+            ("",                             "",  false),
+            ("── Selection ──",              "",  true),
+            ("Left-click + drag",            "Select a time range on the waveform",  false),
+            ("A",                            "Select entire waveform",  false),
+            ("Escape",                       "Clear selection",  false),
+            ("",                             "",  false),
+            ("── Toolbar ──",                "",  true),
+            ("SEL  (Q)",                     "Selection tool (click+drag to select)",  false),
+            ("NORM (W)",                     "Normalize selected region to 0dB",  false),
+            ("TRIM (E)",                     "Trim file to selection",  false),
+            ("FIT  (R)",                     "Fit clip length to new audio duration",  false),
+            ("CUT  (T)",                     "Cut selected region from file",  false),
+            ("PASTE(Y)",                     "Paste clipboard at playhead position",  false),
+            ("EXP",                          "Export audio clip to WAV file",  false),
+            ("",                             "",  false),
+            ("── Drag to Arranger ──",       "",  true),
+            ("Ctrl+drag selection",          "Drag selected region to arranger as clip",  false),
+            ("",                             "",  false),
+            ("── Effects (Apply) ──",        "",  true),
+            ("Effects dropdown (top right)", "Choose effect: Reverse, Fade In/Out, etc.",  false),
+            ("APPLY button / Shift+A",       "Apply chosen effect to selection",  false),
+            ("",                             "",  false),
+            ("── Undo / Redo ──",            "",  true),
+            ("Ctrl+Z",                       "Undo last audio edit (when focused)",  false),
+            ("Ctrl+Shift+Z",                 "Redo last audio edit (when focused)",  false),
+            ("",                             "",  false),
+            ("── Playback ──",               "",  true),
+            ("Space",                        "Play / stop from playhead (when focused)",  false),
+            ("Click ruler",                  "Set playhead position",  false),
+            ("",                             "",  false),
+            ("── Loop Region ──",            "",  true),
+            ("Drag loop ruler handles",      "Set loop start / end",  false),
+            ("Loop region highlighted",      "Playback loops within region",  false),
+            ("Gain slider (toolbar)",        "Adjust clip gain",  false),
+        ],
+        4 => vec![
+            // Automation Editor
+            ("── Overview ──",               "",  true),
+            ("  The automation editor opens","when you select an automation clip",  false),
+            ("  in the arrangement view.",   "Draw curves to modulate parameters.",  false),
+            ("",                             "",  false),
+            ("── Navigation ──",             "",  true),
+            ("Middle-drag",                  "Pan view in any direction",  false),
+            ("Scroll wheel",                 "Scroll up / down",  false),
+            ("Shift+Scroll",                 "Scroll timeline left / right",  false),
+            ("Ctrl+Scroll",                  "Zoom timeline (anchored to cursor)",  false),
+            ("",                             "",  false),
+            ("── Point Editing ──",          "",  true),
+            ("Left-click (empty area)",      "Add a new control point",  false),
+            ("Left-drag point",              "Move existing control point",  false),
+            ("Right-click point",            "Delete control point",  false),
+            ("",                             "",  false),
+            ("── Curve Types ──",            "",  true),
+            ("Linear (default)",             "Straight line between points",  false),
+            ("Stepped",                      "Value jumps at each point (no interp)",  false),
+            ("",                             "",  false),
+            ("── Snap ──",                   "",  true),
+            ("Snap dropdown (toolbar)",      "Set grid snap resolution",  false),
+            ("Snap toggle (S)",              "Enable / disable snap to grid",  false),
+            ("",                             "",  false),
+            ("── Automation Targets ──",     "",  true),
+            ("Right-click rack knob",        "Assign knob to automation lane",  false),
+            ("Automation track",             "Routes values to assigned parameter",  false),
+        ],
+        5 => vec![
+            // Rack
+            ("── Overview ──",               "",  true),
+            ("  The Instrument Rack shows",  "modules loaded on the selected track.",  false),
+            ("  Open it by double-clicking", "a track header.",  false),
+            ("",                             "",  false),
+            ("── Module Browser ──",         "",  true),
+            ("Left panel browser",           "Lists available instruments & effects",  false),
+            ("Drag module to rack",          "Add module to the signal chain",  false),
+            ("Drag module to lane",          "Create new track with that module",  false),
+            ("",                             "",  false),
+            ("── Rack Layout ──",            "",  true),
+            ("Right-drag module header",     "Reorder modules in the chain",  false),
+            ("Middle-click module header",   "Open sidechain source dropdown",  false),
+            ("Delete / right-click header",  "Remove module from rack",  false),
+            ("",                             "",  false),
+            ("── Knob Controls ──",          "",  true),
+            ("Left-drag up / down",          "Adjust parameter value",  false),
+            ("Middle-drag up / down",        "Fine adjustment (5x slower)",  false),
+            ("Shift+Click knob",             "Reset to default value",  false),
+            ("Right-click knob",             "Assign to automation lane",  false),
+            ("Hover over knob",              "Shows parameter name & value",  false),
+            ("",                             "",  false),
+            ("── Presets ──",                "",  true),
+            ("Preset dropdown (module)",     "Load / switch presets",  false),
+        ],
+        6 => vec![
+            // Mixer
+            ("── Mixer Overview ──",         "",  true),
+            ("  Press 2 to switch",          "to the mixer view",  false),
+            ("",                             "",  false),
+            ("── Channel Strip ──",          "",  true),
+            ("Volume fader",                 "Drag to set channel volume",  false),
+            ("Pan knob",                     "Drag to set stereo panning",  false),
+            ("Mute / Solo buttons",          "Toggle mute or solo per track",  false),
+            ("",                             "",  false),
+            ("── Effect Rack ──",            "",  true),
+            ("Drag from browser",            "Add effect / instrument to rack",  false),
+            ("Right-drag module header",     "Reorder modules in the rack",  false),
+            ("Middle-click effect slot",     "Open sidechain source dropdown",  false),
+            ("Right-click knob",             "Assign knob to automation lane",  false),
+            ("",                             "",  false),
+            ("── Automation ──",             "",  true),
+            ("Click automation lane",        "Add control point",  false),
+            ("Drag point",                   "Move control point",  false),
+            ("Right-click point",            "Delete control point",  false),
+            ("Snap dropdown (toolbar)",      "Set grid snap resolution",  false),
+        ],
+        _ => vec![],
+    };
+
+    // Render entries
+    let key_w = (content_w as f32 * 0.45) as i32;
+    let desc_x = content_x + key_w + 4;
+    let desc_w = content_w - key_w - 4;
+    let mut y = content_top;
+    for (key, desc, is_section) in &entries {
+        if y + line_h > content_bot { break; }
         if key.is_empty() && desc.is_empty() {
-            ry += 4;
+            y += 5;
             continue;
         }
         if *is_section {
-            draw_pixel_label(canvas, &state.theme, key, rx, ry, col_w, c_section);
+            draw_pixel_label(canvas, &state.theme, key, content_x, y, content_w, c_section);
         } else {
-            let key_w = (col_w as f32 * 0.47) as i32;
-            let desc_x = rx + key_w + 4;
-            let desc_w = col_w - key_w - 4;
-            let col = if key.starts_with("  *") { c_note } else { c_key };
-            draw_pixel_label(canvas, &state.theme, key,  rx,     ry, key_w,  col);
-            draw_pixel_label(canvas, &state.theme, desc, desc_x, ry, desc_w, c_desc);
+            let col = if key.starts_with("  *") || key.starts_with("  ") { c_note } else { c_key };
+            draw_pixel_label(canvas, &state.theme, key,  content_x, y, key_w,  col);
+            draw_pixel_label(canvas, &state.theme, desc, desc_x,    y, desc_w, c_desc);
         }
-        ry += line_h;
+        y += line_h;
     }
 
-    // Click anywhere to dismiss
-    if input.mouse_pressed {
+    // Click outside sidebar to dismiss (but not on sidebar tabs)
+    if input.mouse_pressed && !input.mouse_in_rect(px, tab_top, tab_w, tab_labels.len() as i32 * tab_h) {
         state.help_screen_visible = false;
     }
 }

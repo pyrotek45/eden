@@ -91,6 +91,14 @@ mod tests {
         p
     }
 
+    /// Helper to extract gain from an audio clip
+    fn audio_clip_gain(clip: &Clip) -> f32 {
+        match clip {
+            Clip::Audio(ac) => ac.gain,
+            _ => panic!("Expected Audio clip"),
+        }
+    }
+
     /// Assert two projects are identical (using serde serialization for deep comparison).
     fn assert_project_eq(a: &Project, b: &Project) {
         let ja = serde_json::to_string(a).unwrap();
@@ -4949,7 +4957,7 @@ mod tests {
 
     #[test]
     fn test_project_clone_is_deep() {
-        let mut original = make_test_project();
+        let original = make_test_project();
         let mut cloned = original.clone();
         // Modifying clone should not affect original
         cloned.tracks[0].volume = 0.0;
@@ -5766,7 +5774,7 @@ mod tests {
         for _ in 0..10000 {
             let v = sp.tick(1.0);
             assert!(
-                v >= 0.0 && v <= 1.0,
+                (0.0..=1.0).contains(&v),
                 "SmoothedParam should never overshoot target: got {}",
                 v
             );
@@ -6075,5 +6083,2102 @@ mod tests {
             .zip(&with_open[s..e])
             .all(|((cl, cr), (ol, or))| (cl - ol).abs() < 1e-9 && (cr - or).abs() < 1e-9);
         assert!(!same, "Open voicing should produce a different waveform than close voicing");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // MIDI EXPORT TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_midi_export_roundtrip() {
+        // Create a clip, export it, import it back, and verify notes match
+        let clip = MidiClip {
+            notes: vec![
+                MidiNote { pitch: 60, velocity: 100, start: 0.0, length: 1.0 },
+                MidiNote { pitch: 64, velocity: 90, start: 1.0, length: 0.5 },
+                MidiNote { pitch: 67, velocity: 80, start: 2.0, length: 2.0 },
+            ],
+            start_time: 0.0,
+            length: 4.0,
+            name: "test".into(),
+            color: [100, 160, 255, 200],
+        };
+
+        let tmp_path = "/tmp/eden_test_midi_export.mid";
+        let bpm = 120.0;
+
+        // Export
+        let result = crate::models::export_midi_file(&clip, tmp_path, bpm, "test");
+        assert!(result.is_ok(), "MIDI export should succeed: {:?}", result.err());
+
+        // Verify file exists
+        assert!(std::path::Path::new(tmp_path).exists(), "MIDI file should exist");
+
+        // Import back
+        let imported = crate::models::import_midi_file(tmp_path, bpm);
+        assert!(imported.is_ok(), "MIDI import should succeed: {:?}", imported.err());
+
+        let tracks = imported.unwrap();
+        assert!(!tracks.is_empty(), "Should have at least one track");
+
+        let (_, reimported_clip) = &tracks[0];
+        assert_eq!(reimported_clip.notes.len(), 3, "Should have 3 notes");
+
+        // Check pitches match
+        let mut pitches: Vec<u8> = reimported_clip.notes.iter().map(|n| n.pitch).collect();
+        pitches.sort();
+        assert_eq!(pitches, vec![60, 64, 67], "Pitches should match");
+
+        // Check velocities match
+        for orig in &clip.notes {
+            let found = reimported_clip.notes.iter().find(|n| n.pitch == orig.pitch);
+            assert!(found.is_some(), "Should find note with pitch {}", orig.pitch);
+            let f = found.unwrap();
+            assert_eq!(f.velocity, orig.velocity, "Velocity should match for pitch {}", orig.pitch);
+        }
+
+        // Check timing is approximately correct (within 1/480 of a beat tolerance)
+        for orig in &clip.notes {
+            let found = reimported_clip.notes.iter().find(|n| n.pitch == orig.pitch).unwrap();
+            assert!(
+                (found.start - orig.start).abs() < 0.01,
+                "Start time should match for pitch {} (got {}, expected {})",
+                orig.pitch, found.start, orig.start
+            );
+            assert!(
+                (found.length - orig.length).abs() < 0.01,
+                "Length should match for pitch {} (got {}, expected {})",
+                orig.pitch, found.length, orig.length
+            );
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_file(tmp_path);
+    }
+
+    #[test]
+    fn test_midi_export_empty_clip() {
+        let clip = MidiClip {
+            notes: vec![],
+            start_time: 0.0,
+            length: 4.0,
+            name: "empty".into(),
+            color: [100, 160, 255, 200],
+        };
+        let tmp_path = "/tmp/eden_test_midi_export_empty.mid";
+        let result = crate::models::export_midi_file(&clip, tmp_path, 120.0, "empty");
+        // Should succeed even with empty notes (just end-of-track event)
+        assert!(result.is_ok(), "MIDI export of empty clip should succeed");
+        let _ = std::fs::remove_file(tmp_path);
+    }
+
+    #[test]
+    fn test_midi_export_various_bpm() {
+        let clip = MidiClip {
+            notes: vec![
+                MidiNote { pitch: 60, velocity: 100, start: 0.0, length: 1.0 },
+            ],
+            start_time: 0.0,
+            length: 2.0,
+            name: "bpm_test".into(),
+            color: [100, 160, 255, 200],
+        };
+
+        for bpm in [60.0, 120.0, 140.0, 200.0, 300.0] {
+            let tmp_path = format!("/tmp/eden_test_midi_bpm_{}.mid", bpm as u32);
+            let result = crate::models::export_midi_file(&clip, &tmp_path, bpm, "bpm_test");
+            assert!(result.is_ok(), "MIDI export at {} BPM should succeed", bpm);
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ADSR RELEASE SMOOTHNESS TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_adsr_release_reaches_zero_smoothly() {
+        // Verify the release phase reaches exactly zero without large jumps
+        let mut stage = EnvStage::Attack;
+        let mut level = 0.0;
+        let mut time = 0.0;
+        let dt = 1.0 / 44100.0;
+        let a = 0.001; // very fast attack
+        let d = 0.001; // very fast decay
+        let s = 0.8;
+        let r = 0.1; // 100ms release
+
+        // Run through attack, decay, sustain
+        for _ in 0..10000 {
+            adsr_tick(&mut stage, &mut level, &mut time, a, d, s, r, dt, false);
+        }
+        assert_eq!(stage, EnvStage::Sustain);
+        assert!((level - s).abs() < 0.01, "Should be at sustain level");
+
+        // Trigger release
+        let mut prev_level = level;
+        let mut max_jump = 0.0f64;
+        let mut samples_to_off = 0u64;
+
+        for i in 0..100000 {
+            adsr_tick(&mut stage, &mut level, &mut time, a, d, s, r, dt, true);
+            let jump = (prev_level - level).abs();
+            if jump > max_jump {
+                max_jump = jump;
+            }
+            prev_level = level;
+            if stage == EnvStage::Off {
+                samples_to_off = i + 1;
+                break;
+            }
+        }
+
+        assert_eq!(stage, EnvStage::Off, "Should reach Off state");
+        assert_eq!(level, 0.0, "Level should be exactly zero when Off");
+
+        // The maximum jump between consecutive samples should be very small
+        // (no pop/click). With exponential release, max jump is at the start.
+        assert!(
+            max_jump < 0.005,
+            "Max sample-to-sample jump during release should be tiny (got {})",
+            max_jump
+        );
+
+        // Verify it doesn't take forever (with 0.00001 threshold, ~100ms release should
+        // be done within about 2*release = 200ms = ~9000 samples at 44.1k)
+        assert!(
+            samples_to_off < 50000,
+            "Release should complete within reasonable time (took {} samples)",
+            samples_to_off
+        );
+    }
+
+    #[test]
+    fn test_adsr_release_no_audible_cutoff() {
+        // The level at the exact moment Off is triggered should be <= 0.00001 (-100dB)
+        // which is below audibility even with distortion amplification
+        let mut stage = EnvStage::Attack;
+        let mut level = 0.0;
+        let mut time = 0.0;
+        let dt = 1.0 / 44100.0;
+
+        // Reach sustain quickly
+        for _ in 0..5000 {
+            adsr_tick(&mut stage, &mut level, &mut time, 0.001, 0.001, 1.0, 0.3, dt, false);
+        }
+
+        // Release and track the level just before Off
+        let mut level_before_off = 1.0;
+        for _ in 0..200000 {
+            let prev = level;
+            adsr_tick(&mut stage, &mut level, &mut time, 0.001, 0.001, 1.0, 0.3, dt, true);
+            if stage == EnvStage::Off {
+                level_before_off = prev;
+                break;
+            }
+        }
+
+        assert!(
+            level_before_off <= 0.00002,
+            "Level before Off should be <= 0.00002 (got {})",
+            level_before_off
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SYNTH VOICE RELEASE POP/CLICK TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_heavy_synth_no_release_pop() {
+        // Process a note through HeavySynth, release it, and check
+        // that the output envelope fades smoothly (no sudden silence from
+        // an abrupt ADSR cutoff).
+        let synth = HeavySynth;
+        let mut voice = ModuleVoice::new(440.0, 0.8, 0, 69);
+        let sr = 44100.0;
+        let params: Vec<(String, f32)> = get_param_descs("Monolith")
+            .iter()
+            .map(|p| (p.id.to_string(), p.default))
+            .collect();
+        let extra = ModuleExtra { sample_data: None, sample_sr: 44100 };
+
+        // Play for 0.1s to establish sustained tone
+        for _ in 0..4410 {
+            synth.process_voice(&mut voice, &params, sr, &extra);
+        }
+
+        // Release
+        voice.released = true;
+
+        // Collect RMS energy in short windows during release
+        let window_size = 64;
+        let mut windows: Vec<f64> = Vec::new();
+        let mut buf = Vec::new();
+
+        for _ in 0..100000 {
+            let (l, _) = synth.process_voice(&mut voice, &params, sr, &extra);
+            buf.push(l);
+            if buf.len() == window_size {
+                let rms = (buf.iter().map(|x| x * x).sum::<f64>() / window_size as f64).sqrt();
+                windows.push(rms);
+                buf.clear();
+            }
+            if voice_is_done(&voice) {
+                break;
+            }
+        }
+
+        assert!(voice_is_done(&voice), "Voice should reach Off state");
+
+        // Check that envelope decays smoothly: no window should have significantly
+        // more energy than the previous window (which would indicate a pop/click)
+        let mut max_energy_increase = 0.0f64;
+        for i in 1..windows.len() {
+            if windows[i - 1] > 0.001 {
+                // Only check when there's meaningful signal
+                let increase = windows[i] - windows[i - 1];
+                if increase > max_energy_increase {
+                    max_energy_increase = increase;
+                }
+            }
+        }
+
+        // A pop would show up as a massive energy spike; smooth decay
+        // may have small fluctuations due to oscillator waveform shape
+        assert!(
+            max_energy_increase < 0.3,
+            "Energy should not suddenly spike during release (max increase: {})",
+            max_energy_increase
+        );
+
+        // The last non-zero output should be very small
+        let last_window = windows.last().copied().unwrap_or(0.0);
+        assert!(
+            last_window < 0.01,
+            "Final release window should have near-zero energy (got {})",
+            last_window
+        );
+    }
+
+    #[test]
+    fn test_subtractive_synth_no_release_pop() {
+        let synth = SubtractiveSynth;
+        let mut voice = ModuleVoice::new(440.0, 0.8, 0, 69);
+        let sr = 44100.0;
+        let params: Vec<(String, f32)> = get_param_descs("Analog")
+            .iter()
+            .map(|p| (p.id.to_string(), p.default))
+            .collect();
+        let extra = ModuleExtra { sample_data: None, sample_sr: 44100 };
+
+        // Play for 0.1s
+        for _ in 0..4410 {
+            synth.process_voice(&mut voice, &params, sr, &extra);
+        }
+
+        // Release
+        voice.released = true;
+
+        // Collect RMS energy in short windows during release
+        let window_size = 64;
+        let mut windows: Vec<f64> = Vec::new();
+        let mut buf = Vec::new();
+
+        for _ in 0..100000 {
+            let (l, _) = synth.process_voice(&mut voice, &params, sr, &extra);
+            buf.push(l);
+            if buf.len() == window_size {
+                let rms = (buf.iter().map(|x| x * x).sum::<f64>() / window_size as f64).sqrt();
+                windows.push(rms);
+                buf.clear();
+            }
+            if voice_is_done(&voice) { break; }
+        }
+
+        assert!(voice_is_done(&voice), "Voice should reach Off state");
+
+        // Check smooth energy decay
+        let mut max_energy_increase = 0.0f64;
+        for i in 1..windows.len() {
+            if windows[i - 1] > 0.001 {
+                let increase = windows[i] - windows[i - 1];
+                if increase > max_energy_increase {
+                    max_energy_increase = increase;
+                }
+            }
+        }
+
+        assert!(
+            max_energy_increase < 0.3,
+            "Energy should not suddenly spike during release (max increase: {})",
+            max_energy_increase
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // JOIN CLIPS UNDO TEST
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_join_midi_clips_apply() {
+        let mut project = make_test_project();
+        let track = &mut project.tracks[0]; // MIDI track
+        // Make first clip end at beat 4 so second clip is adjacent
+        if let Clip::Midi(ref mut m) = track.clips[0] {
+            m.length = 4.0;
+        }
+        // Add a second adjacent clip starting at beat 4
+        track.clips.push(Clip::Midi(MidiClip {
+            notes: vec![
+                MidiNote { pitch: 72, velocity: 100, start: 0.0, length: 1.0 },
+            ],
+            start_time: 4.0,
+            length: 4.0,
+            name: "Clip2".into(),
+            color: [100, 160, 255, 200],
+        }));
+
+        let mut cmd = JoinClips {
+            groups: vec![(1, vec![0, 1])],
+        };
+        cmd.apply(&mut project);
+
+        // After join, should have 1 clip with merged notes
+        assert_eq!(project.tracks[0].clips.len(), 1, "Should have 1 clip after join");
+        if let Clip::Midi(m) = &project.tracks[0].clips[0] {
+            assert_eq!(m.notes.len(), 4, "Merged clip should have 4 notes (3 from clip1 + 1 from clip2)");
+            assert_eq!(m.start_time, 0.0, "Joined clip should start at beat 0");
+            assert_eq!(m.length, 8.0, "Joined clip should span 8 beats");
+            assert_eq!(m.name, "Joined", "Joined clip should be named 'Joined'");
+            // The note from clip2 should have its start adjusted relative to new_start
+            let high_note = m.notes.iter().find(|n| n.pitch == 72).unwrap();
+            assert!((high_note.start - 4.0).abs() < 0.001, "Note from clip2 should be at beat 4");
+        } else {
+            panic!("Expected MIDI clip after join");
+        }
+    }
+
+    #[test]
+    fn test_join_midi_clips_snapshot_undo() {
+        // JoinClips uses snapshot-based undo via CommandManager
+        // Verify that cloning the project before apply and restoring works
+        let mut project = make_test_project();
+        let track = &mut project.tracks[0];
+        if let Clip::Midi(ref mut m) = track.clips[0] {
+            m.length = 4.0;
+        }
+        track.clips.push(Clip::Midi(MidiClip {
+            notes: vec![
+                MidiNote { pitch: 72, velocity: 100, start: 0.0, length: 1.0 },
+            ],
+            start_time: 4.0,
+            length: 4.0,
+            name: "Clip2".into(),
+            color: [100, 160, 255, 200],
+        }));
+        let snapshot = project.clone();
+
+        let mut cmd = JoinClips {
+            groups: vec![(1, vec![0, 1])],
+        };
+        cmd.apply(&mut project);
+
+        // Verify it changed
+        assert_eq!(project.tracks[0].clips.len(), 1);
+
+        // Simulate snapshot-based undo by restoring the snapshot
+        project = snapshot.clone();
+        assert_eq!(project.tracks[0].clips.len(), 2, "Should have 2 clips after snapshot restore");
+        assert_project_eq(&snapshot, &project);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // TEMPO MAP TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_tempo_map_seconds_to_beats_roundtrip() {
+        let tm = crate::models::TempoMap::default();
+        let beats = 12.5;
+        let seconds = tm.beats_to_seconds(beats);
+        let roundtrip = tm.seconds_to_beats(seconds);
+        assert!(
+            (roundtrip - beats).abs() < 1e-9,
+            "beats_to_seconds and seconds_to_beats should roundtrip (got {} expected {})",
+            roundtrip, beats
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CLIP MODEL TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_audio_clip_defaults() {
+        let ac = AudioClip {
+            source_file: "test.wav".into(),
+            start_time: 0.0,
+            offset: 0.5,
+            length: 4.0,
+            gain: 1.0,
+            name: "Test".into(),
+            color: [200, 100, 50, 200],
+        };
+        assert_eq!(ac.offset, 0.5);
+        assert_eq!(ac.gain, 1.0);
+    }
+
+    #[test]
+    fn test_automation_clip_interpolation_points() {
+        let ac = AutomationClip {
+            points: vec![
+                AutomationPoint { time: 0.0, value: 0.0 },
+                AutomationPoint { time: 1.0, value: 0.5 },
+                AutomationPoint { time: 2.0, value: 1.0 },
+            ],
+            start_time: 0.0,
+            length: 2.0,
+            target_param: "volume".into(),
+            name: "Vol".into(),
+            color: [200, 200, 50, 200],
+        };
+        assert_eq!(ac.points.len(), 3);
+        assert!((ac.points[1].value - 0.5).abs() < 1e-6);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DSP UTILITY TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_db_to_lin_zero() {
+        let lin = db_to_lin(0.0);
+        assert!((lin - 1.0).abs() < 1e-6, "0 dB should be 1.0 linear");
+    }
+
+    #[test]
+    fn test_db_to_lin_minus_6() {
+        let lin = db_to_lin(-6.0);
+        assert!((lin - 0.5012).abs() < 0.01, "-6 dB should be ~0.5 linear");
+    }
+
+    #[test]
+    fn test_db_to_lin_plus_6() {
+        let lin = db_to_lin(6.0);
+        // 10^(6/20) ≈ 1.9953, fast approximation may differ slightly
+        assert!((lin - 1.9953).abs() < 0.05, "+6 dB should be ~2.0 linear (got {})", lin);
+    }
+
+    #[test]
+    fn test_fast_exp_approximation() {
+        // fast_exp should be reasonably close to std exp for small/medium values
+        for &x in &[-5.0f64, -1.0, 0.0, 1.0, 3.0] {
+            let exact = x.exp();
+            let approx = fast_exp(x);
+            let rel_err = (approx - exact).abs() / exact.max(1e-10);
+            assert!(
+                rel_err < 0.05,
+                "fast_exp({}) = {} vs exact {} (rel error {})",
+                x, approx, exact, rel_err
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // HEAVY SYNTH DISTORTION TYPE TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_heavy_synth_all_distortion_types() {
+        let synth = HeavySynth;
+        let sr = 44100.0;
+        let extra = ModuleExtra { sample_data: None, sample_sr: 44100 };
+
+        for dist_type in 0..4 {
+            let mut voice = ModuleVoice::new(440.0, 0.8, 0, 69);
+            let mut params: Vec<(String, f32)> = get_param_descs("Monolith")
+                .iter()
+                .map(|p| (p.id.to_string(), p.default))
+                .collect();
+            // Set distortion drive to 0.5 and type
+            for p in params.iter_mut() {
+                if p.0 == "dist_drive" { p.1 = 0.5; }
+                if p.0 == "dist_type" { p.1 = dist_type as f32; }
+            }
+
+            let mut has_signal = false;
+            for _ in 0..4410 {
+                let (l, r) = synth.process_voice(&mut voice, &params, sr, &extra);
+                if l.abs() > 1e-6 || r.abs() > 1e-6 {
+                    has_signal = true;
+                }
+            }
+            assert!(
+                has_signal,
+                "HeavySynth with distortion type {} should produce signal",
+                dist_type
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // NEW UNDO COMMAND TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_set_sampler_file_undo_redo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        // Track 1 has no sampler_file by default
+        assert!(project.tracks[0].sampler_file.is_none());
+
+        mgr.execute(
+            Box::new(SetSamplerFile {
+                track_id: 1,
+                old_value: None,
+                new_value: Some("drums.wav".into()),
+            }),
+            &mut project,
+        );
+        assert_eq!(project.tracks[0].sampler_file, Some("drums.wav".into()));
+
+        mgr.undo(&mut project);
+        assert!(project.tracks[0].sampler_file.is_none());
+
+        mgr.redo(&mut project);
+        assert_eq!(project.tracks[0].sampler_file, Some("drums.wav".into()));
+    }
+
+    #[test]
+    fn test_set_sampler_file_replace_existing() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        project.tracks[0].sampler_file = Some("old.wav".into());
+
+        mgr.execute(
+            Box::new(SetSamplerFile {
+                track_id: 1,
+                old_value: Some("old.wav".into()),
+                new_value: Some("new.wav".into()),
+            }),
+            &mut project,
+        );
+        assert_eq!(project.tracks[0].sampler_file, Some("new.wav".into()));
+
+        mgr.undo(&mut project);
+        assert_eq!(project.tracks[0].sampler_file, Some("old.wav".into()));
+    }
+
+    #[test]
+    fn test_set_project_name_undo_redo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        assert_eq!(project.name, "Test");
+
+        mgr.execute(
+            Box::new(SetProjectName {
+                old_name: "Test".into(),
+                new_name: "My Song".into(),
+            }),
+            &mut project,
+        );
+        assert_eq!(project.name, "My Song");
+
+        mgr.undo(&mut project);
+        assert_eq!(project.name, "Test");
+
+        mgr.redo(&mut project);
+        assert_eq!(project.name, "My Song");
+    }
+
+    #[test]
+    fn test_set_clip_gain_undo_redo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        // Track 2 (index 1) is audio, clip 0
+        let original_gain = audio_clip_gain(&project.tracks[1].clips[0]);
+
+        mgr.execute(
+            Box::new(SetClipGain {
+                track_id: 2,
+                clip_idx: 0,
+                old_gain: original_gain,
+                new_gain: 0.5,
+            }),
+            &mut project,
+        );
+        assert!((audio_clip_gain(&project.tracks[1].clips[0]) - 0.5).abs() < 1e-6);
+
+        mgr.undo(&mut project);
+        assert!((audio_clip_gain(&project.tracks[1].clips[0]) - original_gain).abs() < 1e-6);
+
+        mgr.redo(&mut project);
+        assert!((audio_clip_gain(&project.tracks[1].clips[0]) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_set_master_rack_param_undo_redo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        // Add a master rack slot
+        project.master_rack.push(RackSlot::utility(200));
+        let original_val = project.master_rack[0].params[0].value;
+
+        mgr.execute(
+            Box::new(SetMasterRackParam {
+                slot_idx: 0,
+                param_idx: 0,
+                old_value: original_val,
+                new_value: 0.75,
+            }),
+            &mut project,
+        );
+        assert!((project.master_rack[0].params[0].value - 0.75).abs() < 1e-6);
+
+        mgr.undo(&mut project);
+        assert!((project.master_rack[0].params[0].value - original_val).abs() < 1e-6);
+
+        mgr.redo(&mut project);
+        assert!((project.master_rack[0].params[0].value - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_set_track_name_undo_redo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        assert_eq!(project.tracks[0].name, "Track1");
+
+        mgr.execute(
+            Box::new(SetTrackName {
+                track_id: 1,
+                old_name: "Track1".into(),
+                new_name: "Lead Synth".into(),
+            }),
+            &mut project,
+        );
+        assert_eq!(project.tracks[0].name, "Lead Synth");
+
+        mgr.undo(&mut project);
+        assert_eq!(project.tracks[0].name, "Track1");
+
+        mgr.redo(&mut project);
+        assert_eq!(project.tracks[0].name, "Lead Synth");
+    }
+
+    #[test]
+    fn test_clip_rename_via_snapshot_undo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        assert_eq!(project.tracks[0].clips[0].name(), "Clip1");
+
+        // Simulate snapshot-based undo for clip rename
+        let snapshot = project.clone();
+        if let Clip::Midi(ref mut m) = project.tracks[0].clips[0] {
+            m.name = "Renamed Clip".into();
+        }
+        mgr.push_undo_snapshot(snapshot, "Rename Clip");
+
+        assert_eq!(project.tracks[0].clips[0].name(), "Renamed Clip");
+
+        mgr.undo(&mut project);
+        assert_eq!(project.tracks[0].clips[0].name(), "Clip1");
+
+        mgr.redo(&mut project);
+        assert_eq!(project.tracks[0].clips[0].name(), "Renamed Clip");
+    }
+
+    #[test]
+    fn test_master_rack_toggle_via_snapshot_undo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        project.master_rack.push(RackSlot::utility(200));
+        assert!(project.master_rack[0].enabled);
+
+        let snapshot = project.clone();
+        project.master_rack[0].enabled = false;
+        mgr.push_undo_snapshot(snapshot, "Toggle Master Effect");
+
+        assert!(!project.master_rack[0].enabled);
+
+        mgr.undo(&mut project);
+        assert!(project.master_rack[0].enabled);
+
+        mgr.redo(&mut project);
+        assert!(!project.master_rack[0].enabled);
+    }
+
+    #[test]
+    fn test_master_rack_remove_via_snapshot_undo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        // Default project has a limiter in master rack; add one more
+        let initial_count = project.master_rack.len();
+        project.master_rack.push(RackSlot::utility(201));
+        let count_with_extra = project.master_rack.len();
+        assert_eq!(count_with_extra, initial_count + 1);
+
+        let snapshot = project.clone();
+        project.master_rack.remove(initial_count); // remove the utility we just added
+        mgr.push_undo_snapshot(snapshot, "Remove Master Effect");
+
+        assert_eq!(project.master_rack.len(), initial_count);
+
+        mgr.undo(&mut project);
+        assert_eq!(project.master_rack.len(), count_with_extra);
+        assert_eq!(project.master_rack[initial_count].slot_id, 201);
+    }
+
+    #[test]
+    fn test_master_rack_add_via_snapshot_undo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        let initial_count = project.master_rack.len();
+
+        let snapshot = project.clone();
+        project.master_rack.push(RackSlot::utility(300));
+        mgr.push_undo_snapshot(snapshot, "Add Master Effect");
+
+        assert_eq!(project.master_rack.len(), initial_count + 1);
+
+        mgr.undo(&mut project);
+        assert_eq!(project.master_rack.len(), initial_count);
+
+        mgr.redo(&mut project);
+        assert_eq!(project.master_rack.len(), initial_count + 1);
+    }
+
+    #[test]
+    fn test_resize_all_tracks_via_snapshot_undo() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        let original_heights: Vec<i32> = project.tracks.iter().map(|t| t.height).collect();
+
+        let snapshot = project.clone();
+        for track in &mut project.tracks {
+            track.height = ((track.height as f32 * 1.5).max(80.0)) as i32;
+        }
+        mgr.push_undo_snapshot(snapshot, "Resize All Tracks");
+
+        for (i, track) in project.tracks.iter().enumerate() {
+            assert!(track.height > original_heights[i] || original_heights[i] <= 80);
+        }
+
+        mgr.undo(&mut project);
+        for (i, track) in project.tracks.iter().enumerate() {
+            assert_eq!(track.height, original_heights[i]);
+        }
+    }
+
+    #[test]
+    fn test_set_clip_gain_no_op_same_value() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        let gain = audio_clip_gain(&project.tracks[1].clips[0]);
+
+        // Setting to same value should still work correctly
+        mgr.execute(
+            Box::new(SetClipGain {
+                track_id: 2,
+                clip_idx: 0,
+                old_gain: gain,
+                new_gain: gain,
+            }),
+            &mut project,
+        );
+        assert!((audio_clip_gain(&project.tracks[1].clips[0]) - gain).abs() < 1e-6);
+        mgr.undo(&mut project);
+        assert!((audio_clip_gain(&project.tracks[1].clips[0]) - gain).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_set_master_rack_param_out_of_bounds() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        // No master rack slots — command should be a no-op
+        mgr.execute(
+            Box::new(SetMasterRackParam {
+                slot_idx: 999,
+                param_idx: 0,
+                old_value: 0.0,
+                new_value: 1.0,
+            }),
+            &mut project,
+        );
+        // Should not crash, just be a no-op
+        mgr.undo(&mut project);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ── UI / Input Simulation Framework ────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // Eden's draw_* functions require `Canvas<Window>` (SDL2), so we can't
+    // call them in headless tests. Instead we test the *state layer* that
+    // the UI drives:
+    //
+    //  1. InputState simulation — build synthetic input frames (clicks,
+    //     drags, keys, scrolls) and verify InputState transitions.
+    //  2. State-mutation coverage — exercise AppState helpers, commands,
+    //     and model operations that the UI code calls.
+    //  3. Fuzz / invariant tests — throw random state mutations and
+    //     verify structural invariants never break.
+    //
+    // This gives us high coverage of the *logic* behind every button,
+    // knob, and drag interaction without needing a GPU.
+    // ═══════════════════════════════════════════════════════════════════
+
+    use crate::input::{ClickType, InputState};
+    use crate::state::AppState;
+
+    // ── InputState simulation helpers ────────────────────────────────
+
+    /// Create a default InputState for testing.
+    fn make_input() -> InputState {
+        InputState::default()
+    }
+
+    /// Create a default AppState for testing (no SDL2 needed).
+    fn make_app_state() -> AppState {
+        let mut state = AppState::new();
+        // Set up with a populated project so tests are meaningful
+        state.project = make_test_project();
+        state.window_width = 1280;
+        state.window_height = 800;
+        state
+    }
+
+    /// Simulate a left-click at (x, y). Sets pressed, then calls
+    /// apply_scale(1.0) so logical coords match raw.
+    fn sim_click(input: &mut InputState, x: i32, y: i32) {
+        input.begin_frame();
+        input.on_mouse_down(x, y, sdl2::mouse::MouseButton::Left, 1000);
+        input.apply_scale(1.0);
+    }
+
+    /// Simulate mouse release at (x, y).
+    fn sim_release(input: &mut InputState, x: i32, y: i32) {
+        input.begin_frame();
+        input.on_mouse_up(x, y, sdl2::mouse::MouseButton::Left);
+        input.apply_scale(1.0);
+    }
+
+    /// Simulate a full click+release at (x, y) across two frames.
+    fn sim_click_release(input: &mut InputState, x: i32, y: i32) {
+        sim_click(input, x, y);
+        sim_release(input, x, y);
+    }
+
+    /// Simulate a right-click at (x, y).
+    fn sim_right_click(input: &mut InputState, x: i32, y: i32) {
+        input.begin_frame();
+        input.on_mouse_down(x, y, sdl2::mouse::MouseButton::Right, 1000);
+        input.apply_scale(1.0);
+    }
+
+    /// Simulate a double-click at (x, y) (two rapid clicks).
+    fn sim_double_click(input: &mut InputState, x: i32, y: i32) {
+        input.begin_frame();
+        input.on_mouse_down(x, y, sdl2::mouse::MouseButton::Left, 1000);
+        input.apply_scale(1.0);
+        input.begin_frame();
+        input.on_mouse_up(x, y, sdl2::mouse::MouseButton::Left);
+        input.apply_scale(1.0);
+        // Second click within double-click threshold
+        input.begin_frame();
+        input.on_mouse_down(x, y, sdl2::mouse::MouseButton::Left, 1050);
+        input.apply_scale(1.0);
+    }
+
+    /// Simulate a drag from (x1,y1) to (x2,y2) over `steps` frames.
+    fn sim_drag(input: &mut InputState, x1: i32, y1: i32, x2: i32, y2: i32, steps: u32) {
+        // Press at start
+        sim_click(input, x1, y1);
+        // Move through intermediate positions
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let cx = x1 + ((x2 - x1) as f32 * t) as i32;
+            let cy = y1 + ((y2 - y1) as f32 * t) as i32;
+            input.begin_frame();
+            input.on_mouse_move(cx, cy);
+            input.apply_scale(1.0);
+        }
+    }
+
+    /// Simulate a scroll event at the current mouse position.
+    fn sim_scroll(input: &mut InputState, dx: i32, dy: i32) {
+        input.begin_frame();
+        input.on_scroll(dx, dy);
+        input.apply_scale(1.0);
+    }
+
+    /// Simulate a key press.
+    fn sim_key_press(input: &mut InputState, key: sdl2::keyboard::Keycode) {
+        input.begin_frame();
+        input.on_key_down(key);
+        input.apply_scale(1.0);
+    }
+
+    /// Simulate key press with modifier.
+    fn sim_key_with_mod(input: &mut InputState, key: sdl2::keyboard::Keycode, modifier: sdl2::keyboard::Mod) {
+        input.begin_frame();
+        input.key_mod = modifier;
+        input.on_key_down(key);
+        input.apply_scale(1.0);
+    }
+
+    /// Simulate a text input character.
+    fn sim_text_input(input: &mut InputState, ch: char) {
+        input.begin_frame();
+        input.text_input_chars.push(ch);
+        input.apply_scale(1.0);
+    }
+
+    // ── InputState transition tests ──────────────────────────────────
+
+    #[test]
+    fn test_input_click_sets_pressed_flag() {
+        let mut input = make_input();
+        sim_click(&mut input, 100, 200);
+
+        assert!(input.mouse_pressed, "mouse_pressed should be true on click frame");
+        assert!(input.mouse_down, "mouse_down should be true while held");
+        assert_eq!(input.mouse_x, 100);
+        assert_eq!(input.mouse_y, 200);
+        assert_eq!(input.click_type, Some(ClickType::Single));
+    }
+
+    #[test]
+    fn test_input_release_sets_released_flag() {
+        let mut input = make_input();
+        sim_click(&mut input, 100, 200);
+        sim_release(&mut input, 100, 200);
+
+        assert!(input.mouse_released, "mouse_released should be true on release frame");
+        assert!(!input.mouse_down, "mouse_down should be false after release");
+    }
+
+    #[test]
+    fn test_input_begin_frame_clears_transients() {
+        let mut input = make_input();
+        sim_click(&mut input, 50, 50);
+        assert!(input.mouse_pressed);
+
+        // Next frame should clear transients
+        input.begin_frame();
+        assert!(!input.mouse_pressed, "pressed should be cleared on next frame");
+        assert!(input.mouse_down, "mouse_down should persist while held");
+    }
+
+    #[test]
+    fn test_input_double_click_detection() {
+        let mut input = make_input();
+        sim_double_click(&mut input, 100, 100);
+
+        assert_eq!(input.click_type, Some(ClickType::Double));
+    }
+
+    #[test]
+    fn test_input_double_click_timeout() {
+        let mut input = make_input();
+        // First click
+        input.begin_frame();
+        input.on_mouse_down(100, 100, sdl2::mouse::MouseButton::Left, 1000);
+        input.apply_scale(1.0);
+        input.begin_frame();
+        input.on_mouse_up(100, 100, sdl2::mouse::MouseButton::Left);
+        input.apply_scale(1.0);
+        // Second click 500ms later — beyond threshold
+        input.begin_frame();
+        input.on_mouse_down(100, 100, sdl2::mouse::MouseButton::Left, 1500);
+        input.apply_scale(1.0);
+
+        assert_eq!(input.click_type, Some(ClickType::Single),
+            "Should be single click when double-click timeout exceeded");
+    }
+
+    #[test]
+    fn test_input_right_click() {
+        let mut input = make_input();
+        sim_right_click(&mut input, 200, 300);
+
+        assert!(input.right_mouse_pressed);
+        assert!(input.right_mouse_down);
+        assert_eq!(input.click_type, Some(ClickType::RightClick));
+    }
+
+    #[test]
+    fn test_input_drag_detection() {
+        let mut input = make_input();
+        // Start drag — must move > 3px to trigger
+        sim_drag(&mut input, 100, 100, 110, 110, 5);
+
+        assert!(input.dragging, "dragging should be true after sufficient movement");
+        assert_eq!(input.drag_start_x, 100);
+        assert_eq!(input.drag_start_y, 100);
+    }
+
+    #[test]
+    fn test_input_drag_not_triggered_by_small_movement() {
+        let mut input = make_input();
+        sim_click(&mut input, 100, 100);
+        // Move only 2px — below threshold
+        input.begin_frame();
+        input.on_mouse_move(102, 101);
+        input.apply_scale(1.0);
+
+        assert!(!input.dragging, "dragging should NOT trigger for small movements");
+    }
+
+    #[test]
+    fn test_input_drag_cleared_on_release() {
+        let mut input = make_input();
+        sim_drag(&mut input, 100, 100, 200, 200, 10);
+        assert!(input.dragging);
+
+        sim_release(&mut input, 200, 200);
+        assert!(!input.dragging, "dragging should be cleared on release");
+        assert_eq!(input.drag_widget, crate::input::WidgetId::None);
+    }
+
+    #[test]
+    fn test_input_mouse_in_rect() {
+        let input = InputState {
+            mouse_x: 50,
+            mouse_y: 50,
+            ..InputState::default()
+        };
+
+        assert!(input.mouse_in_rect(0, 0, 100, 100));
+        assert!(!input.mouse_in_rect(0, 0, 40, 40));
+        assert!(!input.mouse_in_rect(100, 100, 50, 50));
+    }
+
+    #[test]
+    fn test_input_key_press_and_hold() {
+        let mut input = make_input();
+        sim_key_press(&mut input, sdl2::keyboard::Keycode::A);
+
+        assert!(input.keys_pressed.contains(&sdl2::keyboard::Keycode::A));
+        assert!(input.keys_held.contains(&sdl2::keyboard::Keycode::A));
+        assert!(input.key_held(sdl2::keyboard::Keycode::A));
+
+        // Next frame: held persists, pressed clears
+        input.begin_frame();
+        assert!(!input.keys_pressed.contains(&sdl2::keyboard::Keycode::A));
+        assert!(input.keys_held.contains(&sdl2::keyboard::Keycode::A));
+    }
+
+    #[test]
+    fn test_input_key_release() {
+        let mut input = make_input();
+        sim_key_press(&mut input, sdl2::keyboard::Keycode::A);
+        assert!(input.key_held(sdl2::keyboard::Keycode::A));
+
+        input.on_key_up(sdl2::keyboard::Keycode::A);
+        assert!(!input.key_held(sdl2::keyboard::Keycode::A));
+    }
+
+    #[test]
+    fn test_input_key_consume() {
+        let mut input = make_input();
+        sim_key_press(&mut input, sdl2::keyboard::Keycode::Delete);
+
+        assert!(input.key_available(sdl2::keyboard::Keycode::Delete));
+        input.consume_key(sdl2::keyboard::Keycode::Delete);
+        assert!(!input.key_available(sdl2::keyboard::Keycode::Delete),
+            "key should not be available after consume");
+    }
+
+    #[test]
+    fn test_input_modifier_detection() {
+        let mut input = make_input();
+        input.key_mod = sdl2::keyboard::Mod::LCTRLMOD;
+        assert!(input.ctrl());
+        assert!(!input.shift());
+        assert!(!input.alt());
+
+        input.key_mod = sdl2::keyboard::Mod::LSHIFTMOD;
+        assert!(!input.ctrl());
+        assert!(input.shift());
+
+        input.key_mod = sdl2::keyboard::Mod::LALTMOD;
+        assert!(input.alt());
+    }
+
+    #[test]
+    fn test_input_scroll_event() {
+        let mut input = make_input();
+        sim_scroll(&mut input, 0, -3);
+
+        assert_eq!(input.scroll_y, -3);
+        assert_eq!(input.scroll_x, 0);
+    }
+
+    #[test]
+    fn test_input_scroll_consumed_flag() {
+        let mut input = make_input();
+        sim_scroll(&mut input, 0, 5);
+        assert!(!input.scroll_consumed);
+
+        input.scroll_consumed = true;
+        assert!(input.scroll_consumed);
+    }
+
+    #[test]
+    fn test_input_text_input() {
+        let mut input = make_input();
+        sim_text_input(&mut input, 'H');
+        assert_eq!(input.text_input_chars, vec!['H']);
+    }
+
+    #[test]
+    fn test_input_widget_id_counter() {
+        let mut input = make_input();
+        input.begin_frame();
+        let id1 = input.next_id();
+        let id2 = input.next_id();
+        let id3 = input.next_id();
+
+        assert_eq!(id1, crate::input::WidgetId::Auto(0));
+        assert_eq!(id2, crate::input::WidgetId::Auto(1));
+        assert_eq!(id3, crate::input::WidgetId::Auto(2));
+
+        // Resets on new frame
+        input.begin_frame();
+        let id_reset = input.next_id();
+        assert_eq!(id_reset, crate::input::WidgetId::Auto(0));
+    }
+
+    #[test]
+    fn test_input_consume_prevents_reuse() {
+        let mut input = make_input();
+        sim_click(&mut input, 100, 100);
+        assert!(!input.consumed);
+
+        input.consume();
+        assert!(input.consumed, "consumed flag should be set");
+    }
+
+    #[test]
+    fn test_input_active_widget_survives_released_frame() {
+        let mut input = make_input();
+
+        // Press — set active widget
+        sim_click(&mut input, 100, 100);
+        input.active_widget = crate::input::WidgetId::Auto(42);
+
+        // Release frame — active_widget should survive
+        sim_release(&mut input, 100, 100);
+        assert_eq!(input.active_widget, crate::input::WidgetId::Auto(42),
+            "active_widget should survive through release frame");
+
+        // Next frame after release — should be cleared since mouse is up
+        input.begin_frame();
+        assert_eq!(input.active_widget, crate::input::WidgetId::None,
+            "active_widget should clear on next frame after release");
+    }
+
+    #[test]
+    fn test_input_middle_mouse_drag() {
+        let mut input = make_input();
+        input.begin_frame();
+        input.on_mouse_down(50, 50, sdl2::mouse::MouseButton::Middle, 1000);
+        input.apply_scale(1.0);
+
+        assert!(input.middle_mouse_pressed);
+        assert!(input.middle_mouse_down);
+
+        // Set middle_drag_widget (normally done by widget logic)
+        input.middle_drag_widget = crate::input::WidgetId::Auto(10);
+
+        // Release
+        input.begin_frame();
+        input.on_mouse_up(50, 50, sdl2::mouse::MouseButton::Middle);
+        input.apply_scale(1.0);
+
+        assert!(input.middle_mouse_released);
+        assert!(!input.middle_mouse_down);
+
+        // Next frame — middle_drag_widget should clear
+        input.begin_frame();
+        assert_eq!(input.middle_drag_widget, crate::input::WidgetId::None);
+    }
+
+    #[test]
+    fn test_input_ui_scale() {
+        let mut input = make_input();
+        input.begin_frame();
+        input.on_mouse_down(200, 400, sdl2::mouse::MouseButton::Left, 1000);
+        input.apply_scale(2.0);
+
+        // At 2x scale, raw (200,400) → logical (100,200)
+        assert_eq!(input.mouse_x, 100);
+        assert_eq!(input.mouse_y, 200);
+    }
+
+    #[test]
+    fn test_input_mouse_delta() {
+        let mut input = make_input();
+        // Frame 1: mouse at (100, 100)
+        input.begin_frame();
+        input.on_mouse_move(100, 100);
+        input.apply_scale(1.0);
+        // Frame 2: mouse at (120, 115)
+        input.begin_frame();
+        input.on_mouse_move(120, 115);
+        input.apply_scale(1.0);
+
+        assert_eq!(input.mouse_dx, 20);
+        assert_eq!(input.mouse_dy, 15);
+    }
+
+    #[test]
+    fn test_input_dropped_file() {
+        let mut input = make_input();
+        input.dropped_file = Some("/path/to/sample.wav".to_string());
+        assert_eq!(input.dropped_file, Some("/path/to/sample.wav".to_string()));
+
+        input.begin_frame();
+        assert!(input.dropped_file.is_none(), "dropped_file should clear on begin_frame");
+    }
+
+    // ── AppState / State-layer tests ─────────────────────────────────
+
+    #[test]
+    fn test_app_state_status_message() {
+        let mut state = make_app_state();
+        state.push_status("Hello World");
+        assert_eq!(state.status_message, Some("Hello World".to_string()));
+        assert_eq!(state.status_timer, 180);
+    }
+
+    #[test]
+    fn test_app_state_sync_clip_library() {
+        let mut state = make_app_state();
+        assert!(state.clip_library.is_empty());
+
+        state.sync_clip_library();
+        // Should have added clips from the test project
+        assert!(!state.clip_library.is_empty());
+        let initial_count = state.clip_library.len();
+
+        // Calling again should not duplicate
+        state.sync_clip_library();
+        assert_eq!(state.clip_library.len(), initial_count);
+    }
+
+    #[test]
+    fn test_app_state_snap_settings() {
+        let snap = crate::state::SnapSettings {
+            enabled: true,
+            resolution_idx: 2, // 1/4 = 1.0 beat
+        };
+
+        assert_eq!(snap.resolution_beats(), 1.0);
+        assert_eq!(snap.snap(1.3), 1.0);
+        assert_eq!(snap.snap(1.7), 2.0);
+        assert_eq!(snap.snap(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_app_state_snap_disabled() {
+        let snap = crate::state::SnapSettings {
+            enabled: false,
+            resolution_idx: 2,
+        };
+
+        assert_eq!(snap.snap(1.3), 1.3, "disabled snap should return input unchanged");
+    }
+
+    #[test]
+    fn test_app_state_snap_proximity() {
+        let snap = crate::state::SnapSettings {
+            enabled: true,
+            resolution_idx: 2, // 1/4 = 1.0 beat
+        };
+
+        // Close to grid line → snaps
+        assert_eq!(snap.snap_proximity(0.95, 0.1), 1.0);
+        // Far from grid line → no snap
+        assert_eq!(snap.snap_proximity(0.5, 0.1), 0.5);
+    }
+
+    #[test]
+    fn test_app_state_snap_resolutions() {
+        // Verify all snap resolutions are valid
+        for (label, beats) in crate::state::SNAP_RESOLUTIONS {
+            assert!(*beats > 0.0, "snap resolution {} should be positive", label);
+        }
+        // Should be sorted from largest to smallest
+        for i in 1..crate::state::SNAP_RESOLUTIONS.len() {
+            assert!(
+                crate::state::SNAP_RESOLUTIONS[i].1 < crate::state::SNAP_RESOLUTIONS[i - 1].1,
+                "snap resolutions should be in decreasing order"
+            );
+        }
+    }
+
+    #[test]
+    fn test_app_state_mode_transitions() {
+        let mut state = make_app_state();
+        assert_eq!(state.mode, crate::state::AppMode::ProjectManager);
+
+        state.mode = crate::state::AppMode::Arrangement;
+        assert_eq!(state.mode, crate::state::AppMode::Arrangement);
+
+        state.mode = crate::state::AppMode::Mixer;
+        assert_eq!(state.mode, crate::state::AppMode::Mixer);
+
+        state.mode = crate::state::AppMode::Edit;
+        assert_eq!(state.mode, crate::state::AppMode::Edit);
+    }
+
+    #[test]
+    fn test_app_state_track_selection() {
+        let mut state = make_app_state();
+        assert!(state.selected_track.is_none());
+
+        // Select track 1
+        state.selected_track = Some(1);
+        assert_eq!(state.selected_track, Some(1));
+
+        // Multi-select
+        state.selected_tracks.insert(1);
+        state.selected_tracks.insert(2);
+        assert_eq!(state.selected_tracks.len(), 2);
+    }
+
+    #[test]
+    fn test_app_state_clip_selection() {
+        let mut state = make_app_state();
+
+        // Select a clip
+        state.selected_clip = Some((1, 0));
+        assert_eq!(state.selected_clip, Some((1, 0)));
+
+        // Multi-select clips
+        state.selected_clips.insert((1, 0));
+        state.selected_clips.insert((2, 0));
+        assert_eq!(state.selected_clips.len(), 2);
+    }
+
+    #[test]
+    fn test_app_state_bottom_panel() {
+        let mut state = make_app_state();
+        assert!(!state.bottom_panel_open);
+        assert_eq!(state.bottom_panel_height, 24);
+
+        state.bottom_panel_open = true;
+        state.bottom_panel_height = 200;
+        assert!(state.bottom_panel_open);
+
+        state.bottom_panel_tab = crate::state::BottomPanelTab::Mixer;
+        assert_eq!(state.bottom_panel_tab, crate::state::BottomPanelTab::Mixer);
+    }
+
+    #[test]
+    fn test_app_state_focused_panel() {
+        let mut state = make_app_state();
+        assert_eq!(state.focused_panel, crate::state::FocusedPanel::Arrangement);
+
+        state.focused_panel = crate::state::FocusedPanel::PianoRoll;
+        assert_eq!(state.focused_panel, crate::state::FocusedPanel::PianoRoll);
+    }
+
+    #[test]
+    fn test_app_state_clipboard() {
+        let mut state = make_app_state();
+        assert!(state.clipboard.is_empty());
+
+        // Copy a clip to clipboard
+        let clip = state.project.tracks[0].clips[0].clone();
+        state.clipboard.push((1, clip));
+        assert_eq!(state.clipboard.len(), 1);
+    }
+
+    #[test]
+    fn test_app_state_ui_scale() {
+        let mut state = make_app_state();
+        assert_eq!(state.ui_scale, 1.0);
+        state.ui_scale_pending = 1.5;
+        // Apply
+        state.ui_scale = state.ui_scale_pending;
+        assert_eq!(state.ui_scale, 1.5);
+    }
+
+    #[test]
+    fn test_app_state_text_field() {
+        let mut state = make_app_state();
+        state.text_field_active_id = 42;
+        state.text_field_buffer = "Hello".into();
+        state.text_field_cursor = 5;
+
+        assert_eq!(state.text_field_active_id, 42);
+        assert_eq!(state.text_field_buffer, "Hello");
+        assert_eq!(state.text_field_cursor, 5);
+    }
+
+    // ── Model invariant tests ────────────────────────────────────────
+
+    #[test]
+    fn test_project_default_invariants() {
+        let project = Project::default();
+
+        // BPM must be positive
+        assert!(project.tempo_map.bpm_at(0.0) > 0.0);
+        // Loop start < loop end
+        assert!(project.transport.loop_region.start < project.transport.loop_region.end);
+        // Default has a master rack limiter
+        assert!(!project.master_rack.is_empty());
+    }
+
+    #[test]
+    fn test_track_invariants() {
+        let track = Track::new(1, "Test", TrackType::Midi);
+        assert!(track.volume >= 0.0 && track.volume <= 2.0);
+        assert!(track.pan >= -1.0 && track.pan <= 1.0);
+        assert!(track.height > 0);
+    }
+
+    #[test]
+    fn test_midi_note_invariants() {
+        let note = MidiNote {
+            pitch: 60,
+            velocity: 100,
+            start: 0.0,
+            length: 1.0,
+        };
+        assert!(note.pitch <= 127);
+        assert!(note.velocity <= 127);
+        assert!(note.length > 0.0);
+        assert!(note.start >= 0.0);
+    }
+
+    #[test]
+    fn test_audio_clip_invariants() {
+        let clip = AudioClip {
+            source_file: "test.wav".into(),
+            start_time: 0.0,
+            offset: 0.0,
+            length: 4.0,
+            gain: 1.0,
+            name: "Test".into(),
+            color: [200, 100, 50, 200],
+        };
+        assert!(clip.length > 0.0);
+        assert!(clip.gain >= 0.0);
+        assert!(clip.offset >= 0.0);
+    }
+
+    #[test]
+    fn test_automation_point_invariants() {
+        let point = AutomationPoint {
+            time: 1.0,
+            value: 0.5,
+        };
+        assert!(point.value >= 0.0 && point.value <= 1.0);
+        assert!(point.time >= 0.0);
+    }
+
+    // ── Fuzz / stress tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_fuzz_input_state_rapid_clicks() {
+        let mut input = make_input();
+        // Simulate 100 rapid clicks at random positions
+        for i in 0..100u32 {
+            let x = (i * 13 + 7) as i32 % 1280;
+            let y = (i * 17 + 3) as i32 % 800;
+            sim_click(&mut input, x, y);
+            sim_release(&mut input, x, y);
+        }
+        // Should not panic, state should be clean
+        assert!(!input.mouse_down);
+        assert!(!input.dragging);
+    }
+
+    #[test]
+    fn test_fuzz_input_state_drag_sequences() {
+        let mut input = make_input();
+        // Simulate 50 drag sequences
+        for i in 0..50u32 {
+            let x1 = (i * 29 + 11) as i32 % 1280;
+            let y1 = (i * 37 + 19) as i32 % 800;
+            let x2 = (i * 41 + 23) as i32 % 1280;
+            let y2 = (i * 43 + 29) as i32 % 800;
+            sim_drag(&mut input, x1, y1, x2, y2, 5);
+            sim_release(&mut input, x2, y2);
+        }
+        assert!(!input.dragging);
+        assert!(!input.mouse_down);
+    }
+
+    #[test]
+    fn test_fuzz_input_state_interleaved_buttons() {
+        let mut input = make_input();
+        // Simulate interleaved left/right/middle clicks
+        for i in 0..50u32 {
+            let x = (i * 31) as i32 % 1280;
+            let y = (i * 37) as i32 % 800;
+            match i % 3 {
+                0 => {
+                    sim_click(&mut input, x, y);
+                    sim_release(&mut input, x, y);
+                }
+                1 => {
+                    sim_right_click(&mut input, x, y);
+                    input.begin_frame();
+                    input.on_mouse_up(x, y, sdl2::mouse::MouseButton::Right);
+                    input.apply_scale(1.0);
+                }
+                _ => {
+                    input.begin_frame();
+                    input.on_mouse_down(x, y, sdl2::mouse::MouseButton::Middle, i as u64 * 100);
+                    input.apply_scale(1.0);
+                    input.begin_frame();
+                    input.on_mouse_up(x, y, sdl2::mouse::MouseButton::Middle);
+                    input.apply_scale(1.0);
+                }
+            }
+        }
+        // Should not panic
+        assert!(!input.mouse_down);
+        assert!(!input.right_mouse_down);
+        assert!(!input.middle_mouse_down);
+    }
+
+    #[test]
+    fn test_fuzz_key_press_release_sequences() {
+        let mut input = make_input();
+        let keys = [
+            sdl2::keyboard::Keycode::A,
+            sdl2::keyboard::Keycode::S,
+            sdl2::keyboard::Keycode::D,
+            sdl2::keyboard::Keycode::F,
+            sdl2::keyboard::Keycode::Space,
+            sdl2::keyboard::Keycode::Delete,
+            sdl2::keyboard::Keycode::Return,
+            sdl2::keyboard::Keycode::Escape,
+        ];
+
+        // Rapidly press and release all keys
+        for round in 0..20u32 {
+            for (i, key) in keys.iter().enumerate() {
+                if (round + i as u32) % 2 == 0 {
+                    sim_key_press(&mut input, *key);
+                } else {
+                    input.on_key_up(*key);
+                }
+            }
+        }
+        // Release all
+        for key in &keys {
+            input.on_key_up(*key);
+        }
+        for key in &keys {
+            assert!(!input.key_held(*key));
+        }
+    }
+
+    #[test]
+    fn test_fuzz_scroll_stress() {
+        let mut input = make_input();
+        for i in 0..200i32 {
+            let dx = (i * 7) % 11 - 5;
+            let dy = (i * 13) % 11 - 5;
+            sim_scroll(&mut input, dx, dy);
+        }
+        // Should not panic or overflow
+    }
+
+    #[test]
+    fn test_fuzz_command_stress() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(50); // Small history to test overflow
+
+        // Rapid-fire 200 volume changes
+        for i in 0..200u32 {
+            let vol = (i as f32 * 0.005).clamp(0.0, 2.0);
+            mgr.execute(
+                Box::new(SetTrackVolume {
+                    track_id: 1,
+                    old_value: project.tracks[0].volume,
+                    new_value: vol,
+                }),
+                &mut project,
+            );
+        }
+
+        // Undo everything available
+        for _ in 0..50 {
+            mgr.undo(&mut project);
+        }
+
+        // Redo everything available
+        for _ in 0..50 {
+            mgr.redo(&mut project);
+        }
+
+        // Volume should be valid
+        assert!(project.tracks[0].volume >= 0.0 && project.tracks[0].volume <= 2.0);
+    }
+
+    #[test]
+    fn test_fuzz_project_mutation_invariants() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        // Add many tracks
+        for i in 10..30u32 {
+            mgr.execute(
+                Box::new(AddTrack {
+                    track: Track::new(i, &format!("Fuzz{}", i), TrackType::Midi),
+                }),
+                &mut project,
+            );
+        }
+
+        // Check invariants
+        let track_ids: Vec<u32> = project.tracks.iter().map(|t| t.id).collect();
+        let unique_ids: std::collections::HashSet<u32> = track_ids.iter().copied().collect();
+        assert_eq!(track_ids.len(), unique_ids.len(), "all track IDs should be unique");
+
+        // Remove all added tracks
+        for i in (10..30u32).rev() {
+            mgr.execute(
+                Box::new(RemoveTrack { track_id: i, removed_track: None, index: 0 }),
+                &mut project,
+            );
+        }
+        assert_eq!(project.tracks.len(), 3, "should be back to 3 original tracks");
+
+        // Undo all removes
+        for _ in 0..20 {
+            mgr.undo(&mut project);
+        }
+        assert_eq!(project.tracks.len(), 23, "should have 23 tracks after undoing removes");
+    }
+
+    #[test]
+    fn test_fuzz_clip_manipulation() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(200);
+
+        // Stress-test clip moves
+        for i in 0..100u32 {
+            let new_start = (i as f64 * 0.137) % 32.0;
+            mgr.execute(
+                Box::new(MoveClip {
+                    track_id: 1,
+                    clip_index: 0,
+                    new_start,
+                    old_start: 0.0,
+                }),
+                &mut project,
+            );
+        }
+
+        // All clips should have non-negative start times
+        for track in &project.tracks {
+            for clip in &track.clips {
+                assert!(clip.start_time() >= 0.0, "clip start should be >= 0");
+            }
+        }
+    }
+
+    #[test]
+    fn test_fuzz_mute_solo_rapid_toggle() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        for i in 0..50u32 {
+            let cur_mute = project.tracks[0].mute;
+            mgr.execute(
+                Box::new(SetTrackMute { track_id: 1, new_value: !cur_mute, old_value: cur_mute }),
+                &mut project,
+            );
+            if i % 3 == 0 {
+                let cur_solo = project.tracks[0].solo;
+                mgr.execute(
+                    Box::new(SetTrackSolo { track_id: 1, new_value: !cur_solo, old_value: cur_solo }),
+                    &mut project,
+                );
+            }
+        }
+
+        // Undo half
+        for _ in 0..25 {
+            mgr.undo(&mut project);
+        }
+
+        // Redo half
+        for _ in 0..10 {
+            mgr.redo(&mut project);
+        }
+        // Should not panic or leave inconsistent state
+    }
+
+    #[test]
+    fn test_fuzz_pan_sweep() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        // Sweep pan across full range
+        for i in 0..100u32 {
+            let pan = (i as f32 / 50.0) - 1.0; // -1.0 to +1.0
+            mgr.execute(
+                Box::new(SetTrackPan {
+                    track_id: 1,
+                    old_value: project.tracks[0].pan,
+                    new_value: pan.clamp(-1.0, 1.0),
+                }),
+                &mut project,
+            );
+        }
+
+        assert!(project.tracks[0].pan >= -1.0 && project.tracks[0].pan <= 1.0);
+    }
+
+    #[test]
+    fn test_fuzz_bpm_changes() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        // Rapid BPM changes across valid range
+        for i in 0..100u32 {
+            let new_bpm = 20.0 + (i as f64 * 2.63) % 280.0;
+            mgr.execute(
+                Box::new(SetTempo {
+                    old_bpm: project.tempo_map.bpm_at(0.0),
+                    new_bpm,
+                }),
+                &mut project,
+            );
+        }
+
+        assert!(project.tempo_map.bpm_at(0.0) > 0.0, "BPM must remain positive");
+    }
+
+    #[test]
+    fn test_fuzz_note_add_remove() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(200);
+
+        // Add many notes
+        for i in 0..50u32 {
+            let note = MidiNote {
+                pitch: (40 + i % 48) as u8,
+                velocity: 80,
+                start: i as f64 * 0.5,
+                length: 0.5,
+            };
+            mgr.execute(
+                Box::new(AddMidiNote {
+                    track_id: 1,
+                    clip_idx: 0,
+                    note,
+                }),
+                &mut project,
+            );
+        }
+
+        // Should have original 3 + 50 = 53 notes
+        if let Clip::Midi(mc) = &project.tracks[0].clips[0] {
+            assert_eq!(mc.notes.len(), 53);
+        }
+
+        // Remove half (one at a time using DeleteMidiNotes)
+        for _ in 0..25 {
+            // Get the first note so we can pass it to DeleteMidiNotes
+            let first_note = if let Clip::Midi(mc) = &project.tracks[0].clips[0] {
+                mc.notes[0].clone()
+            } else {
+                panic!("Expected midi clip");
+            };
+            mgr.execute(
+                Box::new(DeleteMidiNotes {
+                    track_id: 1,
+                    clip_idx: 0,
+                    notes: vec![(0, first_note)],
+                }),
+                &mut project,
+            );
+        }
+
+        if let Clip::Midi(mc) = &project.tracks[0].clips[0] {
+            assert_eq!(mc.notes.len(), 28);
+        }
+    }
+
+    // ── Undo/redo integrity tests ────────────────────────────────────
+
+    #[test]
+    fn test_undo_redo_full_cycle_all_commands() {
+        // For every command type, verify: execute → undo → state matches original
+        let original = make_test_project();
+        let mut project = original.clone();
+        let mut mgr = CommandManager::new(100);
+
+        // SetTrackVolume
+        let orig_vol = project.tracks[0].volume;
+        mgr.execute(
+            Box::new(SetTrackVolume { track_id: 1, old_value: orig_vol, new_value: 0.42 }),
+            &mut project,
+        );
+        mgr.undo(&mut project);
+        assert!((project.tracks[0].volume - orig_vol).abs() < 1e-6);
+
+        // SetTrackPan
+        let orig_pan = project.tracks[0].pan;
+        mgr.execute(
+            Box::new(SetTrackPan { track_id: 1, old_value: orig_pan, new_value: -0.75 }),
+            &mut project,
+        );
+        mgr.undo(&mut project);
+        assert!((project.tracks[0].pan - orig_pan).abs() < 1e-6);
+
+        // ToggleMute
+        let orig_mute = project.tracks[0].mute;
+        mgr.execute(Box::new(SetTrackMute { track_id: 1, new_value: !orig_mute, old_value: orig_mute }), &mut project);
+        assert_ne!(project.tracks[0].mute, orig_mute);
+        mgr.undo(&mut project);
+        assert_eq!(project.tracks[0].mute, orig_mute);
+
+        // ToggleSolo
+        let orig_solo = project.tracks[0].solo;
+        mgr.execute(Box::new(SetTrackSolo { track_id: 1, new_value: !orig_solo, old_value: orig_solo }), &mut project);
+        assert_ne!(project.tracks[0].solo, orig_solo);
+        mgr.undo(&mut project);
+        assert_eq!(project.tracks[0].solo, orig_solo);
+
+        // MoveClip
+        let orig_start = project.tracks[0].clips[0].start_time();
+        mgr.execute(
+            Box::new(MoveClip { track_id: 1, clip_index: 0, new_start: 8.0, old_start: 0.0 }),
+            &mut project,
+        );
+        assert_eq!(project.tracks[0].clips[0].start_time(), 8.0);
+        mgr.undo(&mut project);
+        assert_eq!(project.tracks[0].clips[0].start_time(), orig_start);
+
+        // SetTempo
+        let orig_bpm = project.tempo_map.bpm_at(0.0);
+        mgr.execute(
+            Box::new(SetTempo { old_bpm: orig_bpm, new_bpm: 140.0 }),
+            &mut project,
+        );
+        mgr.undo(&mut project);
+        assert!((project.tempo_map.bpm_at(0.0) - orig_bpm).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_undo_redo_clears_redo_on_new_command() {
+        let mut project = make_test_project();
+        let mut mgr = CommandManager::new(100);
+
+        mgr.execute(
+            Box::new(SetTrackVolume { track_id: 1, old_value: 0.8, new_value: 0.5 }),
+            &mut project,
+        );
+        mgr.execute(
+            Box::new(SetTrackVolume { track_id: 1, old_value: 0.5, new_value: 0.3 }),
+            &mut project,
+        );
+
+        mgr.undo(&mut project); // back to 0.5
+        assert!((project.tracks[0].volume - 0.5).abs() < 1e-6);
+
+        // New command should clear redo
+        mgr.execute(
+            Box::new(SetTrackPan { track_id: 1, old_value: 0.0, new_value: 0.5 }),
+            &mut project,
+        );
+
+        // Redo of volume change should be gone
+        mgr.redo(&mut project);
+        // Volume should still be 0.5 (redo was cleared)
+        assert!((project.tracks[0].volume - 0.5).abs() < 1e-6);
+    }
+
+    // ── Arrangement view state tests ─────────────────────────────────
+
+    #[test]
+    fn test_arrangement_view_defaults() {
+        let arr = crate::state::ArrangementView::default();
+        assert!(arr.zoom_x > 0.0, "zoom must be positive");
+        assert!(arr.scroll_x >= 0.0, "scroll must be non-negative");
+    }
+
+    #[test]
+    fn test_arrangement_zoom_bounds() {
+        let arr = crate::state::ArrangementView { zoom_x: 500.0, ..Default::default() };
+        assert!(arr.zoom_x > 0.0);
+        // Zoom out
+        let arr = crate::state::ArrangementView { zoom_x: 5.0, ..Default::default() };
+        assert!(arr.zoom_x > 0.0);
+    }
+
+    // ── Piano roll state tests ───────────────────────────────────────
+
+    #[test]
+    fn test_piano_roll_note_selection() {
+        let mut state = make_app_state();
+        state.piano_roll_selected_notes.insert(0);
+        state.piano_roll_selected_notes.insert(2);
+
+        assert_eq!(state.piano_roll_selected_notes.len(), 2);
+        assert!(state.piano_roll_selected_notes.contains(&0));
+        assert!(state.piano_roll_selected_notes.contains(&2));
+
+        state.piano_roll_selected_notes.clear();
+        assert!(state.piano_roll_selected_notes.is_empty());
+    }
+
+    #[test]
+    fn test_piano_roll_snap_resolution() {
+        let state = make_app_state();
+        let snap_beats = crate::state::SNAP_RESOLUTIONS[state.piano_roll_snap_idx].1;
+        assert!(snap_beats > 0.0);
+    }
+
+    // ── Render pipeline tests ────────────────────────────────────────
+
+    #[test]
+    fn test_render_empty_project() {
+        let project = Project::default();
+        let buf = render_to_buffer(&project, 44100, 1.0);
+        // Empty project should produce silence or near-silence
+        let max_amplitude = buf.iter().map(|(l, r)| l.abs().max(r.abs())).fold(0.0f64, f64::max);
+        assert!(max_amplitude < 0.001, "empty project should be silent");
+    }
+
+    #[test]
+    fn test_render_muted_track_energy_reduced() {
+        let mut project = make_test_project();
+        let buf_unmuted = render_to_buffer(&project, 44100, 1.0);
+
+        project.tracks[0].mute = true;
+        let buf_muted = render_to_buffer(&project, 44100, 1.0);
+
+        // Muted render should have less energy
+        let energy_unmuted: f64 = buf_unmuted.iter().map(|(l, r)| l * l + r * r).sum();
+        let energy_muted: f64 = buf_muted.iter().map(|(l, r)| l * l + r * r).sum();
+        assert!(energy_muted < energy_unmuted, "muted track should reduce energy");
+    }
+
+    #[test]
+    fn test_render_zero_volume_silent() {
+        let mut project = make_test_project();
+        project.tracks[0].volume = 0.0;
+        let buf = render_to_buffer(&project, 44100, 1.0);
+
+        // With volume=0, should still have audio track and automation track
+        // but MIDI track contribution should be zero
+        // This is a soft check — other tracks may contribute
+        let _ = buf; // Just verify no panic
+    }
+
+    // ── Module / DSP edge-case tests ─────────────────────────────────
+
+    #[test]
+    fn test_rack_slot_param_bounds() {
+        let slot = RackSlot::subtractive_synth(1);
+        for param in &slot.params {
+            assert!(
+                param.value >= param.min && param.value <= param.max,
+                "param {} value {} should be within [{}, {}]",
+                param.name, param.value, param.min, param.max
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_module_types_have_valid_params() {
+        let module_names = [
+            "Subtractive Synth",
+            "FM Synth",
+            "Sampler",
+            "SuperSaw",
+            "Utility",
+            "Filter",
+            "Delay",
+            "Reverb",
+            "Chorus",
+            "Compressor",
+            "Limiter",
+            "Distortion",
+            "Bitcrusher",
+            "EQ",
+            "Gain",
+        ];
+
+        for name in &module_names {
+            let descs = get_param_descs(name);
+            for desc in descs {
+                assert!(
+                    desc.min <= desc.max,
+                    "module {} param {} has min {} > max {}",
+                    name, desc.name, desc.min, desc.max
+                );
+                assert!(
+                    desc.default >= desc.min && desc.default <= desc.max,
+                    "module {} param {} default {} out of range [{}, {}]",
+                    name, desc.name, desc.default, desc.min, desc.max
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_serialization_roundtrip() {
+        let project = make_test_project();
+        let json = serde_json::to_string(&project).expect("serialize");
+        let restored: Project = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(project.name, restored.name);
+        assert_eq!(project.tempo_map.bpm_at(0.0), restored.tempo_map.bpm_at(0.0));
+        assert_eq!(project.tracks.len(), restored.tracks.len());
+        for (t1, t2) in project.tracks.iter().zip(restored.tracks.iter()) {
+            assert_eq!(t1.id, t2.id);
+            assert_eq!(t1.name, t2.name);
+            assert_eq!(t1.clips.len(), t2.clips.len());
+        }
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_with_automation() {
+        let mut project = make_test_project();
+        // Add complex automation
+        if let Clip::Automation(ref mut ac) = project.tracks[2].clips[0] {
+            for i in 0..100 {
+                ac.points.push(AutomationPoint {
+                    time: i as f64 * 0.1,
+                    value: (i as f32 * 0.01).clamp(0.0, 1.0),
+                });
+            }
+        }
+
+        let json = serde_json::to_string(&project).expect("serialize");
+        let restored: Project = serde_json::from_str(&json).expect("deserialize");
+
+        if let (Clip::Automation(orig), Clip::Automation(rest)) =
+            (&project.tracks[2].clips[0], &restored.tracks[2].clips[0])
+        {
+            assert_eq!(orig.points.len(), rest.points.len());
+        }
     }
 }

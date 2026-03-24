@@ -867,8 +867,7 @@ impl Default for Project {
 impl Project {
     /// Create a demo project with a few tracks for testing.
     pub fn demo() -> Self {
-        let mut p = Self::default();
-        p.name = "Demo Project".into();
+        let mut p = Self { name: "Demo Project".into(), ..Default::default() };
 
         // MIDI track with a clip
         let mut t1 = Track::new(1, "Synth Lead", TrackType::Midi);
@@ -1109,4 +1108,98 @@ pub fn import_midi_file(path: &str, project_bpm: f64) -> Result<Vec<(String, Mid
     } else {
         Ok(result)
     }
+}
+
+/// Export a MidiClip to a standard MIDI file (.mid).
+/// Notes are in beats; we use 480 ticks per quarter note (beat = 4 ticks at 1/4 resolution).
+/// The BPM is embedded as a tempo meta-event so other DAWs interpret timing correctly.
+pub fn export_midi_file(
+    clip: &MidiClip,
+    path: &str,
+    bpm: f64,
+    _clip_name: &str,
+) -> Result<(), String> {
+    use midly::num::{u4, u7, u15, u24, u28};
+    use midly::{
+        Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind,
+    };
+
+    let ppq: u16 = 480; // ticks per quarter note (= per beat in 4/4)
+
+    // Convert beats to ticks
+    let beat_to_tick = |b: f64| -> u64 { (b * ppq as f64).round() as u64 };
+
+    // Build a list of (absolute_tick, event_kind) pairs
+    let mut events: Vec<(u64, TrackEventKind<'static>)> = Vec::new();
+
+    // Tempo meta event at tick 0: microseconds per quarter note
+    let us_per_beat = (60_000_000.0 / bpm).round() as u32;
+    let _tempo_bytes: [u8; 3] = [
+        ((us_per_beat >> 16) & 0xFF) as u8,
+        ((us_per_beat >> 8) & 0xFF) as u8,
+        (us_per_beat & 0xFF) as u8,
+    ];
+    events.push((
+        0,
+        TrackEventKind::Meta(MetaMessage::Tempo(u24::from(us_per_beat))),
+    ));
+
+    // Note on / note off pairs
+    for note in &clip.notes {
+        let on_tick = beat_to_tick(note.start);
+        let off_tick = beat_to_tick(note.start + note.length);
+
+        events.push((
+            on_tick,
+            TrackEventKind::Midi {
+                channel: u4::from(0),
+                message: MidiMessage::NoteOn {
+                    key: u7::from(note.pitch.min(127)),
+                    vel: u7::from(note.velocity.min(127)),
+                },
+            },
+        ));
+        events.push((
+            off_tick,
+            TrackEventKind::Midi {
+                channel: u4::from(0),
+                message: MidiMessage::NoteOff {
+                    key: u7::from(note.pitch.min(127)),
+                    vel: u7::from(0),
+                },
+            },
+        ));
+    }
+
+    // End of track
+    let max_tick = events.iter().map(|(t, _)| *t).max().unwrap_or(0);
+    events.push((
+        max_tick,
+        TrackEventKind::Meta(MetaMessage::EndOfTrack),
+    ));
+
+    // Sort by absolute tick (stable sort keeps note-off before note-on at same tick)
+    events.sort_by_key(|(t, _)| *t);
+
+    // Convert absolute ticks to delta ticks
+    let mut track: Vec<TrackEvent<'static>> = Vec::new();
+    let mut prev_tick: u64 = 0;
+    for (abs_tick, kind) in events {
+        let delta = abs_tick.saturating_sub(prev_tick);
+        track.push(TrackEvent {
+            delta: u28::from(delta as u32),
+            kind,
+        });
+        prev_tick = abs_tick;
+    }
+
+    let smf = Smf {
+        header: Header::new(
+            Format::SingleTrack,
+            Timing::Metrical(u15::from(ppq)),
+        ),
+        tracks: vec![track],
+    };
+
+    smf.save(path).map_err(|e| format!("Failed to save MIDI file: {}", e))
 }

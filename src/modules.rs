@@ -15,6 +15,272 @@
 use std::sync::Arc;
 
 // ═══════════════════════════════════════════════════════════════════
+// MIDI Effect trait — modular, chainable MIDI processing
+// ═══════════════════════════════════════════════════════════════════
+
+/// A single MIDI note event flowing through the MIDI effect chain.
+/// pitch: 0–127, velocity: 0.0–1.0 (normalised), original_pitch: the
+/// pitch before any prior effects (used for note-off tracking).
+#[derive(Clone, Debug)]
+pub struct MidiEvent {
+    pub pitch: u8,
+    pub velocity: f32, // 0.0–1.0
+    /// The source clip/keyboard pitch — set once, never modified by effects.
+    pub original_pitch: u8,
+}
+
+impl MidiEvent {
+    pub fn new(pitch: u8, velocity: f32) -> Self {
+        Self { pitch, velocity, original_pitch: pitch }
+    }
+}
+
+/// Read-only context passed to every MIDI effect process call.
+pub struct MidiContext<'a> {
+    /// Current playback position in beats.
+    pub pos_beats: f64,
+    /// Previous position in beats (for edge detection).
+    pub prev_beats: f64,
+    /// Tempo in BPM (needed for time-based effects like the Arpeggiator).
+    pub bpm: f64,
+    /// Sample rate (for sample-accurate timing).
+    pub sample_rate: f64,
+    /// Flattened (param_id, value) slice from the rack slot.
+    pub params: &'a [(String, f32)],
+}
+
+impl MidiContext<'_> {
+    /// Helper: look up a param by id, returning `default` if not found.
+    pub fn get(&self, key: &str) -> f32 {
+        self.params
+            .iter()
+            .find(|(id, _)| id == key)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0)
+    }
+}
+
+/// A MIDI effect processes a list of MIDI events and returns a (possibly
+/// different) list.  Implementations may hold internal state (e.g. the
+/// Arpeggiator step counter).
+///
+/// # Adding a new MIDI effect
+/// 1. Create a struct implementing this trait.
+/// 2. Register it in `create_midi_effect()` below.
+/// 3. Add a `RackSlot` constructor in `models.rs` + `create_rack_slot_for_module`.
+/// 4. Add it to the "MIDI Effects" category list in `views.rs`.
+///
+/// That's it — **no changes to audio.rs or render.rs**.
+pub trait MidiEffect: Send + Sync {
+    fn name(&self) -> &'static str;
+    /// Process one batch of events.  `ctx` supplies position/BPM/params.
+    /// Returns the transformed event list (may be larger, smaller, or empty).
+    fn process(&mut self, events: Vec<MidiEvent>, ctx: &MidiContext<'_>) -> Vec<MidiEvent>;
+    /// Reset internal state (called on seek / loop boundary).
+    fn reset(&mut self) {}
+    /// True if this effect manages its own voice lifetime (like Arpeggiator).
+    /// The audio engine skips the normal still_active check for these tracks.
+    fn manages_voices(&self) -> bool { false }
+    /// Clone into a fresh instance with zeroed state (for render pipeline).
+    fn fresh(&self) -> Box<dyn MidiEffect>;
+}
+
+/// Instantiate a MIDI effect by name.  Returns `None` for unknown names.
+pub fn create_midi_effect(name: &str) -> Option<Box<dyn MidiEffect>> {
+    match name {
+        "Transpose"    => Some(Box::new(MfxTranspose)),
+        "Velocity"     => Some(Box::new(MfxVelocity)),
+        "Chord"        => Some(Box::new(MfxChord)),
+        "Arpeggiator"  => Some(Box::new(MfxArpeggiator::new())),
+        _              => None,
+    }
+}
+
+// ── Transpose ────────────────────────────────────────────────────────
+
+pub struct MfxTranspose;
+
+impl MidiEffect for MfxTranspose {
+    fn name(&self) -> &'static str { "Transpose" }
+    fn process(&mut self, events: Vec<MidiEvent>, ctx: &MidiContext<'_>) -> Vec<MidiEvent> {
+        let semitones = ctx.get("semitones") as i32;
+        let octave    = ctx.get("octave")    as i32;
+        let shift = semitones + octave * 12;
+        events.into_iter().map(|mut e| {
+            e.pitch = (e.pitch as i32 + shift).clamp(0, 127) as u8;
+            e
+        }).collect()
+    }
+    fn fresh(&self) -> Box<dyn MidiEffect> { Box::new(MfxTranspose) }
+}
+
+// ── Velocity ─────────────────────────────────────────────────────────
+
+pub struct MfxVelocity;
+
+impl MidiEffect for MfxVelocity {
+    fn name(&self) -> &'static str { "Velocity" }
+    fn process(&mut self, events: Vec<MidiEvent>, ctx: &MidiContext<'_>) -> Vec<MidiEvent> {
+        let amount  = ctx.get("amount");
+        let curve   = ctx.get("curve");
+        let min_vel = ctx.get("min_vel") / 127.0;
+        let max_vel = ctx.get("max_vel") / 127.0;
+        events.into_iter().map(|mut e| {
+            let curved = if curve > 0.5 {
+                e.velocity.powf(1.0 / (curve * 2.0).max(0.01))
+            } else {
+                e.velocity.powf((1.0 - curve) * 2.0)
+            };
+            e.velocity = (curved + amount).clamp(min_vel, max_vel);
+            e
+        }).collect()
+    }
+    fn fresh(&self) -> Box<dyn MidiEffect> { Box::new(MfxVelocity) }
+}
+
+// ── Chord ─────────────────────────────────────────────────────────────
+
+pub struct MfxChord;
+
+impl MidiEffect for MfxChord {
+    fn name(&self) -> &'static str { "Chord" }
+    fn process(&mut self, events: Vec<MidiEvent>, ctx: &MidiContext<'_>) -> Vec<MidiEvent> {
+        // chord_type: 0=maj,1=min,2=dom7,3=min7,4=sus4,5=dim
+        let chord_type = ctx.get("type")    as i32;
+        let voicing    = ctx.get("voicing") as i32;
+        let intervals: &[i32] = match chord_type {
+            0 => &[4i32, 7],
+            1 => &[3i32, 7],
+            2 => &[4i32, 7, 10],
+            3 => &[3i32, 7, 10],
+            4 => &[5i32, 7],
+            5 => &[3i32, 6],
+            _ => &[4i32, 7],
+        };
+        let mut out = Vec::with_capacity(events.len() * (1 + intervals.len()));
+        for e in &events {
+            out.push(e.clone()); // keep root
+            for (idx, &interval) in intervals.iter().enumerate() {
+                let octave_shift = match voicing {
+                    0 => 0,
+                    1 => if idx % 2 == 1 { 12 } else { 0 },
+                    2 => (idx as i32) * 12,
+                    _ => 0,
+                };
+                let new_pitch = (e.pitch as i32 + interval + octave_shift).clamp(0, 127) as u8;
+                out.push(MidiEvent { pitch: new_pitch, velocity: e.velocity, original_pitch: e.original_pitch });
+            }
+        }
+        out
+    }
+    fn fresh(&self) -> Box<dyn MidiEffect> { Box::new(MfxChord) }
+}
+
+// ── Arpeggiator ───────────────────────────────────────────────────────
+
+/// Arpeggiator state.  One instance lives per track (not per note).
+pub struct MfxArpeggiator {
+    /// Current step index into the note pool.
+    pub step: usize,
+    /// Beat position when the last step fired (-999 = not yet fired).
+    pub last_beat: f64,
+}
+
+impl MfxArpeggiator {
+    pub fn new() -> Self { Self { step: 0, last_beat: -999.0 } }
+}
+
+impl MidiEffect for MfxArpeggiator {
+    fn name(&self) -> &'static str { "Arpeggiator" }
+
+    /// For the Arpeggiator, `events` is the set of *currently held* notes.
+    /// Returns at most ONE event per call — the next arp step to play —
+    /// or an empty vec if it is not yet time to fire or no notes are held.
+    /// The engine must call this every sample with the held-note set.
+    fn process(&mut self, events: Vec<MidiEvent>, ctx: &MidiContext<'_>) -> Vec<MidiEvent> {
+        if events.is_empty() {
+            self.step = 0;
+            self.last_beat = -999.0;
+            return Vec::new();
+        }
+
+        let rate_beats = ctx.get("rate").max(0.0625) as f64;
+        let octaves    = ctx.get("octaves").max(1.0)  as i32;
+        let pattern    = ctx.get("pattern")           as i32;
+        let vel        = ctx.get("vel").clamp(0.0, 1.0); // optional velocity override (0 = use source)
+
+        // Build note pool (sorted ascending pitches × octaves)
+        let mut pool: Vec<MidiEvent> = Vec::new();
+        let mut pitches: Vec<u8> = events.iter().map(|e| e.pitch).collect();
+        pitches.sort_unstable();
+        pitches.dedup();
+        let base_vel = events.first().map(|e| e.velocity).unwrap_or(0.8);
+        let final_vel = if vel > 0.0 { vel } else { base_vel };
+
+        for oct in 0..octaves {
+            for &p in &pitches {
+                let shifted = (p as i32 + oct * 12).clamp(0, 127) as u8;
+                pool.push(MidiEvent { pitch: shifted, velocity: final_vel, original_pitch: p });
+            }
+        }
+
+        // Apply pattern ordering
+        match pattern {
+            1 => pool.reverse(),
+            2 => {
+                let mut down = pool.clone();
+                down.reverse();
+                if down.len() > 1 {
+                    pool.extend_from_slice(&down[1..down.len() - 1]);
+                }
+            }
+            3 => {
+                // Deterministic shuffle keyed by beat position
+                let seed = (ctx.pos_beats * 1000.0) as u64;
+                for i in (1..pool.len()).rev() {
+                    let j = seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407)
+                        .wrapping_shr(33) as usize
+                        % (i + 1);
+                    pool.swap(i, j);
+                }
+            }
+            _ => {} // 0 = up (default, already sorted)
+        }
+
+        // Check if a new step should fire
+        let fire = if self.last_beat < 0.0 {
+            true // first-ever fire
+        } else {
+            let steps_now  = (ctx.pos_beats   / rate_beats).floor() as usize;
+            let steps_last = (self.last_beat   / rate_beats).floor() as usize;
+            steps_now > steps_last
+        };
+
+        if fire {
+            let idx = self.step % pool.len();
+            let event = pool[idx].clone();
+            self.step = (self.step + 1) % pool.len().max(1);
+            self.last_beat = ctx.pos_beats;
+            vec![event]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn reset(&mut self) {
+        self.step = 0;
+        self.last_beat = -999.0;
+    }
+
+    /// Arpeggiator manages its own voice lifetime — skip still_active checks.
+    fn manages_voices(&self) -> bool { true }
+
+    fn fresh(&self) -> Box<dyn MidiEffect> { Box::new(MfxArpeggiator::new()) }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Voice — per-note state shared by all instrument modules
 // ═══════════════════════════════════════════════════════════════════
 
@@ -70,13 +336,30 @@ pub struct VoiceState {
 
 impl Default for VoiceState {
     fn default() -> Self {
-        // Use a simple hash of the current time for free-running initial phases
-        // This gives each voice a different starting phase, preventing unison phase lock
+        // Live-playing voices get random-ish phases to prevent unison phase lock.
+        // Use time-based seed (only for live playback; render uses with_seed for determinism).
         use std::time::SystemTime;
         let seed = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(42);
+        Self::with_seed(seed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EnvStage {
+    Attack,
+    Decay,
+    Sustain,
+    Release,
+    Off,
+}
+
+impl VoiceState {
+    /// Create a VoiceState with a deterministic seed. Used for offline rendering
+    /// so that two renders of the same project produce identical output.
+    pub fn with_seed(seed: u64) -> Self {
         // Cheap LCG-style hash to spread phases
         let h0 = seed
             .wrapping_mul(6364136223846793005)
@@ -125,15 +408,6 @@ impl Default for VoiceState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum EnvStage {
-    Attack,
-    Decay,
-    Sustain,
-    Release,
-    Off,
-}
-
 impl ModuleVoice {
     pub fn new(freq: f64, velocity: f32, track_idx: usize, pitch: u8) -> Self {
         Self {
@@ -143,7 +417,7 @@ impl ModuleVoice {
             released: false,
             pitch,
             original_pitch: pitch,
-            state: VoiceState::default(),
+            state: VoiceState::with_seed(track_idx as u64 * 2053 + pitch as u64 * 6271),
             preview_samples_remaining: None,
         }
     }
@@ -275,8 +549,8 @@ const SINE_TABLE_SIZE: usize = 2048;
 static SINE_TABLE: std::sync::LazyLock<[f64; SINE_TABLE_SIZE + 1]> =
     std::sync::LazyLock::new(|| {
         let mut table = [0.0f64; SINE_TABLE_SIZE + 1];
-        for i in 0..=SINE_TABLE_SIZE {
-            table[i] = (i as f64 / SINE_TABLE_SIZE as f64 * std::f64::consts::TAU).sin();
+        for (i, entry) in table.iter_mut().enumerate() {
+            *entry = (i as f64 / SINE_TABLE_SIZE as f64 * std::f64::consts::TAU).sin();
         }
         table
     });
@@ -326,7 +600,7 @@ pub fn fast_tan(x: f64) -> f64 {
 #[inline(always)]
 pub fn fast_exp(x: f64) -> f64 {
     // Clamp to prevent overflow/underflow
-    let x = x.max(-700.0).min(700.0);
+    let x = x.clamp(-700.0, 700.0);
     // For very negative values, just return near-zero
     if x < -20.0 {
         // Use a simple rational approximation for deep negatives (envelope release)
@@ -351,7 +625,7 @@ pub fn fast_pow2(x: f64) -> f64 {
     let xf = x - xi as f64;
     // Polynomial approx for 2^xf where xf in [0, 1):
     // 2^x ≈ 1 + 0.6931472 x + 0.2402265 x^2 + 0.0554961 x^3
-    let frac = 1.0 + xf * (0.6931472 + xf * (0.2402265 + xf * 0.0554961));
+    let frac = 1.0 + xf * (std::f64::consts::LN_2 + xf * (0.2402265 + xf * 0.0554961));
     // Multiply by 2^integer_part
     frac * (2.0_f64).powi(xi)
 }
@@ -557,6 +831,7 @@ pub fn osc_morph(shape: f64, phase: f64, dt: f64, noise: &mut u64) -> f64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub fn adsr_tick(
     stage: &mut EnvStage,
@@ -606,7 +881,7 @@ pub fn adsr_tick(
             // Exponential release
             let coeff = fast_exp(-dt / (r * 0.3));
             *level *= coeff;
-            if *level <= 0.0005 {
+            if *level <= 0.00001 {
                 *level = 0.0;
                 *stage = EnvStage::Off;
             }
@@ -797,15 +1072,6 @@ static SUBTRACTIVE_PARAMS: &[ParamDesc] = &[
         max: 8.0,
         options: None,
     },
-    // ── Phase ──
-    ParamDesc {
-        id: "phase_spread",
-        name: "Phase",
-        default: 1.0,
-        min: 0.0,
-        max: 1.0,
-        options: None,
-    },
 ];
 
 impl InstrumentModule for SubtractiveSynth {
@@ -844,13 +1110,6 @@ impl InstrumentModule for SubtractiveSynth {
         let amp_s = param_val(params, "amp_s", 0.8) as f64;
         let amp_r = param_val(params, "amp_r", 0.3) as f64;
         let gain = db_to_lin(param_val(params, "gain", 0.0) as f64);
-        let phase_spread = param_val(params, "phase_spread", 1.0) as f64;
-
-        // ── Phase spread: on first sample, lerp random phases toward 0.0 ──
-        if st.amp_time == 0.0 && st.amp_stage == EnvStage::Attack && st.amp_level == 0.0 {
-            st.phase0 *= phase_spread;
-            st.phase1 *= phase_spread;
-        }
 
         // ── Oscillators with morphing ──
         let osc1_inc = voice.freq / sample_rate;
@@ -967,7 +1226,7 @@ const JP8000_DETUNE_COEFS: [f64; 7] = [0.0, 128.0, -128.0, 408.0, -412.0, 704.0,
 /// Converted to (L_gain, R_gain) via equal-power: L=cos(θ), R=sin(θ), θ=(pan+1)/2 * π/2
 /// With width=1.0 these are the full-spread values; we lerp toward (0.707, 0.707) for width<1.
 const SUPERSAW_PAN_L: [f64; 7] = [
-    0.7071067811865476,  // center: cos(π/4)
+    std::f64::consts::FRAC_1_SQRT_2,  // center: cos(π/4)
     1.0,                 // voice 1 (pan -1.0): cos(0)
     0.0,                 // voice 2 (pan +1.0): cos(π/2)
     0.891006524188368,   // voice 3 (pan -0.6): cos(0.2*π/2)
@@ -976,7 +1235,7 @@ const SUPERSAW_PAN_L: [f64; 7] = [
     0.6087614290087207,  // voice 6 (pan +0.3): cos(0.65*π/2)
 ];
 const SUPERSAW_PAN_R: [f64; 7] = [
-    0.7071067811865476,  // center: sin(π/4)
+    std::f64::consts::FRAC_1_SQRT_2,  // center: sin(π/4)
     0.0,                 // voice 1 (pan -1.0): sin(0)
     1.0,                 // voice 2 (pan +1.0): sin(π/2)
     0.45399049973954675, // voice 3 (pan -0.6): sin(0.2*π/2)
@@ -985,7 +1244,7 @@ const SUPERSAW_PAN_R: [f64; 7] = [
     0.7933533402912352,  // voice 6 (pan +0.3): sin(0.65*π/2)
 ];
 /// Center gain for width=0 (mono): both L and R are 1/√2
-const PAN_CENTER: f64 = 0.7071067811865476;
+const PAN_CENTER: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
 /// Process one JP-8000-style supersaw bank (7 oscillators) with stereo width.
 /// `phases` must be a mutable slice of 7 f64 phases.
@@ -2431,6 +2690,7 @@ impl FxReverb {
         (out_l / n, out_r / n)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_late(
         &mut self,
         input: f64,

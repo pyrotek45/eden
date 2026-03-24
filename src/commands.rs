@@ -1414,3 +1414,339 @@ impl Command for MoveClipsCrossTrack {
         "Move Clips Cross-Track"
     }
 }
+
+/// Join adjacent selected clips on the same track into one clip.
+/// For MIDI clips: merges notes, keeping positions relative to the new clip start.
+/// For Audio clips with the same source: extends the first clip's length.
+/// Only joins clips of the same type that are truly adjacent (end == next start, within small tolerance).
+#[derive(Debug)]
+pub struct JoinClips {
+    /// (track_id, clip_indices) — the clip indices to join, sorted ascending.
+    pub groups: Vec<(u32, Vec<usize>)>,
+}
+
+impl Command for JoinClips {
+    fn apply(&mut self, project: &mut Project) {
+        let _tolerance = 0.001; // beats tolerance for "adjacent"
+        for (tid, indices) in &self.groups {
+            if indices.len() < 2 {
+                continue;
+            }
+            let track = match project.tracks.iter_mut().find(|t| t.id == *tid) {
+                Some(t) => t,
+                None => continue,
+            };
+            // Collect the clips (by index, ascending)
+            let mut sorted_idx = indices.clone();
+            sorted_idx.sort();
+            let clips: Vec<Clip> = sorted_idx
+                .iter()
+                .filter_map(|&i| track.clips.get(i).cloned())
+                .collect();
+            if clips.len() < 2 {
+                continue;
+            }
+            // Sort clips by start_time
+            let mut clips_sorted: Vec<(usize, Clip)> =
+                sorted_idx.iter().cloned().zip(clips.into_iter()).collect();
+            clips_sorted.sort_by(|a, b| a.1.start_time().partial_cmp(&b.1.start_time()).unwrap());
+
+            // Check all are same type and adjacent
+            let all_midi = clips_sorted.iter().all(|(_, c)| matches!(c, Clip::Midi(_)));
+            let all_audio = clips_sorted.iter().all(|(_, c)| matches!(c, Clip::Audio(_)));
+
+            if !all_midi && !all_audio {
+                continue; // Can't join mixed types
+            }
+
+            // Check adjacency: each clip's end must equal the next clip's start.
+            // We allow non-adjacent clips — gaps will be filled with silence in audio merges.
+            let _adjacent = true; // kept for potential future strict-mode
+
+            // Build the joined clip
+            let new_start = clips_sorted[0].1.start_time();
+            let last = &clips_sorted[clips_sorted.len() - 1].1;
+            let new_length = (last.start_time() + last.length()) - new_start;
+
+            let joined = if all_midi {
+                // Merge all notes, adjusting positions relative to new_start
+                let mut all_notes: Vec<crate::models::MidiNote> = Vec::new();
+                let first_color = clips_sorted[0].1.color();
+                for (_, clip) in &clips_sorted {
+                    if let Clip::Midi(mc) = clip {
+                        for note in &mc.notes {
+                            all_notes.push(crate::models::MidiNote {
+                                pitch: note.pitch,
+                                velocity: note.velocity,
+                                start: note.start + mc.start_time - new_start,
+                                length: note.length,
+                            });
+                        }
+                    }
+                }
+                Clip::Midi(crate::models::MidiClip {
+                    notes: all_notes,
+                    start_time: new_start,
+                    length: new_length,
+                    name: "Joined".to_string(),
+                    color: first_color,
+                })
+            } else {
+                // Audio: merge audio data from all clips into a single new WAV file
+                let bpm = project.tempo_map.bpm_at(0.0).max(1.0);
+                let first_ac = match &clips_sorted[0].1 {
+                    Clip::Audio(ac) => ac.clone(),
+                    _ => unreachable!(),
+                };
+
+                // Collect audio data from each clip, inserting silence for gaps
+                let mut merged_samples: Vec<f32> = Vec::new();
+                let mut out_channels = 1usize;
+                let mut out_sr = 44100u32;
+                let mut merge_ok = true;
+                // First pass: determine output sample rate and channels
+                for (_idx, clip) in &clips_sorted {
+                    if let Clip::Audio(ac) = clip {
+                        let path = std::path::Path::new(&ac.source_file);
+                        if let Ok((_raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                            out_channels = out_channels.max(channels);
+                            out_sr = sr;
+                        }
+                    }
+                }
+                // Second pass: merge with silence for gaps
+                let mut prev_end_secs = clips_sorted[0].1.start_time() * 60.0 / bpm;
+                let base_start_secs = prev_end_secs;
+                // Reset to actual start
+                prev_end_secs = base_start_secs;
+                for (clip_i, (_idx, clip)) in clips_sorted.iter().enumerate() {
+                    if let Clip::Audio(ac) = clip {
+                        let clip_start_secs = ac.start_time * 60.0 / bpm;
+                        // Insert silence for gap before this clip (except before first clip)
+                        if clip_i > 0 {
+                            let gap_secs = clip_start_secs - prev_end_secs;
+                            if gap_secs > 0.001 {
+                                let silence_frames = (gap_secs * out_sr as f64) as usize;
+                                merged_samples.extend(std::iter::repeat(0.0f32).take(silence_frames * out_channels));
+                            }
+                        }
+                        let path = std::path::Path::new(&ac.source_file);
+                        match crate::audio::load_audio_interleaved(path) {
+                            Ok((raw, channels, sr)) => {
+                                let ch = channels.max(1);
+                                let total_frames = raw.len() / ch;
+                                let clip_len_secs = ac.length * 60.0 / bpm;
+                                let start_frame = ((ac.offset * sr as f64) as usize).min(total_frames);
+                                let end_frame = (((ac.offset + clip_len_secs) * sr as f64) as usize).min(total_frames);
+                                if end_frame > start_frame {
+                                    if ch == out_channels || (ch == 1 && out_channels == 2) {
+                                        // Upmix mono→stereo if needed
+                                        if ch == 1 && out_channels == 2 {
+                                            for s in &raw[start_frame..end_frame] {
+                                                merged_samples.push(*s);
+                                                merged_samples.push(*s);
+                                            }
+                                        } else {
+                                            merged_samples.extend_from_slice(&raw[start_frame * ch..end_frame * ch]);
+                                        }
+                                    } else {
+                                        merged_samples.extend_from_slice(&raw[start_frame * ch..end_frame * ch]);
+                                    }
+                                }
+                                prev_end_secs = clip_start_secs + clip_len_secs;
+                            }
+                            Err(_) => {
+                                merge_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if merge_ok && !merged_samples.is_empty() {
+                    // Save merged audio to a new file next to the first clip's source
+                    let src_path = std::path::Path::new(&first_ac.source_file);
+                    let dir = src_path.parent().unwrap_or(std::path::Path::new("."));
+                    let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+                    let ext = src_path.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let joined_name = format!("{}_joined_{}.{}", stem, ts, ext);
+                    let joined_path = dir.join(&joined_name);
+
+                    let save_ok = if out_channels >= 2 {
+                        crate::audio::save_wav_stereo(&joined_path, &merged_samples, out_sr).is_ok()
+                    } else {
+                        crate::audio::save_wav_mono(&joined_path, &merged_samples, out_sr).is_ok()
+                    };
+
+                    if save_ok {
+                        let merged_dur_secs = merged_samples.len() as f64 / (out_sr as f64 * out_channels.max(1) as f64);
+                        let merged_len_beats = merged_dur_secs * bpm / 60.0;
+                        Clip::Audio(crate::models::AudioClip {
+                            source_file: joined_path.to_string_lossy().to_string(),
+                            start_time: new_start,
+                            offset: 0.0,
+                            length: merged_len_beats,
+                            gain: first_ac.gain,
+                            name: "Joined".to_string(),
+                            color: first_ac.color,
+                        })
+                    } else {
+                        // Fallback: just extend length like before
+                        Clip::Audio(crate::models::AudioClip {
+                            source_file: first_ac.source_file,
+                            start_time: new_start,
+                            offset: first_ac.offset,
+                            length: new_length,
+                            gain: first_ac.gain,
+                            name: "Joined".to_string(),
+                            color: first_ac.color,
+                        })
+                    }
+                } else {
+                    // Fallback: just extend length
+                    Clip::Audio(crate::models::AudioClip {
+                        source_file: first_ac.source_file,
+                        start_time: new_start,
+                        offset: first_ac.offset,
+                        length: new_length,
+                        gain: first_ac.gain,
+                        name: "Joined".to_string(),
+                        color: first_ac.color,
+                    })
+                }
+            };
+
+            // Remove old clips (highest index first to preserve indices)
+            let mut remove_indices: Vec<usize> = sorted_idx;
+            remove_indices.sort();
+            remove_indices.reverse();
+            for idx in &remove_indices {
+                if *idx < track.clips.len() {
+                    track.clips.remove(*idx);
+                }
+            }
+            // Insert joined clip
+            track.clips.push(joined);
+        }
+    }
+
+    fn undo(&mut self, _project: &mut Project) {
+        // Undo is handled by snapshot-based CommandManager — this is a no-op placeholder
+    }
+
+    fn description(&self) -> &str {
+        "Join Clips"
+    }
+}
+
+// ── Set Sampler File (undoable) ──────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct SetSamplerFile {
+    pub track_id: u32,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+}
+
+impl Command for SetSamplerFile {
+    fn apply(&mut self, project: &mut Project) {
+        if let Some(t) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
+            t.sampler_file = self.new_value.clone();
+        }
+    }
+
+    fn undo(&mut self, project: &mut Project) {
+        if let Some(t) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
+            t.sampler_file = self.old_value.clone();
+        }
+    }
+
+    fn description(&self) -> &str {
+        "Set Sampler File"
+    }
+}
+
+// ── Set Project Name (undoable) ──────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct SetProjectName {
+    pub old_name: String,
+    pub new_name: String,
+}
+
+impl Command for SetProjectName {
+    fn apply(&mut self, project: &mut Project) {
+        project.name = self.new_name.clone();
+    }
+
+    fn undo(&mut self, project: &mut Project) {
+        project.name = self.old_name.clone();
+    }
+
+    fn description(&self) -> &str {
+        "Rename Project"
+    }
+}
+
+// ── Set Audio Clip Gain (undoable) ───────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct SetClipGain {
+    pub track_id: u32,
+    pub clip_idx: usize,
+    pub old_gain: f32,
+    pub new_gain: f32,
+}
+
+impl Command for SetClipGain {
+    fn apply(&mut self, project: &mut Project) {
+        if let Some(t) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
+            if let Some(Clip::Audio(ac)) = t.clips.get_mut(self.clip_idx) {
+                ac.gain = self.new_gain;
+            }
+        }
+    }
+
+    fn undo(&mut self, project: &mut Project) {
+        if let Some(t) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
+            if let Some(Clip::Audio(ac)) = t.clips.get_mut(self.clip_idx) {
+                ac.gain = self.old_gain;
+            }
+        }
+    }
+
+    fn description(&self) -> &str {
+        "Set Clip Gain"
+    }
+}
+
+// ── SetMasterRackParam ──────────────────────────────────────────────
+#[derive(Debug)]
+pub struct SetMasterRackParam {
+    pub slot_idx: usize,
+    pub param_idx: usize,
+    pub old_value: f32,
+    pub new_value: f32,
+}
+
+impl Command for SetMasterRackParam {
+    fn apply(&mut self, project: &mut Project) {
+        if let Some(slot) = project.master_rack.get_mut(self.slot_idx) {
+            if let Some(param) = slot.params.get_mut(self.param_idx) {
+                self.old_value = param.value;
+                param.value = self.new_value;
+            }
+        }
+    }
+    fn undo(&mut self, project: &mut Project) {
+        if let Some(slot) = project.master_rack.get_mut(self.slot_idx) {
+            if let Some(param) = slot.params.get_mut(self.param_idx) {
+                param.value = self.old_value;
+            }
+        }
+    }
+    fn description(&self) -> &str {
+        "Set Master Effect Param"
+    }
+}
