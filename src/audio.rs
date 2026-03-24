@@ -38,7 +38,13 @@ fn run_midi_chain<'a>(
     sample_rate: f64,
 ) -> Vec<MidiEvent> {
     for (fx, params) in chain.iter_mut().zip(param_slices) {
-        let ctx = MidiContext { pos_beats, prev_beats, bpm, sample_rate, params: params.as_slice() };
+        let ctx = MidiContext {
+            pos_beats,
+            prev_beats,
+            bpm,
+            sample_rate,
+            params: params.as_slice(),
+        };
         events = fx.process(events, &ctx);
     }
     events
@@ -159,6 +165,10 @@ pub struct AudioSampleClip {
     pub samples: Arc<Vec<f32>>,
     /// Original sample rate
     pub sample_rate: u32,
+    /// User-controlled fade-in duration in seconds (0 = no fade)
+    pub fade_in: f64,
+    /// User-controlled fade-out duration in seconds (0 = no fade)
+    pub fade_out: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -220,37 +230,53 @@ pub type SharedAudio = Arc<Mutex<AudioShared>>;
 
 /// Save mono f32 samples to a WAV file (32-bit float, mono).
 /// Used by the audio editor for destructive edits (TRIM, CUT).
-pub fn save_wav_mono(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> Result<(), String> {
+pub fn save_wav_mono(
+    path: &std::path::Path,
+    samples: &[f32],
+    sample_rate: u32,
+) -> Result<(), String> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
-    let mut writer = hound::WavWriter::create(path, spec)
-        .map_err(|e| format!("WAV create error: {}", e))?;
+    let mut writer =
+        hound::WavWriter::create(path, spec).map_err(|e| format!("WAV create error: {}", e))?;
     for &s in samples {
-        writer.write_sample(s).map_err(|e| format!("WAV write error: {}", e))?;
+        writer
+            .write_sample(s)
+            .map_err(|e| format!("WAV write error: {}", e))?;
     }
-    writer.finalize().map_err(|e| format!("WAV finalize error: {}", e))?;
+    writer
+        .finalize()
+        .map_err(|e| format!("WAV finalize error: {}", e))?;
     Ok(())
 }
 
 /// Save interleaved stereo f32 samples to a WAV file (32-bit float, stereo).
 /// Used by the audio editor for destructive edits on stereo files.
-pub fn save_wav_stereo(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> Result<(), String> {
+pub fn save_wav_stereo(
+    path: &std::path::Path,
+    samples: &[f32],
+    sample_rate: u32,
+) -> Result<(), String> {
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate,
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
-    let mut writer = hound::WavWriter::create(path, spec)
-        .map_err(|e| format!("WAV create error: {}", e))?;
+    let mut writer =
+        hound::WavWriter::create(path, spec).map_err(|e| format!("WAV create error: {}", e))?;
     for &s in samples {
-        writer.write_sample(s).map_err(|e| format!("WAV write error: {}", e))?;
+        writer
+            .write_sample(s)
+            .map_err(|e| format!("WAV write error: {}", e))?;
     }
-    writer.finalize().map_err(|e| format!("WAV finalize error: {}", e))?;
+    writer
+        .finalize()
+        .map_err(|e| format!("WAV finalize error: {}", e))?;
     Ok(())
 }
 
@@ -293,15 +319,14 @@ pub fn load_wav(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
 /// Load an OGG/Vorbis file and return mono f32 samples + sample rate.
 pub fn load_ogg(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
     use lewton::inside_ogg::OggStreamReader;
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("OGG open error: {}", e))?;
-    let mut reader = OggStreamReader::new(file)
-        .map_err(|e| format!("OGG decode error: {}", e))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("OGG open error: {}", e))?;
+    let mut reader = OggStreamReader::new(file).map_err(|e| format!("OGG decode error: {}", e))?;
     let sample_rate = reader.ident_hdr.audio_sample_rate;
     let channels = reader.ident_hdr.audio_channels as usize;
 
     let mut interleaved: Vec<f32> = Vec::new();
-    while let Some(pck) = reader.read_dec_packet_itl()
+    while let Some(pck) = reader
+        .read_dec_packet_itl()
         .map_err(|e| format!("OGG packet error: {}", e))?
     {
         // lewton returns i16 interleaved samples; normalise to f32
@@ -324,26 +349,36 @@ pub fn load_ogg(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
 /// Load any supported audio file (WAV or OGG/Vorbis) by extension.
 /// Returns mono f32 samples + sample rate.
 pub fn load_audio(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("ogg") => load_ogg(path),
-        _           => load_wav(path),
+        _ => load_wav(path),
     }
 }
 
 /// Load any supported audio file and return interleaved f32 samples, channel count,
 /// and sample rate. Used for stereo waveform display.
 pub fn load_audio_interleaved(path: &std::path::Path) -> Result<(Vec<f32>, usize, u32), String> {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("ogg") => {
             use lewton::inside_ogg::OggStreamReader;
-            let file = std::fs::File::open(path)
-                .map_err(|e| format!("OGG open error: {}", e))?;
-            let mut reader = OggStreamReader::new(file)
-                .map_err(|e| format!("OGG decode error: {}", e))?;
+            let file = std::fs::File::open(path).map_err(|e| format!("OGG open error: {}", e))?;
+            let mut reader =
+                OggStreamReader::new(file).map_err(|e| format!("OGG decode error: {}", e))?;
             let sample_rate = reader.ident_hdr.audio_sample_rate;
             let channels = reader.ident_hdr.audio_channels as usize;
             let mut interleaved: Vec<f32> = Vec::new();
-            while let Some(pck) = reader.read_dec_packet_itl()
+            while let Some(pck) = reader
+                .read_dec_packet_itl()
                 .map_err(|e| format!("OGG packet error: {}", e))?
             {
                 interleaved.extend(pck.iter().map(|&s| s as f32 / 32768.0));
@@ -351,8 +386,8 @@ pub fn load_audio_interleaved(path: &std::path::Path) -> Result<(Vec<f32>, usize
             Ok((interleaved, channels, sample_rate))
         }
         _ => {
-            let reader = hound::WavReader::open(path)
-                .map_err(|e| format!("WAV open error: {}", e))?;
+            let reader =
+                hound::WavReader::open(path).map_err(|e| format!("WAV open error: {}", e))?;
             let spec = reader.spec();
             let channels = spec.channels as usize;
             let sample_rate = spec.sample_rate;
@@ -458,6 +493,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         let mut tail_frames_remaining: usize = 0;
         let mut was_playing = false;
 
+        // Anti-click fade: ramps output from 0→1 after seek/loop boundary
+        // to prevent pops from abrupt waveform discontinuities.
+        const ANTI_CLICK_SAMPLES: usize = 64;
+        let mut anti_click_fade: f64 = 1.0;
+        let mut anti_click_remaining: usize = 0;
+
         // Per-track arp state: (step_index, last_step_beat, held_pitches)
         let mut track_arp_state: Vec<(usize, f64, Vec<u8>)> = Vec::new();
         // Independent beat clock for keyboard/preview arp (always advances at BPM speed,
@@ -507,6 +548,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             }
                             let target = s.position_beats;
                             pos_cb.store(target.to_bits(), Ordering::Relaxed);
+                            // Start anti-click fade-in to prevent pop at new position
+                            anti_click_fade = 0.0;
+                            anti_click_remaining = ANTI_CLICK_SAMPLES;
                         }
                         // Panic: kill all voices immediately
                         if s.panic {
@@ -560,8 +604,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         while track_midi_effects.len() <= *preview_ti {
                             track_midi_effects.push(Vec::new());
                         }
-                        let midi_changed = track.midi_effect_slots.len() != track_midi_effects[*preview_ti].len()
-                            || track.midi_effect_slots.iter().zip(track_midi_effects[*preview_ti].iter())
+                        let midi_changed = track.midi_effect_slots.len()
+                            != track_midi_effects[*preview_ti].len()
+                            || track
+                                .midi_effect_slots
+                                .iter()
+                                .zip(track_midi_effects[*preview_ti].iter())
                                 .any(|((want, _), have)| want != have.name());
                         if midi_changed {
                             let mut new_mfx: Vec<Box<dyn MidiEffect>> = Vec::new();
@@ -579,7 +627,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
 
                         // Check if this track has an arp in its MIDI chain.
-                        let has_arp = track_midi_effects[*preview_ti].iter().any(|m| m.manages_voices());
+                        let has_arp = track_midi_effects[*preview_ti]
+                            .iter()
+                            .any(|m| m.manages_voices());
 
                         if has_arp {
                             // For arp: the keyboard_arp clock will fire voices.
@@ -597,7 +647,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 seed_events,
                                 &mut track_midi_effects[*preview_ti],
                                 track.midi_effect_slots.iter().map(|(_, p)| p),
-                                0.0, 0.0, snap.bpm, sample_rate,
+                                0.0,
+                                0.0,
+                                snap.bpm,
+                                sample_rate,
                             );
 
                             // Spawn voices for all resulting notes (after MIDI effects)
@@ -605,7 +658,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 let pitch = ev.pitch;
                                 let final_vel = ev.velocity;
                                 // Remove any existing preview voices for this track+pitch
-                                voices.retain(|v| !(v.track_idx == *preview_ti && v.pitch == pitch));
+                                voices
+                                    .retain(|v| !(v.track_idx == *preview_ti && v.pitch == pitch));
                                 let mut new_voice = ModuleVoice::new(
                                     midi_to_freq(pitch),
                                     final_vel,
@@ -620,7 +674,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 // In normal mode (click preview), auto-release after 300ms
                                 if !sustain_mode {
                                     if let Some(v) = voices.last_mut() {
-                                        v.preview_samples_remaining = Some((sample_rate * 0.3) as u64);
+                                        v.preview_samples_remaining =
+                                            Some((sample_rate * 0.3) as u64);
                                     }
                                 }
                             }
@@ -681,13 +736,25 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     break;
                                 }
                             }
-                            let src_idx = (preview_pos_local as f64 * preview_ratio) as usize;
+                            let src_pos = preview_pos_local as f64 * preview_ratio;
+                            let src_idx = src_pos as usize;
                             if src_idx >= snap.preview_samples.len() {
                                 if loop_enabled {
                                     preview_pos_local = loop_start;
-                                    let src_idx2 = (preview_pos_local as f64 * preview_ratio) as usize;
-                                    if src_idx2 >= snap.preview_samples.len() { break; }
-                                    let ps = (snap.preview_samples[src_idx2] * snap.master_volume).clamp(-1.0, 1.0);
+                                    let src_pos2 = preview_pos_local as f64 * preview_ratio;
+                                    let src_idx2 = src_pos2 as usize;
+                                    if src_idx2 >= snap.preview_samples.len() {
+                                        break;
+                                    }
+                                    let s0 = snap.preview_samples[src_idx2];
+                                    let s1 = if src_idx2 + 1 < snap.preview_samples.len() {
+                                        snap.preview_samples[src_idx2 + 1]
+                                    } else {
+                                        s0
+                                    };
+                                    let frac = (src_pos2 - src_pos2.floor()) as f32;
+                                    let interp = s0 + (s1 - s0) * frac;
+                                    let ps = (interp * snap.master_volume).clamp(-1.0, 1.0);
                                     s.0 = ps;
                                     s.1 = ps;
                                     preview_pos_local += 1;
@@ -696,8 +763,15 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     break;
                                 }
                             }
-                            let preview_sample = snap.preview_samples[src_idx] * snap.master_volume;
-                            let ps = preview_sample.clamp(-1.0, 1.0);
+                            let s0 = snap.preview_samples[src_idx];
+                            let s1 = if src_idx + 1 < snap.preview_samples.len() {
+                                snap.preview_samples[src_idx + 1]
+                            } else {
+                                s0
+                            };
+                            let frac = (src_pos - src_pos.floor()) as f32;
+                            let interp = s0 + (s1 - s0) * frac;
+                            let ps = (interp * snap.master_volume).clamp(-1.0, 1.0);
                             // Preview samples are mono — write equally to both channels
                             s.0 = ps;
                             s.1 = ps;
@@ -764,7 +838,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             // Only process tracks with an arp
                             let has_arp = ti < track_midi_effects.len()
                                 && track_midi_effects[ti].iter().any(|m| m.manages_voices());
-                            if !has_arp { continue; }
+                            if !has_arp {
+                                continue;
+                            }
                             // Find currently-held pitches for this track from UI snapshot
                             let held: Vec<u8> = cur_held_pitches
                                 .iter()
@@ -774,7 +850,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             if held.is_empty() {
                                 // No keys held — release arp voices and reset step
                                 for v in voices.iter_mut() {
-                                    if v.track_idx == ti && !v.released
+                                    if v.track_idx == ti
+                                        && !v.released
                                         && v.preview_samples_remaining.is_none()
                                     {
                                         v.released = true;
@@ -791,12 +868,15 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 .map(|(_, p)| p);
                             if let Some(arp_params) = arp_params_opt {
                                 let get_arp = |k: &str, def: f32| -> f32 {
-                                    arp_params.iter().find(|(id, _)| id == k)
-                                        .map(|(_, v)| *v).unwrap_or(def)
+                                    arp_params
+                                        .iter()
+                                        .find(|(id, _)| id == k)
+                                        .map(|(_, v)| *v)
+                                        .unwrap_or(def)
                                 };
                                 let rate_beats = get_arp("rate", 0.25) as f64;
-                                let octaves    = get_arp("octaves", 1.0) as i32;
-                                let pattern    = get_arp("pattern", 0.0) as i32;
+                                let octaves = get_arp("octaves", 1.0) as i32;
+                                let pattern = get_arp("pattern", 0.0) as i32;
                                 let vel_default = track.volume;
                                 let (ref mut step, ref mut last_beat) = keyboard_arp_state[ti];
 
@@ -813,31 +893,40 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                         let mut down = pool.clone();
                                         down.reverse();
                                         if down.len() > 1 {
-                                            pool.extend_from_slice(&down[1..down.len()-1]);
+                                            pool.extend_from_slice(&down[1..down.len() - 1]);
                                         }
                                     }
                                     3 => {
                                         let seed = (keyboard_arp_beat * 1000.0) as u64;
                                         for i in (1..pool.len()).rev() {
-                                            let j = (seed.wrapping_mul(6364136223846793005)
-                                                .wrapping_add(1442695040888963407) >> 33) as usize
+                                            let j = (seed
+                                                .wrapping_mul(6364136223846793005)
+                                                .wrapping_add(1442695040888963407)
+                                                >> 33)
+                                                as usize
                                                 % (i + 1);
                                             pool.swap(i, j);
                                         }
                                     }
                                     _ => {}
                                 }
-                                if pool.is_empty() { continue; }
+                                if pool.is_empty() {
+                                    continue;
+                                }
 
-                                let fire = if *last_beat < 0.0 { true } else {
-                                    let steps_now  = (keyboard_arp_beat / rate_beats).floor() as usize;
-                                    let steps_last = (*last_beat         / rate_beats).floor() as usize;
+                                let fire = if *last_beat < 0.0 {
+                                    true
+                                } else {
+                                    let steps_now =
+                                        (keyboard_arp_beat / rate_beats).floor() as usize;
+                                    let steps_last = (*last_beat / rate_beats).floor() as usize;
                                     steps_now > steps_last
                                 };
                                 if fire {
                                     // Release previous arp voice on this track
                                     for v in voices.iter_mut() {
-                                        if v.track_idx == ti && !v.released
+                                        if v.track_idx == ti
+                                            && !v.released
                                             && v.preview_samples_remaining.is_none()
                                         {
                                             v.released = true;
@@ -845,7 +934,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     }
                                     let idx = *step % pool.len();
                                     let pitch = pool[idx];
-                                    voices.push(ModuleVoice::new(midi_to_freq(pitch), vel_default, ti, pitch));
+                                    voices.push(ModuleVoice::new(
+                                        midi_to_freq(pitch),
+                                        vel_default,
+                                        ti,
+                                        pitch,
+                                    ));
                                     *step = (*step + 1) % pool.len().max(1);
                                     *last_beat = keyboard_arp_beat;
                                 }
@@ -908,6 +1002,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 let track = &snap.tracks[ti];
                                 for (fi2, (_, fx_params)) in track.effect_slots.iter().enumerate() {
                                     if fi2 < track_effects[ti].len() {
+                                        track_effects[ti][fi2].1.set_bpm(snap.bpm);
                                         let (ol, or2) = track_effects[ti][fi2].1.process(
                                             per_track_sample[ti].0,
                                             per_track_sample[ti].1,
@@ -933,8 +1028,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 break;
                             }
                             let (tl, tr) = per_track_sample[ti];
-                            let theta = ((track.pan as f64) + 1.0) * 0.5
-                                * std::f64::consts::FRAC_PI_2;
+                            let theta =
+                                ((track.pan as f64) + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
                             let pan_l = crate::modules::fast_cos(theta);
                             let pan_r = crate::modules::fast_sin(theta);
                             mix_l += tl * pan_l * track.volume as f64;
@@ -943,6 +1038,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         // Apply master rack effects to preview stereo mix
                         for (fi, (_, fx_params)) in snap.master_effects.iter().enumerate() {
                             if fi < master_effects.len() {
+                                master_effects[fi].1.set_bpm(snap.bpm);
                                 let (ml, mr) = master_effects[fi].1.process_sidechain(
                                     mix_l,
                                     mix_r,
@@ -1011,9 +1107,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         s.preview_pos = preview_pos_local;
                         let preview_ratio = s.preview_sample_rate as f64 / sample_rate;
                         let src_idx = (preview_pos_local as f64 * preview_ratio) as usize;
-                        let past_end = s.preview_end_sample > 0
-                            && preview_pos_local >= s.preview_end_sample;
-                        if (src_idx >= s.preview_samples.len() || past_end) && s.preview_playing && !s.preview_loop_enabled {
+                        let past_end =
+                            s.preview_end_sample > 0 && preview_pos_local >= s.preview_end_sample;
+                        if (src_idx >= s.preview_samples.len() || past_end)
+                            && s.preview_playing
+                            && !s.preview_loop_enabled
+                        {
                             s.preview_playing = false;
                         }
                         // Update track meters with preview voice levels so FX vis
@@ -1136,7 +1235,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             track_effects[ti] = new_fx;
                         }
                         // ── Sync MIDI effect instances ──
-                        let midi_changed = track.midi_effect_slots.len() != track_midi_effects[ti].len()
+                        let midi_changed = track.midi_effect_slots.len()
+                            != track_midi_effects[ti].len()
                             || track
                                 .midi_effect_slots
                                 .iter()
@@ -1205,6 +1305,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             arp.1 = -999.0;
                             arp.2.clear();
                         }
+                        // Start anti-click fade-in to prevent pop at loop boundary
+                        anti_click_fade = 0.0;
+                        anti_click_remaining = ANTI_CLICK_SAMPLES;
                     }
 
                     // ── Trigger new MIDI note voices ──
@@ -1237,7 +1340,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     && clip_pos >= note_start
                                     && clip_pos < note_start + beats_per_sample * 2.0
                                     && !voices.iter().any(|v| {
-                                        v.track_idx == ti && v.original_pitch == note.pitch && !v.released
+                                        v.track_idx == ti
+                                            && v.original_pitch == note.pitch
+                                            && !v.released
                                     });
                                 if just_started || catch_on_start {
                                     let vel = note.velocity as f32 / 127.0 * track.volume;
@@ -1245,7 +1350,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
 
                                     // Check if arp is in the chain — arp manages its own voices
                                     let has_arp = ti < track_midi_effects.len()
-                                        && track_midi_effects[ti].iter().any(|m| m.manages_voices());
+                                        && track_midi_effects[ti]
+                                            .iter()
+                                            .any(|m| m.manages_voices());
 
                                     if has_arp {
                                         // For arp: accumulate held notes; arp step logic fires below
@@ -1263,7 +1370,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                                 seed_events,
                                                 &mut track_midi_effects[ti],
                                                 track.midi_effect_slots.iter().map(|(_, p)| p),
-                                                pos, pos - beats_per_sample, snap.bpm, sample_rate,
+                                                pos,
+                                                pos - beats_per_sample,
+                                                snap.bpm,
+                                                sample_rate,
                                             )
                                         } else {
                                             vec![MidiEvent::new(note.pitch, vel)]
@@ -1272,10 +1382,17 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                         // Spawn voices for all resulting notes
                                         for ev in final_events {
                                             if !voices.iter().any(|v| {
-                                                v.track_idx == ti && v.pitch == ev.pitch && !v.released
+                                                v.track_idx == ti
+                                                    && v.pitch == ev.pitch
+                                                    && !v.released
                                             }) {
                                                 let freq = midi_to_freq(ev.pitch);
-                                                let mut voice = ModuleVoice::new(freq, ev.velocity, ti, ev.pitch);
+                                                let mut voice = ModuleVoice::new(
+                                                    freq,
+                                                    ev.velocity,
+                                                    ti,
+                                                    ev.pitch,
+                                                );
                                                 voice.original_pitch = note.pitch;
                                                 voices.push(voice);
                                             }
@@ -1370,7 +1487,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                             true
                                         } else {
                                             let steps_now = (pos / rate_beats).floor() as usize;
-                                            let steps_last = (*last_beat / rate_beats).floor() as usize;
+                                            let steps_last =
+                                                (*last_beat / rate_beats).floor() as usize;
                                             steps_now > steps_last
                                         };
 
@@ -1383,7 +1501,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                             let pool_step = *step % pool.len();
                                             let pitch = pool[pool_step];
                                             let freq = midi_to_freq(pitch);
-                                            voices.push(ModuleVoice::new(freq, vel_default, ti, pitch));
+                                            voices.push(ModuleVoice::new(
+                                                freq,
+                                                vel_default,
+                                                ti,
+                                                pitch,
+                                            ));
                                             *step = (*step + 1) % pool.len().max(1);
                                             *last_beat = pos;
                                         }
@@ -1419,7 +1542,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                         // Tracks with arp-like effects manage their own voice lifecycle.
                         let has_arp = voice.track_idx < track_midi_effects.len()
-                            && track_midi_effects[voice.track_idx].iter().any(|m| m.manages_voices());
+                            && track_midi_effects[voice.track_idx]
+                                .iter()
+                                .any(|m| m.manages_voices());
                         if has_arp {
                             continue;
                         }
@@ -1515,9 +1640,18 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             let clip_pos_secs = clip_pos_beats / beats_per_sec;
                             // Add the offset (already in seconds) to get position in audio file
                             let audio_pos_secs = clip_pos_secs + aclip.offset_secs;
-                            let src_idx = (audio_pos_secs * aclip.sample_rate as f64) as usize;
+                            let src_pos = audio_pos_secs * aclip.sample_rate as f64;
+                            let src_idx = src_pos as usize;
                             if src_idx < aclip.samples.len() {
-                                let mut s = aclip.samples[src_idx] as f64
+                                // Linear interpolation between samples for click-free resampling
+                                let frac = src_pos - src_pos.floor();
+                                let s0 = aclip.samples[src_idx] as f64;
+                                let s1 = if src_idx + 1 < aclip.samples.len() {
+                                    aclip.samples[src_idx + 1] as f64
+                                } else {
+                                    s0
+                                };
+                                let mut s = (s0 + (s1 - s0) * frac)
                                     * aclip.gain as f64
                                     * track.volume as f64;
 
@@ -1527,7 +1661,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 // happen at clip start/end regardless of offset.
                                 let fade_len = 64usize;
                                 let clip_sample = (clip_pos_secs * sample_rate) as usize;
-                                let clip_len_samples = (aclip.length_beats / beats_per_sec * sample_rate) as usize;
+                                let clip_len_samples =
+                                    (aclip.length_beats / beats_per_sec * sample_rate) as usize;
                                 // Fade in at clip start
                                 if clip_sample < fade_len {
                                     s *= clip_sample as f64 / fade_len as f64;
@@ -1536,6 +1671,25 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 let remaining = clip_len_samples.saturating_sub(clip_sample);
                                 if remaining < fade_len {
                                     s *= remaining as f64 / fade_len as f64;
+                                }
+
+                                // User-controlled fade-in
+                                if aclip.fade_in > 0.0 {
+                                    let fade_in_samples = (aclip.fade_in * sample_rate) as usize;
+                                    if fade_in_samples > 0 && clip_sample < fade_in_samples {
+                                        s *= clip_sample as f64 / fade_in_samples as f64;
+                                    }
+                                }
+                                // User-controlled fade-out
+                                if aclip.fade_out > 0.0 {
+                                    let fade_out_samples = (aclip.fade_out * sample_rate) as usize;
+                                    if fade_out_samples > 0 && clip_len_samples > fade_out_samples {
+                                        let fade_out_start = clip_len_samples - fade_out_samples;
+                                        if clip_sample >= fade_out_start {
+                                            s *= (clip_len_samples - clip_sample) as f64
+                                                / fade_out_samples as f64;
+                                        }
+                                    }
                                 }
 
                                 if ti < num_tracks {
@@ -1576,6 +1730,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         // Process through each effect module
                         for (fi, (_, fx_params)) in track.effect_slots.iter().enumerate() {
                             if fi < track_effects[ti].len() {
+                                // Provide BPM to beat-synced effects (e.g. delay)
+                                track_effects[ti][fi].1.set_bpm(snap.bpm);
                                 // Resolve sidechain source signal (default: self)
                                 let sc_ti = track.effect_sidechain_track.get(fi).copied().flatten();
                                 let (key_l, key_r) = if let Some(sc_idx) = sc_ti {
@@ -1635,6 +1791,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
                     for (fi, (_, fx_params)) in snap.master_effects.iter().enumerate() {
                         if fi < master_effects.len() {
+                            master_effects[fi].1.set_bpm(snap.bpm);
                             let (ml, mr) = master_effects[fi].1.process_sidechain(
                                 mix_l,
                                 mix_r,
@@ -1655,6 +1812,17 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
 
                     mix_l *= snap.master_volume as f64;
                     mix_r *= snap.master_volume as f64;
+
+                    // Anti-click fade: ramp output up from 0 after seek/loop boundary
+                    if anti_click_remaining > 0 {
+                        mix_l *= anti_click_fade;
+                        mix_r *= anti_click_fade;
+                        anti_click_fade += 1.0 / ANTI_CLICK_SAMPLES as f64;
+                        if anti_click_fade > 1.0 {
+                            anti_click_fade = 1.0;
+                        }
+                        anti_click_remaining -= 1;
+                    }
 
                     frame_samples_l[frame_idx] = mix_l.clamp(-1.0, 1.0) as f32;
                     frame_samples_r[frame_idx] = mix_r.clamp(-1.0, 1.0) as f32;
@@ -1694,13 +1862,25 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 break;
                             }
                         }
-                        let src_idx = (preview_pos_local as f64 * preview_ratio) as usize;
+                        let src_pos = preview_pos_local as f64 * preview_ratio;
+                        let src_idx = src_pos as usize;
                         if src_idx >= snap.preview_samples.len() {
                             if loop_enabled {
                                 preview_pos_local = loop_start;
-                                let src_idx2 = (preview_pos_local as f64 * preview_ratio) as usize;
-                                if src_idx2 >= snap.preview_samples.len() { break; }
-                                let ps = (snap.preview_samples[src_idx2] * snap.master_volume).clamp(-1.0, 1.0);
+                                let src_pos2 = preview_pos_local as f64 * preview_ratio;
+                                let src_idx2 = src_pos2 as usize;
+                                if src_idx2 >= snap.preview_samples.len() {
+                                    break;
+                                }
+                                let s0 = snap.preview_samples[src_idx2];
+                                let s1 = if src_idx2 + 1 < snap.preview_samples.len() {
+                                    snap.preview_samples[src_idx2 + 1]
+                                } else {
+                                    s0
+                                };
+                                let frac = (src_pos2 - src_pos2.floor()) as f32;
+                                let interp = s0 + (s1 - s0) * frac;
+                                let ps = (interp * snap.master_volume).clamp(-1.0, 1.0);
                                 frame_samples_l[fi] = (frame_samples_l[fi] + ps).clamp(-1.0, 1.0);
                                 frame_samples_r[fi] = (frame_samples_r[fi] + ps).clamp(-1.0, 1.0);
                                 preview_pos_local += 1;
@@ -1709,7 +1889,15 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 break;
                             }
                         }
-                        let preview_sample = snap.preview_samples[src_idx] * snap.master_volume;
+                        let s0 = snap.preview_samples[src_idx];
+                        let s1 = if src_idx + 1 < snap.preview_samples.len() {
+                            snap.preview_samples[src_idx + 1]
+                        } else {
+                            s0
+                        };
+                        let frac = (src_pos - src_pos.floor()) as f32;
+                        let interp = s0 + (s1 - s0) * frac;
+                        let preview_sample = interp * snap.master_volume;
                         frame_samples_l[fi] =
                             (frame_samples_l[fi] + preview_sample).clamp(-1.0, 1.0);
                         frame_samples_r[fi] =
@@ -1827,9 +2015,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     if !s.preview_samples.is_empty() && s.preview_playing {
                         let preview_ratio = s.preview_sample_rate as f64 / sample_rate;
                         let src_idx = (preview_pos_local as f64 * preview_ratio) as usize;
-                        let past_end = s.preview_end_sample > 0
-                            && preview_pos_local >= s.preview_end_sample;
-                        if (src_idx >= s.preview_samples.len() || past_end) && !s.preview_loop_enabled {
+                        let past_end =
+                            s.preview_end_sample > 0 && preview_pos_local >= s.preview_end_sample;
+                        if (src_idx >= s.preview_samples.len() || past_end)
+                            && !s.preview_loop_enabled
+                        {
                             s.preview_playing = false;
                         }
                     }

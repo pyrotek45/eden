@@ -273,7 +273,10 @@ fn main() {
                 Event::Quit { .. } => {
                     state.running = false;
                 }
-                Event::Window { win_event: sdl2::event::WindowEvent::Resized(_w, _h), .. } => {
+                Event::Window {
+                    win_event: sdl2::event::WindowEvent::Resized(_w, _h),
+                    ..
+                } => {
                     // Dimensions will be recalculated from output_size()/scale in the render loop.
                     // Don't set them here to avoid scale mismatch on HiDPI.
                 }
@@ -334,7 +337,8 @@ fn main() {
                                     {
                                         state.mode = AppMode::Arrangement;
                                     }
-                                } else if state.focused_panel == crate::state::FocusedPanel::AudioEditor
+                                } else if state.focused_panel
+                                    == crate::state::FocusedPanel::AudioEditor
                                     && state.audio_editor_selection.is_some()
                                 {
                                     state.audio_editor_selection = None;
@@ -369,33 +373,54 @@ fn main() {
                                         state.sample_preview_end_sample = 0;
                                     } else {
                                         // Start audio editor playback from playhead or selection
-                                        let source_file: Option<String> = state.selected_clip.and_then(|(tid, cidx)| {
-                                            state.project.tracks.iter().find(|t| t.id == tid)
-                                                .and_then(|t| t.clips.get(cidx))
-                                                .and_then(|c| if let crate::models::Clip::Audio(ac) = c {
-                                                    Some(ac.source_file.clone())
-                                                } else { None })
-                                        });
+                                        let source_file: Option<String> =
+                                            state.selected_clip.and_then(|(tid, cidx)| {
+                                                state
+                                                    .project
+                                                    .tracks
+                                                    .iter()
+                                                    .find(|t| t.id == tid)
+                                                    .and_then(|t| t.clips.get(cidx))
+                                                    .and_then(|c| {
+                                                        if let crate::models::Clip::Audio(ac) = c {
+                                                            Some(ac.source_file.clone())
+                                                        } else {
+                                                            None
+                                                        }
+                                                    })
+                                            });
                                         if let Some(sf) = source_file {
                                             if !sf.is_empty() {
                                                 let preview_sr = 44100usize;
-                                                if let Some((sel_s, sel_e)) = state.audio_editor_selection {
+                                                if let Some((sel_s, sel_e)) =
+                                                    state.audio_editor_selection
+                                                {
                                                     let s = sel_s.min(sel_e).max(0.0);
                                                     let e = sel_s.max(sel_e);
                                                     state.audio_editor_playhead = s;
-                                                    state.sample_preview_start_sample = (s * preview_sr as f64) as usize;
-                                                    state.sample_preview_end_sample = (e * preview_sr as f64) as usize;
+                                                    state.sample_preview_start_sample =
+                                                        (s * preview_sr as f64) as usize;
+                                                    state.sample_preview_end_sample =
+                                                        (e * preview_sr as f64) as usize;
                                                 } else {
                                                     let start = state.audio_editor_playhead;
-                                                    state.sample_preview_start_sample = (start * preview_sr as f64) as usize;
-                                                    if state.audio_editor_loop_enabled && state.audio_editor_loop_end > state.audio_editor_loop_start {
-                                                        state.sample_preview_end_sample = (state.audio_editor_loop_end * preview_sr as f64) as usize;
+                                                    state.sample_preview_start_sample =
+                                                        (start * preview_sr as f64) as usize;
+                                                    if state.audio_editor_loop_enabled
+                                                        && state.audio_editor_loop_end
+                                                            > state.audio_editor_loop_start
+                                                    {
+                                                        state.sample_preview_end_sample = (state
+                                                            .audio_editor_loop_end
+                                                            * preview_sr as f64)
+                                                            as usize;
                                                     } else {
                                                         state.sample_preview_end_sample = 0;
                                                     }
                                                 }
                                                 state.audio_editor_playing = true;
-                                                state.sample_preview_path = Some(std::path::PathBuf::from(&sf));
+                                                state.sample_preview_path =
+                                                    Some(std::path::PathBuf::from(&sf));
                                                 state.sample_preview_trigger = true;
                                             }
                                         }
@@ -466,20 +491,42 @@ fn main() {
                                     }
                                 }
                             }
-                            Keycode::Z if input.ctrl() && input.shift() && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                            Keycode::Z
+                                if input.ctrl()
+                                    && input.shift()
+                                    && state.focused_panel
+                                        == crate::state::FocusedPanel::AudioEditor =>
+                            {
                                 // Audio editor redo
-                                if let Some((src, backup, desc, proj_snapshot)) = state.audio_redo_stack.pop() {
+                                if let Some((src, backup, desc, proj_snapshot)) =
+                                    state.audio_redo_stack.pop()
+                                {
                                     // Current state becomes undo backup
                                     let sp = std::path::Path::new(&src);
                                     let dir = sp.parent().unwrap_or(std::path::Path::new("."));
-                                    let stem = sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
-                                    let ext = sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
-                                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-                                    let undo_backup = dir.join(format!(".{}_undo_{}.{}", stem, ts, ext));
+                                    let stem =
+                                        sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+                                    let ext =
+                                        sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+                                    let ts = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0);
+                                    let undo_backup =
+                                        dir.join(format!(".{}_undo_{}.{}", stem, ts, ext));
                                     // Save current project state before redo overwrites it
-                                    let current_proj = if proj_snapshot.is_some() { Some(state.project.clone()) } else { None };
+                                    let current_proj = if proj_snapshot.is_some() {
+                                        Some(state.project.clone())
+                                    } else {
+                                        None
+                                    };
                                     if std::fs::copy(&src, &undo_backup).is_ok() {
-                                        state.audio_undo_stack.push((src.clone(), undo_backup.to_string_lossy().to_string(), desc.clone(), current_proj));
+                                        state.audio_undo_stack.push((
+                                            src.clone(),
+                                            undo_backup.to_string_lossy().to_string(),
+                                            desc.clone(),
+                                            current_proj,
+                                        ));
                                     }
                                     if std::fs::copy(&backup, &src).is_ok() {
                                         let _ = std::fs::remove_file(&backup);
@@ -497,20 +544,41 @@ fn main() {
                                     state.push_status("Nothing to redo");
                                 }
                             }
-                            Keycode::Z if input.ctrl() && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                            Keycode::Z
+                                if input.ctrl()
+                                    && state.focused_panel
+                                        == crate::state::FocusedPanel::AudioEditor =>
+                            {
                                 // Audio editor undo
-                                if let Some((src, backup, desc, proj_snapshot)) = state.audio_undo_stack.pop() {
+                                if let Some((src, backup, desc, proj_snapshot)) =
+                                    state.audio_undo_stack.pop()
+                                {
                                     // Current state becomes redo backup
                                     let sp = std::path::Path::new(&src);
                                     let dir = sp.parent().unwrap_or(std::path::Path::new("."));
-                                    let stem = sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
-                                    let ext = sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
-                                    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-                                    let redo_backup = dir.join(format!(".{}_redo_{}.{}", stem, ts, ext));
+                                    let stem =
+                                        sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+                                    let ext =
+                                        sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+                                    let ts = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0);
+                                    let redo_backup =
+                                        dir.join(format!(".{}_redo_{}.{}", stem, ts, ext));
                                     // Save current project state before undo overwrites it
-                                    let current_proj = if proj_snapshot.is_some() { Some(state.project.clone()) } else { None };
+                                    let current_proj = if proj_snapshot.is_some() {
+                                        Some(state.project.clone())
+                                    } else {
+                                        None
+                                    };
                                     if std::fs::copy(&src, &redo_backup).is_ok() {
-                                        state.audio_redo_stack.push((src.clone(), redo_backup.to_string_lossy().to_string(), desc.clone(), current_proj));
+                                        state.audio_redo_stack.push((
+                                            src.clone(),
+                                            redo_backup.to_string_lossy().to_string(),
+                                            desc.clone(),
+                                            current_proj,
+                                        ));
                                     }
                                     if std::fs::copy(&backup, &src).is_ok() {
                                         let _ = std::fs::remove_file(&backup);
@@ -547,27 +615,65 @@ fn main() {
                                 state.commands.redo(&mut state.project);
                             }
                             // ── Audio editor tool shortcuts ──────────────────
-                            Keycode::A if !input.ctrl() && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                            Keycode::A
+                                if !input.ctrl()
+                                    && state.focused_panel
+                                        == crate::state::FocusedPanel::AudioEditor =>
+                            {
                                 // Select All — select the entire waveform
                                 let total = state.selected_clip.and_then(|(tid, cidx)| {
-                                    state.project.tracks.iter().find(|t| t.id == tid)
+                                    state
+                                        .project
+                                        .tracks
+                                        .iter()
+                                        .find(|t| t.id == tid)
                                         .and_then(|t| t.clips.get(cidx))
-                                        .and_then(|c| if let crate::models::Clip::Audio(ac) = c {
-                                            let path = std::path::Path::new(&ac.source_file);
-                                            crate::audio::load_audio_interleaved(path).ok().map(|(raw, ch, sr)| {
-                                                raw.len() as f64 / (ch.max(1) as f64 * sr as f64)
-                                            })
-                                        } else { None })
+                                        .and_then(|c| {
+                                            if let crate::models::Clip::Audio(ac) = c {
+                                                let path = std::path::Path::new(&ac.source_file);
+                                                crate::audio::load_audio_interleaved(path).ok().map(
+                                                    |(raw, ch, sr)| {
+                                                        raw.len() as f64
+                                                            / (ch.max(1) as f64 * sr as f64)
+                                                    },
+                                                )
+                                            } else {
+                                                None
+                                            }
+                                        })
                                 });
                                 if let Some(dur) = total {
                                     state.audio_editor_selection = Some((0.0, dur));
                                     state.push_status("Selected entire waveform");
                                 }
                             }
-                            Keycode::T if !input.ctrl() && !piano_consumes && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                            Keycode::S
+                                if !input.ctrl()
+                                    && state.focused_panel
+                                        == crate::state::FocusedPanel::AudioEditor =>
+                            {
+                                // Toggle audio editor snap
+                                state.audio_editor_snap_enabled = !state.audio_editor_snap_enabled;
+                                let label = if state.audio_editor_snap_enabled {
+                                    "Snap ON"
+                                } else {
+                                    "Snap OFF"
+                                };
+                                state.push_status(label);
+                            }
+                            Keycode::T
+                                if !input.ctrl()
+                                    && !piano_consumes
+                                    && state.focused_panel
+                                        == crate::state::FocusedPanel::AudioEditor =>
+                            {
                                 state.push_status("Press TRIM button or use toolbar");
                             }
-                            Keycode::N if !input.ctrl() && state.focused_panel == crate::state::FocusedPanel::AudioEditor => {
+                            Keycode::N
+                                if !input.ctrl()
+                                    && state.focused_panel
+                                        == crate::state::FocusedPanel::AudioEditor =>
+                            {
                                 state.push_status("Press NORM button or use toolbar");
                             }
                             Keycode::T if !input.ctrl() && !piano_consumes => {
@@ -632,10 +738,8 @@ fn main() {
                                         groups.entry(*tid).or_default().push(*ci);
                                     }
                                     // Only keep groups with 2+ clips
-                                    let join_groups: Vec<(u32, Vec<usize>)> = groups
-                                        .into_iter()
-                                        .filter(|(_, v)| v.len() >= 2)
-                                        .collect();
+                                    let join_groups: Vec<(u32, Vec<usize>)> =
+                                        groups.into_iter().filter(|(_, v)| v.len() >= 2).collect();
                                     if !join_groups.is_empty() {
                                         state.commands.execute(
                                             Box::new(crate::commands::JoinClips {
@@ -648,7 +752,9 @@ fn main() {
                                         state.dirty = true;
                                         state.push_status("Joined clips");
                                     } else {
-                                        state.push_status("Select 2+ clips on the same track to join");
+                                        state.push_status(
+                                            "Select 2+ clips on the same track to join",
+                                        );
                                     }
                                 } else {
                                     state.push_status("Select 2+ adjacent clips to join");
@@ -1199,7 +1305,8 @@ fn main() {
                                             );
                                             if let Some(ref shared) = audio_shared {
                                                 if let Ok(mut audio) = shared.try_lock() {
-                                                    audio.preview_samples = std::sync::Arc::new(samples);
+                                                    audio.preview_samples =
+                                                        std::sync::Arc::new(samples);
                                                     audio.preview_sample_rate = sr;
                                                     audio.preview_pos = 0;
                                                     audio.preview_playing = true;
@@ -1228,36 +1335,39 @@ fn main() {
                         }
                     }
                 } else {
-                    match crate::audio::load_audio(path) {
-                        Ok((samples, sr)) => {
-                            println!(
-                                "[preview] Loaded {} samples at {}Hz from {:?}",
-                                samples.len(),
-                                sr,
-                                path
-                            );
-                            if let Some(ref shared) = audio_shared {
-                                if let Ok(mut audio) = shared.try_lock() {
-                                    audio.preview_samples = std::sync::Arc::new(samples);
-                                    audio.preview_sample_rate = sr;
-                                    audio.preview_pos = state.sample_preview_start_sample;
-                                    audio.preview_end_sample = state.sample_preview_end_sample;
-                                    // Set loop state from audio editor
-                                    audio.preview_loop_enabled = state.audio_editor_loop_enabled
-                                        && state.audio_editor_loop_end > state.audio_editor_loop_start
-                                        && state.focused_panel == crate::state::FocusedPanel::AudioEditor;
-                                    audio.preview_loop_start = if audio.preview_loop_enabled {
-                                        (state.audio_editor_loop_start * sr as f64) as usize
-                                    } else {
-                                        0
-                                    };
-                                    audio.preview_playing = true;
-                                }
+                    // Use the audio sample cache so we don't re-read from disk
+                    let path_str = path.to_string_lossy().to_string();
+                    if !audio_sample_cache.contains_key(&path_str) {
+                        match crate::audio::load_audio(path) {
+                            Ok((samples, sr)) => {
+                                audio_sample_cache
+                                    .insert(path_str.clone(), (std::sync::Arc::new(samples), sr));
+                            }
+                            Err(e) => {
+                                eprintln!("[preview] Failed to load {:?}: {}", path, e);
+                                state.sample_preview_path = None;
                             }
                         }
-                        Err(e) => {
-                            eprintln!("[preview] Failed to load {:?}: {}", path, e);
-                            state.sample_preview_path = None;
+                    }
+                    if let Some((samples, sr)) = audio_sample_cache.get(&path_str) {
+                        if let Some(ref shared) = audio_shared {
+                            if let Ok(mut audio) = shared.try_lock() {
+                                audio.preview_samples = samples.clone();
+                                audio.preview_sample_rate = *sr;
+                                audio.preview_pos = state.sample_preview_start_sample;
+                                audio.preview_end_sample = state.sample_preview_end_sample;
+                                // Set loop state from audio editor
+                                audio.preview_loop_enabled = state.audio_editor_loop_enabled
+                                    && state.audio_editor_loop_end > state.audio_editor_loop_start
+                                    && state.focused_panel
+                                        == crate::state::FocusedPanel::AudioEditor;
+                                audio.preview_loop_start = if audio.preview_loop_enabled {
+                                    (state.audio_editor_loop_start * (*sr) as f64) as usize
+                                } else {
+                                    0
+                                };
+                                audio.preview_playing = true;
+                            }
                         }
                     }
                 }
@@ -1306,9 +1416,7 @@ fn main() {
                 .project
                 .tracks
                 .iter()
-                .filter(|t| {
-                    t.track_type == models::TrackType::Automation && t.automation_enabled
-                })
+                .filter(|t| t.track_type == models::TrackType::Automation && t.automation_enabled)
                 .flat_map(|t| {
                     t.clips.iter().filter_map(|c| {
                         if let models::Clip::Automation(ac) = c {
@@ -1338,8 +1446,7 @@ fn main() {
                                 if dt <= 0.0 {
                                     before.value
                                 } else {
-                                    let t =
-                                        ((clip_pos - before.time) / dt).clamp(0.0, 1.0) as f32;
+                                    let t = ((clip_pos - before.time) / dt).clamp(0.0, 1.0) as f32;
                                     before.value + t * (after.value - before.value)
                                 }
                             };
@@ -1363,8 +1470,7 @@ fn main() {
                     continue;
                 };
                 let param_id = parts[2];
-                if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id)
-                {
+                if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
                     if let Some(slot) = track.rack.iter_mut().find(|s| s.slot_id == slot_id) {
                         if let Some(param) = slot.params.iter_mut().find(|p| p.id == param_id) {
                             let mapped = param.min + auto_val * (param.max - param.min);
@@ -1380,7 +1486,8 @@ fn main() {
             }
 
             // Build track data outside the lock
-            let mut prepared_tracks: Vec<audio::AudioTrack> = Vec::with_capacity(state.project.tracks.len());
+            let mut prepared_tracks: Vec<audio::AudioTrack> =
+                Vec::with_capacity(state.project.tracks.len());
             for track in &state.project.tracks {
                 let mut midi_clips = Vec::new();
                 let mut audio_clips_vec = Vec::new();
@@ -1534,6 +1641,8 @@ fn main() {
                                     offset_secs: ac.offset,
                                     samples: samples.clone(),
                                     sample_rate: *sr,
+                                    fade_in: ac.fade_in,
+                                    fade_out: ac.fade_out,
                                 });
                             }
                         }
@@ -1571,21 +1680,26 @@ fn main() {
                 .collect();
 
             // Prepare keyboard pitches outside the lock
-            let prepared_held_pitches: Vec<(usize, Vec<u8>)> = if state.piano_keyboard_mode && !state.piano_keyboard_held.is_empty() {
-                if let Some(tid) = state.selected_track.or_else(|| state.selected_clip.map(|(t, _)| t)) {
-                    if let Some(ti) = state.project.tracks.iter().position(|t| t.id == tid) {
-                        let mut pitches: Vec<u8> = state.piano_keyboard_held.iter().copied().collect();
-                        pitches.sort_unstable();
-                        vec![(ti, pitches)]
+            let prepared_held_pitches: Vec<(usize, Vec<u8>)> =
+                if state.piano_keyboard_mode && !state.piano_keyboard_held.is_empty() {
+                    if let Some(tid) = state
+                        .selected_track
+                        .or_else(|| state.selected_clip.map(|(t, _)| t))
+                    {
+                        if let Some(ti) = state.project.tracks.iter().position(|t| t.id == tid) {
+                            let mut pitches: Vec<u8> =
+                                state.piano_keyboard_held.iter().copied().collect();
+                            pitches.sort_unstable();
+                            vec![(ti, pitches)]
+                        } else {
+                            Vec::new()
+                        }
                     } else {
                         Vec::new()
                     }
                 } else {
                     Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
+                };
 
             // ── Now acquire the lock briefly just to swap data in/out ──
             if let Ok(mut audio) = shared.lock() {

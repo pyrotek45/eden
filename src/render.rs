@@ -34,7 +34,13 @@ fn run_midi_chain<'a>(
     sample_rate: f64,
 ) -> Vec<MidiEvent> {
     for (fx, params) in chain.iter_mut().zip(param_slices) {
-        let ctx = MidiContext { pos_beats, prev_beats, bpm, sample_rate, params: params.as_slice() };
+        let ctx = MidiContext {
+            pos_beats,
+            prev_beats,
+            bpm,
+            sample_rate,
+            params: params.as_slice(),
+        };
         events = fx.process(events, &ctx);
     }
     events
@@ -363,9 +369,13 @@ pub fn render_to_buffer(
                                 vec![MidiEvent::new(note.pitch, vel)]
                             };
                             for ev in final_events {
-                                if !track_voices[ti].iter().any(|v| v.pitch == ev.pitch && !v.released) {
+                                if !track_voices[ti]
+                                    .iter()
+                                    .any(|v| v.pitch == ev.pitch && !v.released)
+                                {
                                     let freq = midi_to_freq(ev.pitch);
-                                    let mut voice = ModuleVoice::new(freq, ev.velocity, ti, ev.pitch);
+                                    let mut voice =
+                                        ModuleVoice::new(freq, ev.velocity, ti, ev.pitch);
                                     voice.original_pitch = note.pitch;
                                     track_voices[ti].push(voice);
                                 }
@@ -387,13 +397,21 @@ pub fn render_to_buffer(
             let has_arp_instance = ti < track_midi_effects.len()
                 && track_midi_effects[ti].iter().any(|m| m.manages_voices());
             if has_arp_instance {
-                if let Some((_, arp_params)) = track.midi_effect_slots.iter().find(|(n, _)| n == "Arpeggiator") {
+                if let Some((_, arp_params)) = track
+                    .midi_effect_slots
+                    .iter()
+                    .find(|(n, _)| n == "Arpeggiator")
+                {
                     let get_arp = |k: &str, d: f32| -> f32 {
-                        arp_params.iter().find(|(id, _)| id == k).map(|(_, v)| *v).unwrap_or(d)
+                        arp_params
+                            .iter()
+                            .find(|(id, _)| id == k)
+                            .map(|(_, v)| *v)
+                            .unwrap_or(d)
                     };
                     let rate_beats = get_arp("rate", 0.25) as f64;
-                    let octaves    = get_arp("octaves", 1.0) as i32;
-                    let pattern    = get_arp("pattern", 0.0) as i32;
+                    let octaves = get_arp("octaves", 1.0) as i32;
+                    let pattern = get_arp("pattern", 0.0) as i32;
                     let vel_default = track.volume;
 
                     let (ref mut step, ref mut last_beat) = track_arp_state[ti];
@@ -401,10 +419,13 @@ pub fn render_to_buffer(
                     let mut active_pitches: Vec<u8> = Vec::new();
                     for clip in &track.midi_clips {
                         let clip_end = clip.start_beats + clip.length_beats;
-                        if pos_beats < clip.start_beats || pos_beats >= clip_end { continue; }
+                        if pos_beats < clip.start_beats || pos_beats >= clip_end {
+                            continue;
+                        }
                         let cp = pos_beats - clip.start_beats;
                         for note in &clip.notes {
-                            if cp >= note.start_beats && cp < note.start_beats + note.length_beats
+                            if cp >= note.start_beats
+                                && cp < note.start_beats + note.length_beats
                                 && !active_pitches.contains(&note.pitch)
                             {
                                 active_pitches.push(note.pitch);
@@ -421,11 +442,21 @@ pub fn render_to_buffer(
                     }
                     match pattern {
                         1 => pool.reverse(),
-                        2 => { let mut d = pool.clone(); d.reverse(); if d.len() > 1 { pool.extend_from_slice(&d[1..d.len()-1]); } }
+                        2 => {
+                            let mut d = pool.clone();
+                            d.reverse();
+                            if d.len() > 1 {
+                                pool.extend_from_slice(&d[1..d.len() - 1]);
+                            }
+                        }
                         3 => {
                             let seed = (pos_beats * 1000.0) as u64;
                             for i in (1..pool.len()).rev() {
-                                let j = (seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) >> 33) as usize % (i+1);
+                                let j = (seed
+                                    .wrapping_mul(6364136223846793005)
+                                    .wrapping_add(1442695040888963407)
+                                    >> 33) as usize
+                                    % (i + 1);
                                 pool.swap(i, j);
                             }
                         }
@@ -433,21 +464,33 @@ pub fn render_to_buffer(
                     }
 
                     if !pool.is_empty() {
-                        let fire = if *last_beat < 0.0 { true } else {
-                            (pos_beats / rate_beats).floor() as usize > (*last_beat / rate_beats).floor() as usize
+                        let fire = if *last_beat < 0.0 {
+                            true
+                        } else {
+                            (pos_beats / rate_beats).floor() as usize
+                                > (*last_beat / rate_beats).floor() as usize
                         };
                         if fire {
-                            for v in track_voices[ti].iter_mut() { if !v.released { v.released = true; } }
+                            for v in track_voices[ti].iter_mut() {
+                                if !v.released {
+                                    v.released = true;
+                                }
+                            }
                             let idx = *step % pool.len();
                             let pitch = pool[idx];
-                            let mut voice = ModuleVoice::new(midi_to_freq(pitch), vel_default, ti, pitch);
+                            let mut voice =
+                                ModuleVoice::new(midi_to_freq(pitch), vel_default, ti, pitch);
                             voice.original_pitch = pitch;
                             track_voices[ti].push(voice);
                             *step = (*step + 1) % pool.len().max(1);
                             *last_beat = pos_beats;
                         }
                     } else {
-                        for v in track_voices[ti].iter_mut() { if !v.released { v.released = true; } }
+                        for v in track_voices[ti].iter_mut() {
+                            if !v.released {
+                                v.released = true;
+                            }
+                        }
                         *step = 0;
                         *last_beat = -999.0;
                     }
@@ -455,14 +498,20 @@ pub fn render_to_buffer(
             }
 
             for v in track_voices[ti].iter_mut() {
-                if v.released { continue; }
+                if v.released {
+                    continue;
+                }
                 let has_arp = ti < track_midi_effects.len()
                     && track_midi_effects[ti].iter().any(|m| m.manages_voices());
-                if has_arp { continue; }
+                if has_arp {
+                    continue;
+                }
                 let mut still_active = false;
                 for clip in &track.midi_clips {
                     let clip_end = clip.start_beats + clip.length_beats;
-                    if pos_beats < clip.start_beats || pos_beats >= clip_end { continue; }
+                    if pos_beats < clip.start_beats || pos_beats >= clip_end {
+                        continue;
+                    }
                     let clip_pos = pos_beats - clip.start_beats;
                     for note in &clip.notes {
                         if note.pitch == v.original_pitch
@@ -473,9 +522,13 @@ pub fn render_to_buffer(
                             break;
                         }
                     }
-                    if still_active { break; }
+                    if still_active {
+                        break;
+                    }
                 }
-                if !still_active { v.released = true; }
+                if !still_active {
+                    v.released = true;
+                }
             }
 
             track_voices[ti].retain(|v| !voice_is_done(v));
@@ -713,6 +766,8 @@ pub fn render_to_wav_with_progress(
                             offset_secs: ac.offset,
                             samples: samples.clone(),
                             sample_rate: *sr,
+                            fade_in: ac.fade_in,
+                            fade_out: ac.fade_out,
                         });
                     }
                 }
@@ -1012,7 +1067,9 @@ pub fn render_to_wav_with_progress(
                         let seed = vec![MidiEvent::new(note.pitch, vel)];
 
                         let has_arp = ti < track_midi_effects_wav.len()
-                            && track_midi_effects_wav[ti].iter().any(|m| m.manages_voices());
+                            && track_midi_effects_wav[ti]
+                                .iter()
+                                .any(|m| m.manages_voices());
 
                         if !has_arp {
                             let final_events = if ti < track_midi_effects_wav.len() {
@@ -1029,9 +1086,13 @@ pub fn render_to_wav_with_progress(
                                 vec![MidiEvent::new(note.pitch, vel)]
                             };
                             for ev in final_events {
-                                if !track_voices[ti].iter().any(|v| v.pitch == ev.pitch && !v.released) {
+                                if !track_voices[ti]
+                                    .iter()
+                                    .any(|v| v.pitch == ev.pitch && !v.released)
+                                {
                                     let freq = midi_to_freq(ev.pitch);
-                                    let mut voice = ModuleVoice::new(freq, ev.velocity, ti, ev.pitch);
+                                    let mut voice =
+                                        ModuleVoice::new(freq, ev.velocity, ti, ev.pitch);
                                     voice.original_pitch = note.pitch;
                                     track_voices[ti].push(voice);
                                 }
@@ -1053,15 +1114,25 @@ pub fn render_to_wav_with_progress(
 
             // ── Arp step trigger (wav render) ──
             let has_arp_instance = ti < track_midi_effects_wav.len()
-                && track_midi_effects_wav[ti].iter().any(|m| m.manages_voices());
+                && track_midi_effects_wav[ti]
+                    .iter()
+                    .any(|m| m.manages_voices());
             if has_arp_instance {
-                if let Some((_, arp_params)) = track.midi_effect_slots.iter().find(|(n, _)| n == "Arpeggiator") {
+                if let Some((_, arp_params)) = track
+                    .midi_effect_slots
+                    .iter()
+                    .find(|(n, _)| n == "Arpeggiator")
+                {
                     let get_arp = |k: &str, d: f32| -> f32 {
-                        arp_params.iter().find(|(id, _)| id == k).map(|(_, v)| *v).unwrap_or(d)
+                        arp_params
+                            .iter()
+                            .find(|(id, _)| id == k)
+                            .map(|(_, v)| *v)
+                            .unwrap_or(d)
                     };
-                    let rate_beats  = get_arp("rate", 0.25) as f64;
-                    let octaves     = get_arp("octaves", 1.0) as i32;
-                    let pattern     = get_arp("pattern", 0.0) as i32;
+                    let rate_beats = get_arp("rate", 0.25) as f64;
+                    let octaves = get_arp("octaves", 1.0) as i32;
+                    let pattern = get_arp("pattern", 0.0) as i32;
                     let vel_default = track.volume;
 
                     let (ref mut step, ref mut last_beat) = track_arp_state_wav[ti];
@@ -1069,10 +1140,13 @@ pub fn render_to_wav_with_progress(
                     let mut active_pitches: Vec<u8> = Vec::new();
                     for clip in &track.midi_clips {
                         let clip_end = clip.start_beats + clip.length_beats;
-                        if pos_beats < clip.start_beats || pos_beats >= clip_end { continue; }
+                        if pos_beats < clip.start_beats || pos_beats >= clip_end {
+                            continue;
+                        }
                         let cp = pos_beats - clip.start_beats;
                         for note in &clip.notes {
-                            if cp >= note.start_beats && cp < note.start_beats + note.length_beats
+                            if cp >= note.start_beats
+                                && cp < note.start_beats + note.length_beats
                                 && !active_pitches.contains(&note.pitch)
                             {
                                 active_pitches.push(note.pitch);
@@ -1089,11 +1163,21 @@ pub fn render_to_wav_with_progress(
                     }
                     match pattern {
                         1 => pool.reverse(),
-                        2 => { let mut d = pool.clone(); d.reverse(); if d.len() > 1 { pool.extend_from_slice(&d[1..d.len()-1]); } }
+                        2 => {
+                            let mut d = pool.clone();
+                            d.reverse();
+                            if d.len() > 1 {
+                                pool.extend_from_slice(&d[1..d.len() - 1]);
+                            }
+                        }
                         3 => {
                             let seed = (pos_beats * 1000.0) as u64;
                             for i in (1..pool.len()).rev() {
-                                let j = (seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) >> 33) as usize % (i+1);
+                                let j = (seed
+                                    .wrapping_mul(6364136223846793005)
+                                    .wrapping_add(1442695040888963407)
+                                    >> 33) as usize
+                                    % (i + 1);
                                 pool.swap(i, j);
                             }
                         }
@@ -1101,21 +1185,33 @@ pub fn render_to_wav_with_progress(
                     }
 
                     if !pool.is_empty() {
-                        let fire = if *last_beat < 0.0 { true } else {
-                            (pos_beats / rate_beats).floor() as usize > (*last_beat / rate_beats).floor() as usize
+                        let fire = if *last_beat < 0.0 {
+                            true
+                        } else {
+                            (pos_beats / rate_beats).floor() as usize
+                                > (*last_beat / rate_beats).floor() as usize
                         };
                         if fire {
-                            for v in track_voices[ti].iter_mut() { if !v.released { v.released = true; } }
+                            for v in track_voices[ti].iter_mut() {
+                                if !v.released {
+                                    v.released = true;
+                                }
+                            }
                             let idx = *step % pool.len();
                             let pitch = pool[idx];
-                            let mut voice = ModuleVoice::new(midi_to_freq(pitch), vel_default, ti, pitch);
+                            let mut voice =
+                                ModuleVoice::new(midi_to_freq(pitch), vel_default, ti, pitch);
                             voice.original_pitch = pitch;
                             track_voices[ti].push(voice);
                             *step = (*step + 1) % pool.len().max(1);
                             *last_beat = pos_beats;
                         }
                     } else {
-                        for v in track_voices[ti].iter_mut() { if !v.released { v.released = true; } }
+                        for v in track_voices[ti].iter_mut() {
+                            if !v.released {
+                                v.released = true;
+                            }
+                        }
                         *step = 0;
                         *last_beat = -999.0;
                     }
@@ -1124,14 +1220,22 @@ pub fn render_to_wav_with_progress(
 
             // ── Release / kill voices whose notes have ended ──
             for v in track_voices[ti].iter_mut() {
-                if v.released { continue; }
+                if v.released {
+                    continue;
+                }
                 let has_arp = ti < track_midi_effects_wav.len()
-                    && track_midi_effects_wav[ti].iter().any(|m| m.manages_voices());
-                if has_arp { continue; }
+                    && track_midi_effects_wav[ti]
+                        .iter()
+                        .any(|m| m.manages_voices());
+                if has_arp {
+                    continue;
+                }
                 let mut still_active = false;
                 for clip in &track.midi_clips {
                     let clip_end = clip.start_beats + clip.length_beats;
-                    if pos_beats < clip.start_beats || pos_beats >= clip_end { continue; }
+                    if pos_beats < clip.start_beats || pos_beats >= clip_end {
+                        continue;
+                    }
                     let clip_pos = pos_beats - clip.start_beats;
                     for note in &clip.notes {
                         if note.pitch == v.original_pitch
@@ -1142,9 +1246,13 @@ pub fn render_to_wav_with_progress(
                             break;
                         }
                     }
-                    if still_active { break; }
+                    if still_active {
+                        break;
+                    }
                 }
-                if !still_active { v.released = true; }
+                if !still_active {
+                    v.released = true;
+                }
             }
 
             // Remove voices that are fully done (amp envelope finished)
@@ -1185,16 +1293,25 @@ pub fn render_to_wav_with_progress(
                 // Real time elapsed since clip start (at current BPM) + trim offset
                 let clip_pos_secs = (pos_beats - aclip.start_beats) / beats_per_sec;
                 let audio_pos_secs = clip_pos_secs + aclip.offset_secs;
-                let src_idx = (audio_pos_secs * aclip.sample_rate as f64) as usize;
+                let src_pos = audio_pos_secs * aclip.sample_rate as f64;
+                let src_idx = src_pos as usize;
                 if src_idx < aclip.samples.len() {
-                    let mut s =
-                        aclip.samples[src_idx] as f64 * aclip.gain as f64 * track.volume as f64;
+                    let s0 = aclip.samples[src_idx] as f64;
+                    let s1 = if src_idx + 1 < aclip.samples.len() {
+                        aclip.samples[src_idx + 1] as f64
+                    } else {
+                        s0
+                    };
+                    let frac = src_pos - src_pos.floor();
+                    let raw = s0 + (s1 - s0) * frac;
+                    let mut s = raw * aclip.gain as f64 * track.volume as f64;
                     // Short linear fade at CLIP boundaries to prevent clicks.
                     // Use clip-relative sample position (not source-file position)
                     // so fades always happen at clip start/end regardless of offset.
                     let fade_len = 64usize;
                     let clip_sample = (clip_pos_secs * sample_rate as f64) as usize;
-                    let clip_len_samples = (aclip.length_beats / beats_per_sec * sample_rate as f64) as usize;
+                    let clip_len_samples =
+                        (aclip.length_beats / beats_per_sec * sample_rate as f64) as usize;
                     // Fade in at clip start
                     if clip_sample < fade_len {
                         s *= clip_sample as f64 / fade_len as f64;
@@ -1203,6 +1320,24 @@ pub fn render_to_wav_with_progress(
                     let remaining = clip_len_samples.saturating_sub(clip_sample);
                     if remaining < fade_len {
                         s *= remaining as f64 / fade_len as f64;
+                    }
+                    // User-controlled fade-in
+                    if aclip.fade_in > 0.0 {
+                        let fade_in_samples = (aclip.fade_in * sample_rate as f64) as usize;
+                        if fade_in_samples > 0 && clip_sample < fade_in_samples {
+                            s *= clip_sample as f64 / fade_in_samples as f64;
+                        }
+                    }
+                    // User-controlled fade-out
+                    if aclip.fade_out > 0.0 {
+                        let fade_out_samples = (aclip.fade_out * sample_rate as f64) as usize;
+                        if fade_out_samples > 0 && clip_len_samples > fade_out_samples {
+                            let fade_out_start = clip_len_samples - fade_out_samples;
+                            if clip_sample >= fade_out_start {
+                                s *= (clip_len_samples - clip_sample) as f64
+                                    / fade_out_samples as f64;
+                            }
+                        }
                     }
                     per_track_sample[ti].0 += s;
                     per_track_sample[ti].1 += s;
@@ -1236,6 +1371,7 @@ pub fn render_to_wav_with_progress(
             }
             for (fi, (_, fx_params)) in track.effect_slots.iter().enumerate() {
                 if fi < track_effects[ti].len() {
+                    track_effects[ti][fi].set_bpm(bpm);
                     // Resolve sidechain source signal (default: self)
                     let sc_ti = track.effect_sidechain_track.get(fi).copied().flatten();
                     let (key_l, key_r) = if let Some(sc_idx) = sc_ti {
@@ -1279,6 +1415,7 @@ pub fn render_to_wav_with_progress(
         // ── Apply master rack effects to the stereo mix ──
         for (fi, (_, fx_params)) in master_effect_slots.iter().enumerate() {
             if fi < master_effects.len() {
+                master_effects[fi].set_bpm(bpm);
                 let (ml, mr) = master_effects[fi].process_sidechain(
                     mix_l,
                     mix_r,
@@ -1339,6 +1476,10 @@ pub fn render_to_wav_with_progress(
         }
         // Render up to 10 seconds of tail to let envelopes decay
         let max_tail_samples = (10.0 * sample_rate as f64) as usize;
+        // Stop after 0.25 seconds of consecutive silence (well below audible threshold)
+        let silence_threshold = 1e-5; // ~-100 dB
+        let silence_required = (0.25 * sample_rate as f64) as usize;
+        let mut consecutive_silent = 0usize;
         for _tail in 0..max_tail_samples {
             // Check if any voices are still alive
             let any_alive = track_voices.iter().any(|voices| !voices.is_empty());
@@ -1377,6 +1518,7 @@ pub fn render_to_wav_with_progress(
                 // Run effects
                 for (fi, (_, fx_params)) in track.effect_slots.iter().enumerate() {
                     if fi < track_effects[ti].len() {
+                        track_effects[ti][fi].set_bpm(bpm);
                         let sc_ti = track.effect_sidechain_track.get(fi).copied().flatten();
                         let (key_l, key_r) = if let Some(sc_idx) = sc_ti {
                             if sc_idx < per_track_sample.len() {
@@ -1416,6 +1558,7 @@ pub fn render_to_wav_with_progress(
             }
             for (fi, (_, fx_params)) in master_effect_slots.iter().enumerate() {
                 if fi < master_effects.len() {
+                    master_effects[fi].set_bpm(bpm);
                     let (ml, mr) = master_effects[fi].process_sidechain(
                         mix_l,
                         mix_r,
@@ -1431,8 +1574,13 @@ pub fn render_to_wav_with_progress(
             mix_l *= master_volume as f64;
             mix_r *= master_volume as f64;
             // Only write if there's audible signal
-            if mix_l.abs() < 1e-10 && mix_r.abs() < 1e-10 {
-                break;
+            if mix_l.abs() < silence_threshold && mix_r.abs() < silence_threshold {
+                consecutive_silent += 1;
+                if consecutive_silent >= silence_required {
+                    break;
+                }
+            } else {
+                consecutive_silent = 0;
             }
             match settings.bit_depth_idx {
                 2 => {

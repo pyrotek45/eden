@@ -31,7 +31,11 @@ pub struct MidiEvent {
 
 impl MidiEvent {
     pub fn new(pitch: u8, velocity: f32) -> Self {
-        Self { pitch, velocity, original_pitch: pitch }
+        Self {
+            pitch,
+            velocity,
+            original_pitch: pitch,
+        }
     }
 }
 
@@ -80,7 +84,9 @@ pub trait MidiEffect: Send + Sync {
     fn reset(&mut self) {}
     /// True if this effect manages its own voice lifetime (like Arpeggiator).
     /// The audio engine skips the normal still_active check for these tracks.
-    fn manages_voices(&self) -> bool { false }
+    fn manages_voices(&self) -> bool {
+        false
+    }
     /// Clone into a fresh instance with zeroed state (for render pipeline).
     fn fresh(&self) -> Box<dyn MidiEffect>;
 }
@@ -88,11 +94,11 @@ pub trait MidiEffect: Send + Sync {
 /// Instantiate a MIDI effect by name.  Returns `None` for unknown names.
 pub fn create_midi_effect(name: &str) -> Option<Box<dyn MidiEffect>> {
     match name {
-        "Transpose"    => Some(Box::new(MfxTranspose)),
-        "Velocity"     => Some(Box::new(MfxVelocity)),
-        "Chord"        => Some(Box::new(MfxChord)),
-        "Arpeggiator"  => Some(Box::new(MfxArpeggiator::new())),
-        _              => None,
+        "Transpose" => Some(Box::new(MfxTranspose)),
+        "Velocity" => Some(Box::new(MfxVelocity)),
+        "Chord" => Some(Box::new(MfxChord)),
+        "Arpeggiator" => Some(Box::new(MfxArpeggiator::new())),
+        _ => None,
     }
 }
 
@@ -101,17 +107,24 @@ pub fn create_midi_effect(name: &str) -> Option<Box<dyn MidiEffect>> {
 pub struct MfxTranspose;
 
 impl MidiEffect for MfxTranspose {
-    fn name(&self) -> &'static str { "Transpose" }
+    fn name(&self) -> &'static str {
+        "Transpose"
+    }
     fn process(&mut self, events: Vec<MidiEvent>, ctx: &MidiContext<'_>) -> Vec<MidiEvent> {
         let semitones = ctx.get("semitones") as i32;
-        let octave    = ctx.get("octave")    as i32;
+        let octave = ctx.get("octave") as i32;
         let shift = semitones + octave * 12;
-        events.into_iter().map(|mut e| {
-            e.pitch = (e.pitch as i32 + shift).clamp(0, 127) as u8;
-            e
-        }).collect()
+        events
+            .into_iter()
+            .map(|mut e| {
+                e.pitch = (e.pitch as i32 + shift).clamp(0, 127) as u8;
+                e
+            })
+            .collect()
     }
-    fn fresh(&self) -> Box<dyn MidiEffect> { Box::new(MfxTranspose) }
+    fn fresh(&self) -> Box<dyn MidiEffect> {
+        Box::new(MfxTranspose)
+    }
 }
 
 // ── Velocity ─────────────────────────────────────────────────────────
@@ -119,23 +132,30 @@ impl MidiEffect for MfxTranspose {
 pub struct MfxVelocity;
 
 impl MidiEffect for MfxVelocity {
-    fn name(&self) -> &'static str { "Velocity" }
+    fn name(&self) -> &'static str {
+        "Velocity"
+    }
     fn process(&mut self, events: Vec<MidiEvent>, ctx: &MidiContext<'_>) -> Vec<MidiEvent> {
-        let amount  = ctx.get("amount");
-        let curve   = ctx.get("curve");
+        let amount = ctx.get("amount");
+        let curve = ctx.get("curve");
         let min_vel = ctx.get("min_vel") / 127.0;
         let max_vel = ctx.get("max_vel") / 127.0;
-        events.into_iter().map(|mut e| {
-            let curved = if curve > 0.5 {
-                e.velocity.powf(1.0 / (curve * 2.0).max(0.01))
-            } else {
-                e.velocity.powf((1.0 - curve) * 2.0)
-            };
-            e.velocity = (curved + amount).clamp(min_vel, max_vel);
-            e
-        }).collect()
+        events
+            .into_iter()
+            .map(|mut e| {
+                let curved = if curve > 0.5 {
+                    e.velocity.powf(1.0 / (curve * 2.0).max(0.01))
+                } else {
+                    e.velocity.powf((1.0 - curve) * 2.0)
+                };
+                e.velocity = (curved + amount).clamp(min_vel, max_vel);
+                e
+            })
+            .collect()
     }
-    fn fresh(&self) -> Box<dyn MidiEffect> { Box::new(MfxVelocity) }
+    fn fresh(&self) -> Box<dyn MidiEffect> {
+        Box::new(MfxVelocity)
+    }
 }
 
 // ── Chord ─────────────────────────────────────────────────────────────
@@ -143,11 +163,13 @@ impl MidiEffect for MfxVelocity {
 pub struct MfxChord;
 
 impl MidiEffect for MfxChord {
-    fn name(&self) -> &'static str { "Chord" }
+    fn name(&self) -> &'static str {
+        "Chord"
+    }
     fn process(&mut self, events: Vec<MidiEvent>, ctx: &MidiContext<'_>) -> Vec<MidiEvent> {
         // chord_type: 0=maj,1=min,2=dom7,3=min7,4=sus4,5=dim
-        let chord_type = ctx.get("type")    as i32;
-        let voicing    = ctx.get("voicing") as i32;
+        let chord_type = ctx.get("type") as i32;
+        let voicing = ctx.get("voicing") as i32;
         let intervals: &[i32] = match chord_type {
             0 => &[4i32, 7],
             1 => &[3i32, 7],
@@ -163,17 +185,29 @@ impl MidiEffect for MfxChord {
             for (idx, &interval) in intervals.iter().enumerate() {
                 let octave_shift = match voicing {
                     0 => 0,
-                    1 => if idx % 2 == 1 { 12 } else { 0 },
+                    1 => {
+                        if idx % 2 == 1 {
+                            12
+                        } else {
+                            0
+                        }
+                    }
                     2 => (idx as i32) * 12,
                     _ => 0,
                 };
                 let new_pitch = (e.pitch as i32 + interval + octave_shift).clamp(0, 127) as u8;
-                out.push(MidiEvent { pitch: new_pitch, velocity: e.velocity, original_pitch: e.original_pitch });
+                out.push(MidiEvent {
+                    pitch: new_pitch,
+                    velocity: e.velocity,
+                    original_pitch: e.original_pitch,
+                });
             }
         }
         out
     }
-    fn fresh(&self) -> Box<dyn MidiEffect> { Box::new(MfxChord) }
+    fn fresh(&self) -> Box<dyn MidiEffect> {
+        Box::new(MfxChord)
+    }
 }
 
 // ── Arpeggiator ───────────────────────────────────────────────────────
@@ -187,11 +221,18 @@ pub struct MfxArpeggiator {
 }
 
 impl MfxArpeggiator {
-    pub fn new() -> Self { Self { step: 0, last_beat: -999.0 } }
+    pub fn new() -> Self {
+        Self {
+            step: 0,
+            last_beat: -999.0,
+        }
+    }
 }
 
 impl MidiEffect for MfxArpeggiator {
-    fn name(&self) -> &'static str { "Arpeggiator" }
+    fn name(&self) -> &'static str {
+        "Arpeggiator"
+    }
 
     /// For the Arpeggiator, `events` is the set of *currently held* notes.
     /// Returns at most ONE event per call — the next arp step to play —
@@ -205,9 +246,9 @@ impl MidiEffect for MfxArpeggiator {
         }
 
         let rate_beats = ctx.get("rate").max(0.0625) as f64;
-        let octaves    = ctx.get("octaves").max(1.0)  as i32;
-        let pattern    = ctx.get("pattern")           as i32;
-        let vel        = ctx.get("vel").clamp(0.0, 1.0); // optional velocity override (0 = use source)
+        let octaves = ctx.get("octaves").max(1.0) as i32;
+        let pattern = ctx.get("pattern") as i32;
+        let vel = ctx.get("vel").clamp(0.0, 1.0); // optional velocity override (0 = use source)
 
         // Build note pool (sorted ascending pitches × octaves)
         let mut pool: Vec<MidiEvent> = Vec::new();
@@ -220,7 +261,11 @@ impl MidiEffect for MfxArpeggiator {
         for oct in 0..octaves {
             for &p in &pitches {
                 let shifted = (p as i32 + oct * 12).clamp(0, 127) as u8;
-                pool.push(MidiEvent { pitch: shifted, velocity: final_vel, original_pitch: p });
+                pool.push(MidiEvent {
+                    pitch: shifted,
+                    velocity: final_vel,
+                    original_pitch: p,
+                });
             }
         }
 
@@ -253,8 +298,8 @@ impl MidiEffect for MfxArpeggiator {
         let fire = if self.last_beat < 0.0 {
             true // first-ever fire
         } else {
-            let steps_now  = (ctx.pos_beats   / rate_beats).floor() as usize;
-            let steps_last = (self.last_beat   / rate_beats).floor() as usize;
+            let steps_now = (ctx.pos_beats / rate_beats).floor() as usize;
+            let steps_last = (self.last_beat / rate_beats).floor() as usize;
             steps_now > steps_last
         };
 
@@ -275,9 +320,13 @@ impl MidiEffect for MfxArpeggiator {
     }
 
     /// Arpeggiator manages its own voice lifetime — skip still_active checks.
-    fn manages_voices(&self) -> bool { true }
+    fn manages_voices(&self) -> bool {
+        true
+    }
 
-    fn fresh(&self) -> Box<dyn MidiEffect> { Box::new(MfxArpeggiator::new()) }
+    fn fresh(&self) -> Box<dyn MidiEffect> {
+        Box::new(MfxArpeggiator::new())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -521,6 +570,9 @@ pub trait EffectModule: Send + Sync {
     fn has_tail(&self) -> bool {
         false
     }
+    /// Called by the audio engine to provide the current BPM so beat-synced effects
+    /// (e.g. delay) can compute their timing.  Default implementation is a no-op.
+    fn set_bpm(&mut self, _bpm: f64) {}
 }
 
 /// Extra data passed into instrument processing (e.g. sampler buffers).
@@ -1226,22 +1278,22 @@ const JP8000_DETUNE_COEFS: [f64; 7] = [0.0, 128.0, -128.0, 408.0, -412.0, 704.0,
 /// Converted to (L_gain, R_gain) via equal-power: L=cos(θ), R=sin(θ), θ=(pan+1)/2 * π/2
 /// With width=1.0 these are the full-spread values; we lerp toward (0.707, 0.707) for width<1.
 const SUPERSAW_PAN_L: [f64; 7] = [
-    std::f64::consts::FRAC_1_SQRT_2,  // center: cos(π/4)
-    1.0,                 // voice 1 (pan -1.0): cos(0)
-    0.0,                 // voice 2 (pan +1.0): cos(π/2)
-    0.891006524188368,   // voice 3 (pan -0.6): cos(0.2*π/2)
-    0.45399049973954675, // voice 4 (pan +0.6): cos(0.8*π/2)
-    0.7933533402912352,  // voice 5 (pan -0.3): cos(0.35*π/2)
-    0.6087614290087207,  // voice 6 (pan +0.3): cos(0.65*π/2)
+    std::f64::consts::FRAC_1_SQRT_2, // center: cos(π/4)
+    1.0,                             // voice 1 (pan -1.0): cos(0)
+    0.0,                             // voice 2 (pan +1.0): cos(π/2)
+    0.891006524188368,               // voice 3 (pan -0.6): cos(0.2*π/2)
+    0.45399049973954675,             // voice 4 (pan +0.6): cos(0.8*π/2)
+    0.7933533402912352,              // voice 5 (pan -0.3): cos(0.35*π/2)
+    0.6087614290087207,              // voice 6 (pan +0.3): cos(0.65*π/2)
 ];
 const SUPERSAW_PAN_R: [f64; 7] = [
-    std::f64::consts::FRAC_1_SQRT_2,  // center: sin(π/4)
-    0.0,                 // voice 1 (pan -1.0): sin(0)
-    1.0,                 // voice 2 (pan +1.0): sin(π/2)
-    0.45399049973954675, // voice 3 (pan -0.6): sin(0.2*π/2)
-    0.891006524188368,   // voice 4 (pan +0.6): sin(0.8*π/2)
-    0.6087614290087207,  // voice 5 (pan -0.3): sin(0.35*π/2)
-    0.7933533402912352,  // voice 6 (pan +0.3): sin(0.65*π/2)
+    std::f64::consts::FRAC_1_SQRT_2, // center: sin(π/4)
+    0.0,                             // voice 1 (pan -1.0): sin(0)
+    1.0,                             // voice 2 (pan +1.0): sin(π/2)
+    0.45399049973954675,             // voice 3 (pan -0.6): sin(0.2*π/2)
+    0.891006524188368,               // voice 4 (pan +0.6): sin(0.8*π/2)
+    0.6087614290087207,              // voice 5 (pan -0.3): sin(0.35*π/2)
+    0.7933533402912352,              // voice 6 (pan +0.3): sin(0.65*π/2)
 ];
 /// Center gain for width=0 (mono): both L and R are 1/√2
 const PAN_CENTER: f64 = std::f64::consts::FRAC_1_SQRT_2;
@@ -2295,11 +2347,15 @@ impl EffectModule for FxLpFilter {
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
         let c = self.sm_cutoff.tick(param_val(params, "cutoff", 1.0) as f64);
-        let r = self.sm_resonance.tick(param_val(params, "resonance", 0.0) as f64);
+        let r = self
+            .sm_resonance
+            .tick(param_val(params, "resonance", 0.0) as f64);
         let hz = (20.0 * fast_pow2(c * 9.965784284662087)).min(sr * 0.49);
         let (lp_l, _, _) = svf_tick(left, hz, r, sr, &mut self.ic1_l, &mut self.ic2_l);
         let (lp_r, _, _) = svf_tick(right, hz, r, sr, &mut self.ic1_r, &mut self.ic2_r);
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
         if out_db.abs() < 0.001 {
             (lp_l, lp_r)
         } else {
@@ -2373,11 +2429,15 @@ impl EffectModule for FxHpFilter {
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
         let c = self.sm_cutoff.tick(param_val(params, "cutoff", 0.0) as f64);
-        let r = self.sm_resonance.tick(param_val(params, "resonance", 0.0) as f64);
+        let r = self
+            .sm_resonance
+            .tick(param_val(params, "resonance", 0.0) as f64);
         let hz = (20.0 * fast_pow2(c * 9.965784284662087)).min(sr * 0.49);
         let (_, _, hp_l) = svf_tick(left, hz, r, sr, &mut self.ic1_l, &mut self.ic2_l);
         let (_, _, hp_r) = svf_tick(right, hz, r, sr, &mut self.ic1_r, &mut self.ic2_r);
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
         if out_db.abs() < 0.001 {
             (hp_l, hp_r)
         } else {
@@ -2390,40 +2450,83 @@ impl EffectModule for FxHpFilter {
     }
 }
 
-// ── Delay ────────────────────────────────────────────────────────────
+// ── Delay (Stereo beat-synced) ────────────────────────────────────
+
+/// Beat-division labels and their beat counts (at 1 beat = quarter note).
+const DELAY_DIVISIONS: &[(&str, f64)] = &[
+    ("1/1", 4.0),
+    ("1/2", 2.0),
+    ("1/2T", 4.0 / 3.0),
+    ("1/4", 1.0),
+    ("1/4T", 2.0 / 3.0),
+    ("1/8", 0.5),
+    ("1/8T", 1.0 / 3.0),
+    ("1/16", 0.25),
+    ("1/16T", 0.5 / 3.0),
+    ("1/32", 0.125),
+];
+
+const DELAY_DIVISION_LABELS: &[&str] = &[
+    "1/1", "1/2", "1/2T", "1/4", "1/4T", "1/8", "1/8T", "1/16", "1/16T", "1/32",
+];
 
 pub struct FxDelay {
     buf_l: Vec<f32>,
     buf_r: Vec<f32>,
-    write_pos: usize,
-    sm_time: SmoothedParam,
+    write_pos_l: usize,
+    write_pos_r: usize,
+    sm_time_l: SmoothedParam,
+    sm_time_r: SmoothedParam,
     sm_feedback: SmoothedParam,
     sm_mix: SmoothedParam,
     sm_output: SmoothedParam,
+    bpm: f64,
 }
 impl FxDelay {
     pub fn new(sr: u32) -> Self {
-        let len = (sr as usize) * 2;
+        let len = (sr as usize) * 4; // 4 seconds max (covers 1/1 at low BPM)
         Self {
             buf_l: vec![0.0; len],
             buf_r: vec![0.0; len],
-            write_pos: 0,
-            sm_time: SmoothedParam::new(0.25, sr as f64),
+            write_pos_l: 0,
+            write_pos_r: 0,
+            sm_time_l: SmoothedParam::new(0.25, sr as f64),
+            sm_time_r: SmoothedParam::new(0.25, sr as f64),
             sm_feedback: SmoothedParam::new(0.3, sr as f64),
             sm_mix: SmoothedParam::new(0.3, sr as f64),
             sm_output: SmoothedParam::new(0.0, sr as f64),
+            bpm: 120.0,
         }
+    }
+
+    /// Convert a beat-division index to seconds given current BPM.
+    fn division_to_seconds(div_idx: usize, bpm: f64) -> f64 {
+        let beats = if div_idx < DELAY_DIVISIONS.len() {
+            DELAY_DIVISIONS[div_idx].1
+        } else {
+            1.0
+        };
+        let bps = bpm.max(20.0) / 60.0; // beats per second
+        beats / bps
     }
 }
 
 static DELAY_PARAMS: &[ParamDesc] = &[
     ParamDesc {
-        id: "time",
-        name: "Time",
-        default: 0.25,
-        min: 0.01,
-        max: 2.0,
-        options: None,
+        id: "time_l",
+        name: "Time L",
+        default: 5.0, // index 5 = 1/8
+        min: 0.0,
+        max: 9.0,
+        options: Some(DELAY_DIVISION_LABELS),
+    },
+    ParamDesc {
+        id: "time_r",
+        name: "Time R",
+        default: 3.0, // index 3 = 1/4
+        min: 0.0,
+        max: 9.0,
+        options: Some(DELAY_DIVISION_LABELS),
     },
     ParamDesc {
         id: "feedback",
@@ -2458,29 +2561,49 @@ impl EffectModule for FxDelay {
     fn params(&self) -> &'static [ParamDesc] {
         DELAY_PARAMS
     }
+    fn set_bpm(&mut self, bpm: f64) {
+        self.bpm = bpm;
+    }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
-        let time = self.sm_time.tick(param_val(params, "time", 0.25) as f64);
-        let feedback = self.sm_feedback.tick(param_val(params, "feedback", 0.3) as f64);
+        let div_l = param_val(params, "time_l", 5.0).round() as usize;
+        let div_r = param_val(params, "time_r", 3.0).round() as usize;
+        let time_l_sec = FxDelay::division_to_seconds(div_l, self.bpm);
+        let time_r_sec = FxDelay::division_to_seconds(div_r, self.bpm);
+        let time_l = self.sm_time_l.tick(time_l_sec);
+        let time_r = self.sm_time_r.tick(time_r_sec);
+        let feedback = self
+            .sm_feedback
+            .tick(param_val(params, "feedback", 0.3) as f64);
         let mix = self.sm_mix.tick(param_val(params, "mix", 0.3) as f64);
         let len = self.buf_l.len();
         if len == 0 {
             return (left, right);
         }
-        // Use fractional delay with linear interpolation to avoid clicks
-        // when the delay time is modulated by automation.
-        let ds_f = (time * sr).max(1.0).min((len - 1) as f64);
-        let rp_f = self.write_pos as f64 + len as f64 - ds_f;
-        let i0 = rp_f as usize % len;
-        let i1 = (i0 + 1) % len;
-        let frac = rp_f - rp_f.floor();
-        let del_l = self.buf_l[i0] as f64 * (1.0 - frac) + self.buf_l[i1] as f64 * frac;
-        let del_r = self.buf_r[i0] as f64 * (1.0 - frac) + self.buf_r[i1] as f64 * frac;
-        self.buf_l[self.write_pos] = (left + del_l * feedback) as f32;
-        self.buf_r[self.write_pos] = (right + del_r * feedback) as f32;
-        self.write_pos = (self.write_pos + 1) % len;
+        // Left channel delay with fractional interpolation
+        let ds_l = (time_l * sr).max(1.0).min((len - 1) as f64);
+        let rp_l = self.write_pos_l as f64 + len as f64 - ds_l;
+        let i0_l = rp_l as usize % len;
+        let i1_l = (i0_l + 1) % len;
+        let frac_l = rp_l - rp_l.floor();
+        let del_l = self.buf_l[i0_l] as f64 * (1.0 - frac_l) + self.buf_l[i1_l] as f64 * frac_l;
+        self.buf_l[self.write_pos_l] = (left + del_l * feedback) as f32;
+        self.write_pos_l = (self.write_pos_l + 1) % len;
+
+        // Right channel delay with fractional interpolation
+        let ds_r = (time_r * sr).max(1.0).min((len - 1) as f64);
+        let rp_r = self.write_pos_r as f64 + len as f64 - ds_r;
+        let i0_r = rp_r as usize % len;
+        let i1_r = (i0_r + 1) % len;
+        let frac_r = rp_r - rp_r.floor();
+        let del_r = self.buf_r[i0_r] as f64 * (1.0 - frac_r) + self.buf_r[i1_r] as f64 * frac_r;
+        self.buf_r[self.write_pos_r] = (right + del_r * feedback) as f32;
+        self.write_pos_r = (self.write_pos_r + 1) % len;
+
         let out_l = left * (1.0 - mix) + del_l * mix;
         let out_r = right * (1.0 - mix) + del_r * mix;
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
         if out_db.abs() < 0.001 {
             (out_l, out_r)
         } else {
@@ -2491,10 +2614,11 @@ impl EffectModule for FxDelay {
     fn reset(&mut self) {
         self.buf_l.fill(0.0);
         self.buf_r.fill(0.0);
-        self.write_pos = 0;
+        self.write_pos_l = 0;
+        self.write_pos_r = 0;
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
-        Box::new(FxDelay::new((self.buf_l.len() / 2) as u32))
+        Box::new(FxDelay::new((self.buf_l.len() / 4) as u32))
     }
     fn has_tail(&self) -> bool {
         true
@@ -3142,7 +3266,9 @@ impl EffectModule for FxReverb {
         let out_l = left * dry_amt + w_l * mix_amt;
         let out_r = right * dry_amt + w_r * mix_amt;
 
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
         let out_gain = db_to_lin(out_db);
         (out_l * out_gain, out_r * out_gain)
     }
@@ -3293,7 +3419,9 @@ impl EffectModule for FxChorus {
         let del_r = self.buf_r[i0_r] as f64 * (1.0 - f_r) + self.buf_r[i1_r] as f64 * f_r;
         let out_l = left * (1.0 - mix) + del_l * mix;
         let out_r = right * (1.0 - mix) + del_r * mix;
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
         if out_db.abs() < 0.001 {
             (out_l, out_r)
         } else {
@@ -3412,7 +3540,9 @@ impl EffectModule for FxDistortion {
         let dist_r = distort_sample(right, drive, dtype);
         let out_l = left * (1.0 - mix) + dist_l * mix;
         let out_r = right * (1.0 - mix) + dist_r * mix;
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
         if out_db.abs() < 0.001 {
             (out_l, out_r)
         } else {
@@ -3581,7 +3711,9 @@ impl EffectModule for FxCompressor {
         sr: f64,
     ) -> (f64, f64) {
         // — Parameters (smoothed to prevent clicks during automation) —
-        let thresh_db = self.sm_threshold.tick(param_val(params, "threshold", -18.0) as f64);
+        let thresh_db = self
+            .sm_threshold
+            .tick(param_val(params, "threshold", -18.0) as f64);
         let ratio = self.sm_ratio.tick(param_val(params, "ratio", 4.0) as f64);
         let knee_db = self.sm_knee.tick(param_val(params, "knee", 6.0) as f64);
         // Attack/release in milliseconds → per-sample coefficients (1-pole IIR)
@@ -3632,7 +3764,9 @@ impl EffectModule for FxCompressor {
         // — Apply gain (GR + makeup) —
         let total_db = gr_db + makeup_db;
         let lin = db_to_lin(total_db);
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
         let (ol, or) = (left * lin, right * lin);
         if out_db.abs() < 0.001 {
             (ol, or)
@@ -3749,7 +3883,9 @@ impl EffectModule for FxLimiter {
         self.ensure_buffers(sr);
 
         let gain_db = self.sm_gain.tick(param_val(params, "gain_db", 0.0) as f64);
-        let ceiling_db = self.sm_ceiling.tick(param_val(params, "ceiling_db", 0.0) as f64);
+        let ceiling_db = self
+            .sm_ceiling
+            .tick(param_val(params, "ceiling_db", 0.0) as f64);
         let release_knob = param_val(params, "release", 0.05) as f64;
 
         let input_gain = db_to_lin(gain_db);
@@ -3815,7 +3951,9 @@ impl EffectModule for FxLimiter {
         // Apply gain reduction and hard-clip as safety net
         let ol = (dl * gr).clamp(-ceiling_lin, ceiling_lin);
         let or_ = (dr * gr).clamp(-ceiling_lin, ceiling_lin);
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
         if out_db.abs() < 0.001 {
             (ol, or_)
         } else {
@@ -3934,11 +4072,23 @@ impl EffectModule for FxEq {
         EQ_PARAMS
     }
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
-        let lo_g = self.sm_lo_gain.tick(param_val(params, "lo_gain", 0.0) as f64);
-        let mid_g = self.sm_mid_gain.tick(param_val(params, "mid_gain", 0.0) as f64);
-        let hi_g = self.sm_hi_gain.tick(param_val(params, "hi_gain", 0.0) as f64);
-        let lo_f = self.sm_lo_freq.tick(param_val(params, "lo_freq", 200.0) as f64).clamp(20.0, sr * 0.49);
-        let hi_f = self.sm_hi_freq.tick(param_val(params, "hi_freq", 4000.0) as f64).clamp(20.0, sr * 0.49);
+        let lo_g = self
+            .sm_lo_gain
+            .tick(param_val(params, "lo_gain", 0.0) as f64);
+        let mid_g = self
+            .sm_mid_gain
+            .tick(param_val(params, "mid_gain", 0.0) as f64);
+        let hi_g = self
+            .sm_hi_gain
+            .tick(param_val(params, "hi_gain", 0.0) as f64);
+        let lo_f = self
+            .sm_lo_freq
+            .tick(param_val(params, "lo_freq", 200.0) as f64)
+            .clamp(20.0, sr * 0.49);
+        let hi_f = self
+            .sm_hi_freq
+            .tick(param_val(params, "hi_freq", 4000.0) as f64)
+            .clamp(20.0, sr * 0.49);
         let lo_gain = db_to_lin(lo_g);
         let mid_gain = db_to_lin(mid_g);
         let hi_gain = db_to_lin(hi_g);
@@ -3952,7 +4102,9 @@ impl EffectModule for FxEq {
         let (_, _, hi_r) = svf_tick(right, hi_f, 0.5, sr, &mut self.hi_ic1_r, &mut self.hi_ic2_r);
         let mid_r = right - lo_r - hi_r;
         let out_r = lo_r * lo_gain + mid_r * mid_gain + hi_r * hi_gain;
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
         if out_db.abs() < 0.001 {
             (out_l, out_r)
         } else {
@@ -4197,21 +4349,31 @@ impl EffectModule for FxAutoduck {
     fn params(&self) -> &'static [ParamDesc] {
         AUTODUCK_PARAMS
     }
-    fn process(
-        &mut self,
-        left: f64,
-        right: f64,
-        params: &[(String, f32)],
-        sr: f64,
-    ) -> (f64, f64) {
-        let duck_db = self.sm_duck.tick(param_val(params, "duck_db", -12.0) as f64);
-        let attack_ms = self.sm_attack.tick(param_val(params, "attack", 5.0) as f64).max(0.1);
-        let hold_ms = self.sm_hold.tick(param_val(params, "hold", 50.0) as f64).max(0.0);
-        let release_ms = self.sm_release.tick(param_val(params, "release", 100.0) as f64).max(1.0);
-        let period_ms = self.sm_period.tick(param_val(params, "period", 500.0) as f64).max(1.0);
+    fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], sr: f64) -> (f64, f64) {
+        let duck_db = self
+            .sm_duck
+            .tick(param_val(params, "duck_db", -12.0) as f64);
+        let attack_ms = self
+            .sm_attack
+            .tick(param_val(params, "attack", 5.0) as f64)
+            .max(0.1);
+        let hold_ms = self
+            .sm_hold
+            .tick(param_val(params, "hold", 50.0) as f64)
+            .max(0.0);
+        let release_ms = self
+            .sm_release
+            .tick(param_val(params, "release", 100.0) as f64)
+            .max(1.0);
+        let period_ms = self
+            .sm_period
+            .tick(param_val(params, "period", 500.0) as f64)
+            .max(1.0);
         let shift_pct = self.sm_shift.tick(param_val(params, "shift", 0.0) as f64);
         let curve_pct = self.sm_curve.tick(param_val(params, "curve", 50.0) as f64);
-        let out_db = self.sm_output.tick(param_val(params, "output_db", 0.0) as f64);
+        let out_db = self
+            .sm_output
+            .tick(param_val(params, "output_db", 0.0) as f64);
 
         // Advance phase (0..1 within the period)
         let phase_inc = 1000.0 / (period_ms * sr);

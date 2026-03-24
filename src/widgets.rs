@@ -123,7 +123,8 @@ pub fn knob(
         input.consume();
     }
 
-    if input.active_widget == params.id && input.mouse_down {
+    // Use drag_widget for continuous drag (survives mouse leaving knob area)
+    if (input.active_widget == params.id || input.drag_widget == params.id) && input.mouse_down {
         let delta = -input.mouse_dy as f32 * params.sensitivity;
         *value = (*value + delta * (params.max - params.min)).clamp(params.min, params.max);
         if delta.abs() > 0.0 {
@@ -445,7 +446,7 @@ pub fn slider(
         input.consume();
     }
 
-    if input.active_widget == params.id && input.mouse_down {
+    if (input.active_widget == params.id || input.drag_widget == params.id) && input.mouse_down {
         // Drag-relative: use delta from drag start, like knobs
         let sensitivity = 1.0
             / match params.orientation {
@@ -771,8 +772,18 @@ pub fn scrollbar_with_squeeze(
         ),
     };
 
-    let lo_hover = input.mouse_in_rect(lo_hit.x(), lo_hit.y(), lo_hit.width() as i32, lo_hit.height() as i32);
-    let hi_hover = input.mouse_in_rect(hi_hit.x(), hi_hit.y(), hi_hit.width() as i32, hi_hit.height() as i32);
+    let lo_hover = input.mouse_in_rect(
+        lo_hit.x(),
+        lo_hit.y(),
+        lo_hit.width() as i32,
+        lo_hit.height() as i32,
+    );
+    let hi_hover = input.mouse_in_rect(
+        hi_hit.x(),
+        hi_hit.y(),
+        hi_hit.width() as i32,
+        hi_hit.height() as i32,
+    );
 
     // Claim squeeze handle drag BEFORE the main scrollbar sees the press.
     // We guard on drag_widget == None rather than !consumed: this ensures no
@@ -1131,7 +1142,11 @@ pub struct ViewLayers<'a> {
 
 impl<'a> ViewLayers<'a> {
     pub fn new(input: &'a mut InputState) -> Self {
-        let dead = InputState { mouse_x: input.mouse_x, mouse_y: input.mouse_y, ..Default::default() };
+        let dead = InputState {
+            mouse_x: input.mouse_x,
+            mouse_y: input.mouse_y,
+            ..Default::default()
+        };
         ViewLayers { real: input, dead }
     }
 
@@ -1702,9 +1717,33 @@ pub fn text_field(
 
     // Draw cursor when active
     if is_active {
-        // Cursor position: each character is ~9px wide (8px glyph + 1px spacing at 2x scale)
+        // Each character is ~9px wide (8px glyph + 1px spacing at 2x scale)
         let char_w = 9i32;
-        let cursor_x = text_x + (*cursor as i32) * char_w;
+        // Compute how many characters fit in the visible area
+        let visible_chars = (text_w / char_w).max(1) as usize;
+        // Scroll offset: keep cursor visible by scrolling the text view
+        let scroll_start = if *cursor > visible_chars {
+            *cursor - visible_chars
+        } else {
+            0
+        };
+        // Re-draw the text with scroll applied so cursor stays in view
+        if scroll_start > 0 {
+            // Erase previously drawn text and redraw with scroll offset
+            canvas.set_draw_color(if is_active {
+                sdl2::pixels::Color::RGBA(40, 42, 50, 255)
+            } else {
+                sdl2::pixels::Color::RGBA(45, 48, 56, 255)
+            });
+            let _ = canvas.fill_rect(Rect::new(text_x, text_y, text_w as u32, 10));
+            let scrolled = &buffer[scroll_start.min(buffer.len())..];
+            let col = Theme::c(theme.text_primary);
+            draw_pixel_label(canvas, theme, scrolled, text_x, text_y, text_w, col);
+        }
+        // Cursor pixel position relative to visible window
+        let cursor_x = text_x + ((*cursor - scroll_start) as i32) * char_w;
+        // Clamp strictly inside the text field (1px margin from right edge)
+        let cursor_x = cursor_x.min(text_x + text_w - 1);
         let a = theme.accent;
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(a[0], a[1], a[2], 255));
         let _ = canvas.draw_line(

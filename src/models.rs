@@ -42,6 +42,12 @@ pub struct AudioClip {
     pub gain: f32,
     pub name: String,
     pub color: [u8; 4],
+    /// Fade-in duration in seconds (applied from the start of the clip)
+    #[serde(default)]
+    pub fade_in: f64,
+    /// Fade-out duration in seconds (applied at the end of the clip)
+    #[serde(default)]
+    pub fade_out: f64,
 }
 
 // ── Automation ───────────────────────────────────────────────────────
@@ -201,7 +207,8 @@ impl RackSlot {
             enabled: true,
             sidechain_track_id: None,
             params: vec![
-                RackParam::new("time", "Time", 0.25, 0.01, 2.0),
+                RackParam::new("time_l", "Time L", 5.0, 0.0, 9.0),
+                RackParam::new("time_r", "Time R", 3.0, 0.0, 9.0),
                 RackParam::new("feedback", "Feedback", 0.3, 0.0, 0.99),
                 RackParam::new("mix", "Mix", 0.3, 0.0, 1.0),
                 RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
@@ -282,8 +289,6 @@ impl RackSlot {
                 // ── Amp ADSR cont ──
                 RackParam::new("amp_s", "A.Sus", 0.8, 0.0, 1.0),
                 RackParam::new("amp_r", "A.Rel", 0.3, 0.001, 8.0),
-                // ── Phase ──
-                RackParam::new("phase_spread", "Phase", 1.0, 0.0, 1.0),
             ],
         }
     }
@@ -867,7 +872,10 @@ impl Default for Project {
 impl Project {
     /// Create a demo project with a few tracks for testing.
     pub fn demo() -> Self {
-        let mut p = Self { name: "Demo Project".into(), ..Default::default() };
+        let mut p = Self {
+            name: "Demo Project".into(),
+            ..Default::default()
+        };
 
         // MIDI track with a clip
         let mut t1 = Track::new(1, "Synth Lead", TrackType::Midi);
@@ -947,6 +955,8 @@ impl Project {
             gain: 1.0,
             name: "Drum Loop".into(),
             color: [220, 140, 60, 200],
+            fade_in: 0.0,
+            fade_out: 0.0,
         }));
         p.tracks.push(t3);
 
@@ -1119,7 +1129,7 @@ pub fn export_midi_file(
     bpm: f64,
     _clip_name: &str,
 ) -> Result<(), String> {
-    use midly::num::{u4, u7, u15, u24, u28};
+    use midly::num::{u15, u24, u28, u4, u7};
     use midly::{
         Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind,
     };
@@ -1173,10 +1183,7 @@ pub fn export_midi_file(
 
     // End of track
     let max_tick = events.iter().map(|(t, _)| *t).max().unwrap_or(0);
-    events.push((
-        max_tick,
-        TrackEventKind::Meta(MetaMessage::EndOfTrack),
-    ));
+    events.push((max_tick, TrackEventKind::Meta(MetaMessage::EndOfTrack)));
 
     // Sort by absolute tick (stable sort keeps note-off before note-on at same tick)
     events.sort_by_key(|(t, _)| *t);
@@ -1194,12 +1201,10 @@ pub fn export_midi_file(
     }
 
     let smf = Smf {
-        header: Header::new(
-            Format::SingleTrack,
-            Timing::Metrical(u15::from(ppq)),
-        ),
+        header: Header::new(Format::SingleTrack, Timing::Metrical(u15::from(ppq))),
         tracks: vec![track],
     };
 
-    smf.save(path).map_err(|e| format!("Failed to save MIDI file: {}", e))
+    smf.save(path)
+        .map_err(|e| format!("Failed to save MIDI file: {}", e))
 }

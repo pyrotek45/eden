@@ -1453,7 +1453,9 @@ impl Command for JoinClips {
 
             // Check all are same type and adjacent
             let all_midi = clips_sorted.iter().all(|(_, c)| matches!(c, Clip::Midi(_)));
-            let all_audio = clips_sorted.iter().all(|(_, c)| matches!(c, Clip::Audio(_)));
+            let all_audio = clips_sorted
+                .iter()
+                .all(|(_, c)| matches!(c, Clip::Audio(_)));
 
             if !all_midi && !all_audio {
                 continue; // Can't join mixed types
@@ -1508,7 +1510,8 @@ impl Command for JoinClips {
                 for (_idx, clip) in &clips_sorted {
                     if let Clip::Audio(ac) = clip {
                         let path = std::path::Path::new(&ac.source_file);
-                        if let Ok((_raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                        if let Ok((_raw, channels, sr)) = crate::audio::load_audio_interleaved(path)
+                        {
                             out_channels = out_channels.max(channels);
                             out_sr = sr;
                         }
@@ -1527,7 +1530,9 @@ impl Command for JoinClips {
                             let gap_secs = clip_start_secs - prev_end_secs;
                             if gap_secs > 0.001 {
                                 let silence_frames = (gap_secs * out_sr as f64) as usize;
-                                merged_samples.extend(std::iter::repeat(0.0f32).take(silence_frames * out_channels));
+                                merged_samples.extend(
+                                    std::iter::repeat(0.0f32).take(silence_frames * out_channels),
+                                );
                             }
                         }
                         let path = std::path::Path::new(&ac.source_file);
@@ -1536,8 +1541,11 @@ impl Command for JoinClips {
                                 let ch = channels.max(1);
                                 let total_frames = raw.len() / ch;
                                 let clip_len_secs = ac.length * 60.0 / bpm;
-                                let start_frame = ((ac.offset * sr as f64) as usize).min(total_frames);
-                                let end_frame = (((ac.offset + clip_len_secs) * sr as f64) as usize).min(total_frames);
+                                let start_frame =
+                                    ((ac.offset * sr as f64) as usize).min(total_frames);
+                                let end_frame = (((ac.offset + clip_len_secs) * sr as f64)
+                                    as usize)
+                                    .min(total_frames);
                                 if end_frame > start_frame {
                                     if ch == out_channels || (ch == 1 && out_channels == 2) {
                                         // Upmix mono→stereo if needed
@@ -1547,10 +1555,14 @@ impl Command for JoinClips {
                                                 merged_samples.push(*s);
                                             }
                                         } else {
-                                            merged_samples.extend_from_slice(&raw[start_frame * ch..end_frame * ch]);
+                                            merged_samples.extend_from_slice(
+                                                &raw[start_frame * ch..end_frame * ch],
+                                            );
                                         }
                                     } else {
-                                        merged_samples.extend_from_slice(&raw[start_frame * ch..end_frame * ch]);
+                                        merged_samples.extend_from_slice(
+                                            &raw[start_frame * ch..end_frame * ch],
+                                        );
                                     }
                                 }
                                 prev_end_secs = clip_start_secs + clip_len_secs;
@@ -1567,8 +1579,14 @@ impl Command for JoinClips {
                     // Save merged audio to a new file next to the first clip's source
                     let src_path = std::path::Path::new(&first_ac.source_file);
                     let dir = src_path.parent().unwrap_or(std::path::Path::new("."));
-                    let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
-                    let ext = src_path.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+                    let stem = src_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("audio");
+                    let ext = src_path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("wav");
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis())
@@ -1583,7 +1601,8 @@ impl Command for JoinClips {
                     };
 
                     if save_ok {
-                        let merged_dur_secs = merged_samples.len() as f64 / (out_sr as f64 * out_channels.max(1) as f64);
+                        let merged_dur_secs = merged_samples.len() as f64
+                            / (out_sr as f64 * out_channels.max(1) as f64);
                         let merged_len_beats = merged_dur_secs * bpm / 60.0;
                         Clip::Audio(crate::models::AudioClip {
                             source_file: joined_path.to_string_lossy().to_string(),
@@ -1593,6 +1612,8 @@ impl Command for JoinClips {
                             gain: first_ac.gain,
                             name: "Joined".to_string(),
                             color: first_ac.color,
+                            fade_in: 0.0,
+                            fade_out: 0.0,
                         })
                     } else {
                         // Fallback: just extend length like before
@@ -1604,6 +1625,8 @@ impl Command for JoinClips {
                             gain: first_ac.gain,
                             name: "Joined".to_string(),
                             color: first_ac.color,
+                            fade_in: 0.0,
+                            fade_out: 0.0,
                         })
                     }
                 } else {
@@ -1616,6 +1639,8 @@ impl Command for JoinClips {
                         gain: first_ac.gain,
                         name: "Joined".to_string(),
                         color: first_ac.color,
+                        fade_in: 0.0,
+                        fade_out: 0.0,
                     })
                 }
             };

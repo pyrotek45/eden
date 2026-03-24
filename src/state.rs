@@ -102,6 +102,19 @@ pub enum UiLayer {
     ConfirmDialog,
 }
 
+/// Identifies who opened the generic file browser popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileBrowserCaller {
+    /// Home screen "Open Project" button
+    OpenProject,
+    /// Audio export popup — choosing export directory
+    AudioExportDir,
+    /// MIDI export popup — choosing export directory
+    MidiExportDir,
+    /// Render/Export popup — choosing export directory
+    RenderExportDir,
+}
+
 /// Which tab is active in the bottom panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BottomPanelTab {
@@ -337,6 +350,8 @@ pub struct AppState {
     pub render_popup_open: bool,
     /// Render output filename
     pub render_filename: String,
+    /// Render output directory
+    pub render_export_dir: String,
     /// Render sample rate index (0=44100, 1=48000, 2=96000)
     pub render_sample_rate_idx: usize,
     /// Render bit depth index (0=16, 1=24, 2=32f)
@@ -486,6 +501,23 @@ pub struct AppState {
     pub project_browser_entries: Vec<(String, std::path::PathBuf, bool)>,
     /// Scroll offset in the project browser
     pub project_browser_scroll: i32,
+    // ── Generic file browser popup (reusable) ────────────────────────
+    /// Is the generic file browser overlay open?
+    pub file_browser_open: bool,
+    /// Who opened the file browser (determines what happens on selection)
+    pub file_browser_caller: Option<FileBrowserCaller>,
+    /// Current path being browsed
+    pub file_browser_path: std::path::PathBuf,
+    /// Cached directory listing (name, path, is_dir)
+    pub file_browser_entries: Vec<(String, std::path::PathBuf, bool)>,
+    /// Scroll offset
+    pub file_browser_scroll: i32,
+    /// Title shown at top of the popup
+    pub file_browser_title: String,
+    /// File extension filter (e.g. ".eden.json", ".wav", ".mid"); empty = dirs only
+    pub file_browser_ext_filter: String,
+    /// If true, selecting a directory is the goal (e.g. choosing export folder)
+    pub file_browser_select_dir: bool,
     // ── Left panel ───────────────────────────────────────────────────
     /// Which tab is active in the left panel
     pub left_panel_tab: LeftPanelTab,
@@ -638,12 +670,10 @@ pub struct AppState {
     /// Detailed stereo waveform cache for the audio editor.
     /// Key = source_file string, Value = (left_max, left_min, right_max, right_min).
     /// Each Vec has `num_peaks` entries representing amplitude envelope over the full file.
-    pub waveform_stereo_cache:
-        std::collections::HashMap<String, StereoWaveformPeaks>,
+    pub waveform_stereo_cache: std::collections::HashMap<String, StereoWaveformPeaks>,
     /// Raw stereo waveform data for high-res audio editor rendering.
     /// Key = source_file string, Value = (left_samples, right_samples, sample_rate).
-    pub waveform_raw_cache:
-        std::collections::HashMap<String, (Vec<f32>, Vec<f32>, u32)>,
+    pub waveform_raw_cache: std::collections::HashMap<String, (Vec<f32>, Vec<f32>, u32)>,
     // ── Audio editor state ───────────────────────────────────────────
     /// Audio editor horizontal scroll (in samples fraction 0.0-1.0)
     pub audio_editor_scroll: f64,
@@ -711,6 +741,9 @@ pub struct AppState {
     pub piano_keyboard_held: std::collections::HashSet<u8>,
     /// Queue of MIDI pitches to stop (note-off) — consumed each frame by main.rs
     pub piano_note_off_queue: Vec<u8>,
+    /// Pitch of the note currently being previewed by mouse-click on the piano roll keys.
+    /// Tracked so we can send the correct note-off even if the mouse moves vertically.
+    pub piano_roll_preview_pitch: Option<u8>,
 }
 
 impl AppState {
@@ -756,8 +789,9 @@ impl AppState {
             project_popup_open: false,
             render_popup_open: false,
             render_filename: String::new(),
-            render_sample_rate_idx: 0,
-            render_bit_depth_idx: 0,
+            render_export_dir: String::new(),
+            render_sample_rate_idx: 2, // 96 kHz
+            render_bit_depth_idx: 2,   // 32-bit float
             render_loop_only: false,
             render_progress: None,
             render_result: None,
@@ -824,6 +858,14 @@ impl AppState {
             project_browser_path: dirs_home(),
             project_browser_entries: Vec::new(),
             project_browser_scroll: 0,
+            file_browser_open: false,
+            file_browser_caller: None,
+            file_browser_path: dirs_home(),
+            file_browser_entries: Vec::new(),
+            file_browser_scroll: 0,
+            file_browser_title: String::new(),
+            file_browser_ext_filter: String::new(),
+            file_browser_select_dir: false,
             left_panel_tab: LeftPanelTab::Files,
             rack_expanded_slot: None,
             rack_scroll_x: 0.0,
@@ -919,6 +961,7 @@ impl AppState {
             piano_keyboard_octave: 4,
             piano_keyboard_held: std::collections::HashSet::new(),
             piano_note_off_queue: Vec::new(),
+            piano_roll_preview_pitch: None,
         }
     }
 
@@ -1112,6 +1155,63 @@ impl AppState {
             self.project_browser_entries = items;
         }
         self.project_browser_scroll = 0;
+    }
+
+    /// Open the generic file browser popup.
+    pub fn open_file_browser(
+        &mut self,
+        caller: FileBrowserCaller,
+        title: &str,
+        ext_filter: &str,
+        select_dir: bool,
+        start_path: Option<&std::path::Path>,
+    ) {
+        self.file_browser_caller = Some(caller);
+        self.file_browser_title = title.to_string();
+        self.file_browser_ext_filter = ext_filter.to_string();
+        self.file_browser_select_dir = select_dir;
+        if let Some(p) = start_path {
+            self.file_browser_path = p.to_path_buf();
+        } else {
+            self.file_browser_path = dirs_home();
+        }
+        self.refresh_file_browser();
+        self.file_browser_open = true;
+    }
+
+    /// Refresh the generic file browser entries for the current file_browser_path.
+    pub fn refresh_file_browser(&mut self) {
+        self.file_browser_entries.clear();
+        let ext_filter = self.file_browser_ext_filter.clone();
+        let select_dir = self.file_browser_select_dir;
+        if let Ok(entries) = std::fs::read_dir(&self.file_browser_path) {
+            let mut items: Vec<(String, std::path::PathBuf, bool)> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| {
+                    let p = e.path();
+                    let name = e.file_name().to_string_lossy().to_string();
+                    let is_dir = p.is_dir();
+                    (name, p, is_dir)
+                })
+                .filter(|(name, _path, is_dir)| {
+                    if name.starts_with('.') {
+                        return false;
+                    }
+                    if select_dir {
+                        // In directory-selection mode, only show directories
+                        return *is_dir;
+                    }
+                    // Show directories + files matching the extension filter
+                    *is_dir || (ext_filter.is_empty() || name.ends_with(&ext_filter))
+                })
+                .collect();
+            items.sort_by(|a, b| {
+                b.2.cmp(&a.2)
+                    .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+            });
+            self.file_browser_entries = items;
+        }
+        self.file_browser_scroll = 0;
     }
 
     /// Returns the highest-priority UI layer that is currently active.
@@ -1313,12 +1413,16 @@ impl AppState {
             None
         };
         if let Some(sf) = ae_source {
-            if let std::collections::hash_map::Entry::Vacant(e) = self.waveform_raw_cache.entry(sf) {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.waveform_raw_cache.entry(sf)
+            {
                 let path_ref = std::path::Path::new(e.key());
                 if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path_ref) {
                     let (left, right) = if channels >= 2 {
                         let l: Vec<f32> = raw.chunks(channels).map(|ch| ch[0]).collect();
-                        let r: Vec<f32> = raw.chunks(channels).map(|ch| ch[1.min(channels - 1)]).collect();
+                        let r: Vec<f32> = raw
+                            .chunks(channels)
+                            .map(|ch| ch[1.min(channels - 1)])
+                            .collect();
                         (l, r)
                     } else {
                         (raw.clone(), raw)

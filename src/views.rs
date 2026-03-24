@@ -49,6 +49,20 @@ fn vol_gain_to_pos(gain: f32) -> f32 {
     }
 }
 
+/// Format a gain value as a dB string for display.
+fn gain_to_db_label(gain: f32) -> String {
+    if gain < 1e-6 {
+        "-∞ dB".to_string()
+    } else {
+        let db = 20.0 * gain.log10();
+        if db.abs() < 0.05 {
+            "0.0 dB".to_string()
+        } else {
+            format!("{:+.1} dB", db)
+        }
+    }
+}
+
 // ── Transport bar ────────────────────────────────────────────────────
 
 pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
@@ -772,6 +786,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         if render_clicked {
             if !state.render_popup_open {
                 state.render_filename = format!("{}.wav", state.project.name);
+                state.render_loop_only = state.project.transport.loop_enabled;
                 state.render_popup_open = true;
             } else {
                 state.render_popup_open = false;
@@ -1018,6 +1033,11 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             }
         }
     }
+
+    // ── Clicking the transport bar (anywhere not consumed) focuses arrangement ──
+    if input.mouse_pressed && !input.consumed && input.mouse_in_rect(0, 0, w, h) {
+        state.focused_panel = crate::state::FocusedPanel::Arrangement;
+    }
 }
 
 // ── Loop ruler ── (merged into timeline; this fn is now a no-op) ─────
@@ -1080,6 +1100,17 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
         let lc = state.theme.loop_color;
 
         let edge_alpha = 180u8;
+
+        // Filled region between handles
+        {
+            let fill_x0 = lx1.max(header_w);
+            let fill_x1 = lx2.min(w);
+            if fill_x1 > fill_x0 {
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(lc[0], lc[1], lc[2], 45));
+                let _ =
+                    canvas.fill_rect(Rect::new(fill_x0, y, (fill_x1 - fill_x0) as u32, h as u32));
+            }
+        }
 
         // Left edge line
         if lx1 >= header_w && lx1 <= w {
@@ -1393,6 +1424,11 @@ pub fn draw_timeline_ruler(
         sdl2::rect::Point::new(0, y + h - 1),
         sdl2::rect::Point::new(w, y + h - 1),
     );
+
+    // Clicking the timeline ruler header-column area focuses the arrangement
+    if input.mouse_pressed && !input.consumed && input.mouse_in_rect(0, y, header_w, h) {
+        state.focused_panel = crate::state::FocusedPanel::Arrangement;
+    }
 }
 
 // ── Mode tabs ────────────────────────────────────────────────────────
@@ -1595,6 +1631,7 @@ pub fn draw_track_headers(
             // Musical gain scaling: slider operates on position [0,1],
             // mapped through a dB-aware curve to gain [0,2].
             let mut vol_pos = vol_gain_to_pos(volume);
+            let db_label = gain_to_db_label(volume);
             let vol_changed = slider(
                 canvas,
                 input,
@@ -1608,7 +1645,7 @@ pub fn draw_track_headers(
                     min: 0.0,
                     max: 1.0,
                     orientation: SliderOrientation::Horizontal,
-                    label: None,
+                    label: Some(db_label),
                     default_value: Some(vol_gain_to_pos(0.8)),
                 },
                 &mut vol_pos,
@@ -1632,7 +1669,8 @@ pub fn draw_track_headers(
                     }
                     // Use raw pixel delta so clamp on one track doesn't freeze others
                     let slider_w = state.multi_vol_slider_w as f32;
-                    let pos_delta = (input.mouse_x - state.multi_vol_drag_start_x) as f32 / slider_w;
+                    let pos_delta =
+                        (input.mouse_x - state.multi_vol_drag_start_x) as f32 / slider_w;
                     // Apply relative delta in position space, then convert to gain
                     for &(tid, orig_pos) in &state.multi_vol_drag_origins {
                         let new_pos = (orig_pos + pos_delta).clamp(0.0, 1.0);
@@ -2214,6 +2252,23 @@ pub fn draw_track_headers(
             (state.arrangement.scroll_y - input.scroll_y * 30).clamp(0, max_sy);
     }
 
+    // ── Click in empty header area below tracks → focus arrangement ──
+    {
+        let scroll_y = state.arrangement.scroll_y;
+        let mut y_acc = top - scroll_y;
+        for t in &state.project.tracks {
+            y_acc += t.height;
+        }
+        let bottom_panel_y = state.bottom_panel_y();
+        let empty_header_area = y_acc < bottom_panel_y
+            && input.mouse_in_rect(left, y_acc, header_w, bottom_panel_y - y_acc)
+            && input.mouse_pressed
+            && !input.consumed;
+        if empty_header_area {
+            state.focused_panel = crate::state::FocusedPanel::Arrangement;
+        }
+    }
+
     // ── Drop module/sample onto empty header area below tracks → create MIDI track ──
     if input.mouse_released && state.module_drag.is_some() {
         let scroll_y = state.arrangement.scroll_y;
@@ -2584,7 +2639,11 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     state.text_field_cursor = cursor;
                     if committed {
                         if let Some(new_name) = new_val {
-                            let old_name = state.project.tracks[track_idx].clips.get(ci).map(|c| c.name().to_string()).unwrap_or_default();
+                            let old_name = state.project.tracks[track_idx]
+                                .clips
+                                .get(ci)
+                                .map(|c| c.name().to_string())
+                                .unwrap_or_default();
                             if old_name != new_name {
                                 let snapshot = state.project.clone();
                                 match state.project.tracks[track_idx].clips.get_mut(ci) {
@@ -2996,21 +3055,27 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 20, 160));
             let _ = canvas.fill_rect(Rect::new(meter_x, meter_y, meter_w as u32, meter_h as u32));
             // Level fill — dB-scaled for better visual range
-            // Convert linear RMS to dB, then map -60dB..0dB → 0.0..1.0
+            // Convert linear RMS to dB, then map:
+            //   -60dB..0dB → 0.0..0.8  (0dB at 80% of meter height)
+            //   0dB..+6dB  → 0.8..1.0  (above 0dB = red zone)
             let db = if rms > 1e-6 {
                 20.0 * (rms as f64).log10()
             } else {
                 -60.0
             };
-            let meter_frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
+            let meter_frac = if db <= 0.0 {
+                ((db + 60.0) / 60.0).clamp(0.0, 0.8) as f32 * 1.0 // 0..0.8
+            } else {
+                (0.8 + (db / 6.0).min(1.0) * 0.2) as f32 // 0.8..1.0
+            };
             let fill_h = (meter_frac * meter_h as f32) as i32;
             let fill_y = meter_y + meter_h - fill_h;
-            let col = if meter_frac < 0.7 {
-                sdl2::pixels::Color::RGBA(60, 200, 80, 200)
-            } else if meter_frac < 0.9 {
+            let col = if db >= 0.0 {
+                sdl2::pixels::Color::RGBA(230, 60, 40, 220)
+            } else if meter_frac > 0.6 {
                 sdl2::pixels::Color::RGBA(220, 200, 40, 200)
             } else {
-                sdl2::pixels::Color::RGBA(230, 60, 40, 220)
+                sdl2::pixels::Color::RGBA(60, 200, 80, 200)
             };
             canvas.set_draw_color(col);
             let _ = canvas.fill_rect(Rect::new(meter_x, fill_y, meter_w as u32, fill_h as u32));
@@ -3169,6 +3234,8 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             source_file: String::new(),
                             offset: 0.0,
                             gain: 1.0,
+                            fade_in: 0.0,
+                            fade_out: 0.0,
                         })
                     }
                     crate::models::TrackType::Automation => {
@@ -3409,7 +3476,9 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 for track in &mut state.project.tracks {
                     track.height = ((track.height as f32 * factor).max(80.0)) as i32;
                 }
-                state.commands.push_undo_snapshot(snapshot, "Resize All Tracks");
+                state
+                    .commands
+                    .push_undo_snapshot(snapshot, "Resize All Tracks");
                 state.dirty = true;
             } else if input.ctrl() {
                 // Ctrl+scroll: zoom horizontally, keeping the beat under the cursor fixed
@@ -3461,14 +3530,26 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         state.focused_panel = crate::state::FocusedPanel::Arrangement;
 
         // Click on empty background (no clip or widget hit) deselects everything
-        // unless shift or ctrl is held
+        // unless shift or ctrl is held, or the bottom panel is showing a clip editor
+        let preserve_clip = state.bottom_panel_open
+            && state.selected_clip.map_or(false, |(tid, ci)| {
+                state
+                    .project
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .and_then(|t| t.clips.get(ci))
+                    .map_or(false, |c| matches!(c, crate::models::Clip::Audio(_)))
+            });
         if input.drag_widget == WidgetId::None
             && input.active_widget == WidgetId::None
             && !input.shift()
             && !input.ctrl()
         {
             state.selected_clips.clear();
-            state.selected_clip = None;
+            if !preserve_clip {
+                state.selected_clip = None;
+            }
         }
     }
 
@@ -3861,16 +3942,16 @@ fn handle_clip_drag(
             // For multi-clip drags, compute per-clip destination tracks
             // based on relative track index offsets from the dragged clip.
             let dragged_track_idx = state.project.tracks.iter().position(|t| t.id == tid);
-            let target_track_idx = target_track_id.and_then(|ttid|
-                state.project.tracks.iter().position(|t| t.id == ttid)
-            );
+            let target_track_idx = target_track_id
+                .and_then(|ttid| state.project.tracks.iter().position(|t| t.id == ttid));
             let track_idx_delta: i32 = match (dragged_track_idx, target_track_idx) {
                 (Some(d), Some(t)) => t as i32 - d as i32,
                 _ => 0,
             };
             // Build track id list for index-based lookup
             let track_ids: Vec<u32> = state.project.tracks.iter().map(|t| t.id).collect();
-            let track_types: Vec<crate::models::TrackType> = state.project.tracks.iter().map(|t| t.track_type).collect();
+            let track_types: Vec<crate::models::TrackType> =
+                state.project.tracks.iter().map(|t| t.track_type).collect();
 
             if is_multi {
                 for (&(t_id, c_idx), &old_start) in &state.drag_original_positions {
@@ -3979,8 +4060,11 @@ fn handle_clip_drag(
                                 new_clip.set_start_time(*new_start);
                                 // Resolve per-clip destination using track index offset
                                 let dest_tid = if track_idx_delta != 0 && is_multi {
-                                    if let Some(src_idx) = track_ids.iter().position(|&id| id == *t_id) {
-                                        let dst_idx = (src_idx as i32 + track_idx_delta).max(0) as usize;
+                                    if let Some(src_idx) =
+                                        track_ids.iter().position(|&id| id == *t_id)
+                                    {
+                                        let dst_idx =
+                                            (src_idx as i32 + track_idx_delta).max(0) as usize;
                                         track_ids.get(dst_idx).copied().unwrap_or(*t_id)
                                     } else {
                                         *t_id
@@ -4059,20 +4143,32 @@ fn handle_clip_drag(
                             // Multiple clips: move each to its own destination track
                             // based on relative track index offset.
                             // Collect clips to remove and re-add at new positions.
-                            let mut clips_to_delete: Vec<(u32, usize, crate::models::Clip)> = Vec::new();
+                            let mut clips_to_delete: Vec<(u32, usize, crate::models::Clip)> =
+                                Vec::new();
                             let mut clips_to_add: Vec<(u32, crate::models::Clip)> = Vec::new();
                             for &((t_id, c_idx), _old, new_start) in &moves {
-                                let dest_tid = if let Some(src_idx) = track_ids.iter().position(|&id| id == t_id) {
-                                    let dst_idx = (src_idx as i32 + track_idx_delta).max(0) as usize;
+                                let dest_tid = if let Some(src_idx) =
+                                    track_ids.iter().position(|&id| id == t_id)
+                                {
+                                    let dst_idx =
+                                        (src_idx as i32 + track_idx_delta).max(0) as usize;
                                     track_ids.get(dst_idx).copied().unwrap_or(t_id)
                                 } else {
                                     t_id
                                 };
                                 // Verify destination track is compatible
-                                let src_tt = track_ids.iter().position(|&id| id == t_id).and_then(|i| track_types.get(i));
-                                let dst_tt = track_ids.iter().position(|&id| id == dest_tid).and_then(|i| track_types.get(i));
+                                let src_tt = track_ids
+                                    .iter()
+                                    .position(|&id| id == t_id)
+                                    .and_then(|i| track_types.get(i));
+                                let dst_tt = track_ids
+                                    .iter()
+                                    .position(|&id| id == dest_tid)
+                                    .and_then(|i| track_types.get(i));
                                 if src_tt == dst_tt && dest_tid != t_id {
-                                    if let Some(track) = state.project.tracks.iter().find(|t| t.id == t_id) {
+                                    if let Some(track) =
+                                        state.project.tracks.iter().find(|t| t.id == t_id)
+                                    {
                                         if let Some(clip) = track.clips.get(c_idx) {
                                             clips_to_delete.push((t_id, c_idx, clip.clone()));
                                             let mut new_clip = clip.clone();
@@ -4085,11 +4181,19 @@ fn handle_clip_drag(
                             if !clips_to_delete.is_empty() {
                                 // Use a composite of Delete + Add for proper undo
                                 let cmds: Vec<Box<dyn crate::commands::Command>> = vec![
-                                    Box::new(crate::commands::DeleteClips { clips: clips_to_delete }),
-                                    Box::new(crate::commands::AddClips { clips: clips_to_add, added_indices: Vec::new() }),
+                                    Box::new(crate::commands::DeleteClips {
+                                        clips: clips_to_delete,
+                                    }),
+                                    Box::new(crate::commands::AddClips {
+                                        clips: clips_to_add,
+                                        added_indices: Vec::new(),
+                                    }),
                                 ];
                                 state.commands.execute(
-                                    Box::new(crate::commands::CompositeCommand { desc: "Move Clips Cross-Track".to_string(), cmds }),
+                                    Box::new(crate::commands::CompositeCommand {
+                                        desc: "Move Clips Cross-Track".to_string(),
+                                        cmds,
+                                    }),
                                     &mut state.project,
                                 );
                                 // Update selection to new locations
@@ -4802,45 +4906,51 @@ fn draw_bottom_mixer(
             }
 
             if rms > 0.001 {
-                // dB-scaled meter: -60dB..0dB → 0.0..1.0
+                // dB-scaled meter: 0dB at 80% of meter height
+                //   -60dB..0dB  → 0.0..0.8
+                //   0dB..+6dB   → 0.8..1.0  (red zone)
                 let db = if rms > 1e-6 {
                     20.0 * (rms as f64).log10()
                 } else {
                     -60.0
                 };
-                let meter_frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
+                let meter_frac = if db <= 0.0 {
+                    ((db + 60.0) / 60.0).clamp(0.0, 0.8) as f32
+                } else {
+                    (0.8 + (db / 6.0).min(1.0) * 0.2) as f32
+                };
                 let fill_h = (meter_frac * fader_h as f32) as i32;
-                // Dark-to-bright gradient based on dB level
-                let col = if meter_frac < 0.5 {
+                // Color based on dB level
+                let col = if db >= 0.0 {
+                    // Above 0dB: red
+                    sdl2::pixels::Color::RGBA(200, 40, 30, 240)
+                } else if meter_frac < 0.4 {
                     // Dark green → medium green
-                    let t = meter_frac / 0.5;
+                    let t = meter_frac / 0.4;
                     sdl2::pixels::Color::RGBA(
                         (20.0 + t * 40.0) as u8,
                         (80.0 + t * 120.0) as u8,
                         (30.0 + t * 50.0) as u8,
                         230,
                     )
-                } else if meter_frac < 0.8 {
+                } else if meter_frac < 0.65 {
                     // Green → yellow
-                    let t = (meter_frac - 0.5) / 0.3;
+                    let t = (meter_frac - 0.4) / 0.25;
                     sdl2::pixels::Color::RGBA(
                         (60.0 + t * 180.0) as u8,
                         (200.0 - t * 20.0) as u8,
                         (80.0 - t * 50.0) as u8,
                         230,
                     )
-                } else if meter_frac < 0.95 {
-                    // Yellow → dark red
-                    let t = (meter_frac - 0.8) / 0.15;
+                } else {
+                    // Yellow → orange near 0dB
+                    let t = (meter_frac - 0.65) / 0.15;
                     sdl2::pixels::Color::RGBA(
-                        (240.0 - t * 60.0) as u8,
-                        (180.0 - t * 140.0) as u8,
-                        (30.0 - t * 10.0) as u8,
+                        (240.0 - t * 20.0) as u8,
+                        (180.0 - t * 80.0) as u8,
+                        (30.0) as u8,
                         230,
                     )
-                } else {
-                    // Dark red for clipping
-                    sdl2::pixels::Color::RGBA(160, 30, 20, 255)
                 };
                 canvas.set_draw_color(col);
                 let _ = canvas.fill_rect(Rect::new(
@@ -4851,9 +4961,9 @@ fn draw_bottom_mixer(
                 ));
             }
 
-            // 0dB reference line
+            // 0dB reference line at 80% of meter height
             {
-                let zero_db_y = meter_y; // 0dB = top of meter (rms=1.0)
+                let zero_db_y = meter_y + fader_h - (0.8 * fader_h as f32) as i32;
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 80, 80, 160));
                 let _ = canvas.draw_line(
                     sdl2::rect::Point::new(meter_x, zero_db_y),
@@ -4861,7 +4971,7 @@ fn draw_bottom_mixer(
                 );
             }
 
-            // Peak hold indicator — thin horizontal line (dB-scaled)
+            // Peak hold indicator — thin horizontal line (dB-scaled, 0dB at 80%)
             let peak_hold = state.meters.track_peak_hold.get(i).copied().unwrap_or(0.0);
             if peak_hold > 0.01 {
                 let pk_db = if peak_hold > 1e-6 {
@@ -4869,7 +4979,11 @@ fn draw_bottom_mixer(
                 } else {
                     -60.0
                 };
-                let pk_frac = ((pk_db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
+                let pk_frac = if pk_db <= 0.0 {
+                    ((pk_db + 60.0) / 60.0).clamp(0.0, 0.8) as f32
+                } else {
+                    (0.8 + (pk_db / 6.0).min(1.0) * 0.2) as f32
+                };
                 let ph_y = meter_y + fader_h - (pk_frac * fader_h as f32) as i32;
                 let ph_col = if peak_hold >= 0.95 {
                     sdl2::pixels::Color::RGBA(180, 40, 30, 255)
@@ -6197,21 +6311,54 @@ fn draw_instrument_rack(
                         .get(ti)
                         .copied()
                         .unwrap_or(0.0);
-                    let track_rms_post: f32 =
-                        state.meters.track_rms.get(ti).copied().unwrap_or(0.0);
 
                     let in_db_rms = if track_rms_pre > 1e-6 {
                         20.0 * track_rms_pre.log10()
                     } else {
                         -60.0_f32
                     };
-                    let out_db_rms = if track_rms_post > 1e-6 {
-                        20.0 * track_rms_post.log10()
-                    } else {
-                        -60.0_f32
-                    };
-                    // Estimate GR from in vs out
-                    let gr_db_live = (out_db_rms - in_db_rms).min(0.0);
+                    // Use actual gain reduction from audio engine
+                    let gr_db_live = state
+                        .meters
+                        .track_effect_gr
+                        .get(ti)
+                        .and_then(|v| v.get(slot_idx))
+                        .copied()
+                        .unwrap_or(0.0)
+                        .min(0.0);
+
+                    // ── Real-time dot on the compression curve ──
+                    // Shows current audio level riding along the curve.
+                    {
+                        let dot_in_db = in_db_rms;
+                        let dot_over = dot_in_db - thresh_db;
+                        let dot_gr = if dot_over <= -half_knee {
+                            0.0_f32
+                        } else if dot_over >= half_knee {
+                            -slope * dot_over
+                        } else {
+                            let x = dot_over + half_knee;
+                            let t = x / knee_db.max(0.01);
+                            -slope * knee_db * t * t * 0.5
+                        };
+                        let dot_out_db = dot_in_db + dot_gr;
+                        let dot_x_norm = (dot_in_db + 60.0) / 60.0;
+                        let dot_y_norm = 1.0 - (dot_out_db + 60.0) / 60.0;
+                        let dot_px = vis_x + (dot_x_norm * w_f).clamp(0.0, w_f - 1.0) as i32;
+                        let dot_py = vis_y + (dot_y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                        // Draw a filled circle (radius 3) as the dot
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 255, 100, 240));
+                        for dy in -3i32..=3 {
+                            for dx in -3i32..=3 {
+                                if dx * dx + dy * dy <= 9 {
+                                    let _ = canvas.draw_point(sdl2::rect::Point::new(
+                                        dot_px + dx,
+                                        dot_py + dy,
+                                    ));
+                                }
+                            }
+                        }
+                    }
 
                     // Draw input level bar
                     let in_meter_w = (vis_w as i32 - 4) / 2 - 1;
@@ -6235,9 +6382,9 @@ fn draw_instrument_rack(
                         canvas.set_draw_color(col);
                         let _ = canvas.fill_rect(Rect::new(
                             vis_x + 2,
-                            meter_y + meter_h - 1,
+                            meter_y,
                             in_fill_w as u32,
-                            1,
+                            meter_h as u32,
                         ));
                     }
                     draw_pixel_label(
@@ -6378,11 +6525,16 @@ fn draw_instrument_rack(
                 }
 
                 "Delay" => {
-                    let time = params_snap
+                    let div_l = params_snap
                         .iter()
-                        .find(|(k, _)| k == "time")
-                        .map(|(_, v)| *v)
-                        .unwrap_or(0.3);
+                        .find(|(k, _)| k == "time_l")
+                        .map(|(_, v)| v.round() as usize)
+                        .unwrap_or(5);
+                    let div_r = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "time_r")
+                        .map(|(_, v)| v.round() as usize)
+                        .unwrap_or(3);
                     let feedback = params_snap
                         .iter()
                         .find(|(k, _)| k == "feedback")
@@ -6395,28 +6547,87 @@ fn draw_instrument_rack(
                         .unwrap_or(0.5);
                     let w_f = vis_w as f32;
                     let h_f = vis_h as f32;
+                    let half_h = (h_f * 0.5) as i32;
                     let accent = Theme::c(state.theme.accent);
-                    let mut level = mix;
-                    let tap_spacing = (time * w_f * 0.5).max(6.0) as i32;
-                    let tap_w = (tap_spacing / 2).max(3);
-                    let mut tap_x = vis_x + 4;
-                    for _ in 0..8 {
-                        if level < 0.02 || tap_x + tap_w > vis_x + vis_w as i32 - 2 {
-                            break;
+                    // Beat values for each division index (same order as DELAY_DIVISIONS)
+                    let beat_vals: [f32; 10] = [
+                        4.0,
+                        2.0,
+                        4.0 / 3.0,
+                        1.0,
+                        2.0 / 3.0,
+                        0.5,
+                        1.0 / 3.0,
+                        0.25,
+                        0.5 / 3.0,
+                        0.125,
+                    ];
+                    // Draw L taps on top half
+                    {
+                        let beats = beat_vals.get(div_l).copied().unwrap_or(0.5);
+                        let tap_spacing =
+                            ((beats / 4.0) * w_f * 0.9).max(4.0).min(w_f * 0.45) as i32;
+                        let tap_w = (tap_spacing / 3).clamp(2, 12);
+                        let mut tap_x = vis_x + 2;
+                        let mut level = mix;
+                        for _ in 0..12 {
+                            if level < 0.02 || tap_x + tap_w > vis_x + vis_w as i32 - 1 {
+                                break;
+                            }
+                            let bar_h = (level * half_h as f32 * 0.85) as i32;
+                            let bar_y = vis_y + half_h - bar_h;
+                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                                accent.r,
+                                accent.g,
+                                accent.b,
+                                (level * 220.0) as u8,
+                            ));
+                            let _ = canvas.fill_rect(Rect::new(
+                                tap_x,
+                                bar_y,
+                                tap_w as u32,
+                                bar_h as u32,
+                            ));
+                            tap_x += tap_spacing;
+                            level *= feedback;
                         }
-                        let bar_h = (level * h_f * 0.85) as i32;
-                        let bar_y = vis_y + vis_h - bar_h;
-                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(
-                            accent.r,
-                            accent.g,
-                            accent.b,
-                            (level * 220.0) as u8,
-                        ));
-                        let _ =
-                            canvas.fill_rect(Rect::new(tap_x, bar_y, tap_w as u32, bar_h as u32));
-                        tap_x += tap_spacing;
-                        level *= feedback;
                     }
+                    // Draw R taps on bottom half
+                    {
+                        let beats = beat_vals.get(div_r).copied().unwrap_or(1.0);
+                        let tap_spacing =
+                            ((beats / 4.0) * w_f * 0.9).max(4.0).min(w_f * 0.45) as i32;
+                        let tap_w = (tap_spacing / 3).clamp(2, 12);
+                        let mut tap_x = vis_x + 2;
+                        let mut level = mix;
+                        for _ in 0..12 {
+                            if level < 0.02 || tap_x + tap_w > vis_x + vis_w as i32 - 1 {
+                                break;
+                            }
+                            let bar_h = (level * half_h as f32 * 0.85) as i32;
+                            let bar_y = vis_y + half_h;
+                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                                100,
+                                accent.g,
+                                accent.b,
+                                (level * 200.0) as u8,
+                            ));
+                            let _ = canvas.fill_rect(Rect::new(
+                                tap_x,
+                                bar_y,
+                                tap_w as u32,
+                                bar_h as u32,
+                            ));
+                            tap_x += tap_spacing;
+                            level *= feedback;
+                        }
+                    }
+                    // Centre divider
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 80));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, vis_y + half_h),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, vis_y + half_h),
+                    );
                 }
 
                 "Limiter" => {
@@ -6478,7 +6689,39 @@ fn draw_instrument_rack(
                         sdl2::rect::Point::new(vis_x + vis_w as i32, ceil_y),
                     );
 
-                    // ── Meters on bottom third (IN, OUT, GR) ──
+                    // ── Real-time dot on the limiter transfer curve ──
+                    {
+                        let input_rms_dot: f32 = state
+                            .meters
+                            .track_rms_pre_effect
+                            .get(ti)
+                            .copied()
+                            .unwrap_or(0.0);
+                        let dot_in_db = if input_rms_dot > 1e-6 {
+                            20.0 * input_rms_dot.log10()
+                        } else {
+                            -60.0_f32
+                        };
+                        let dot_after_gain = dot_in_db + gain_db;
+                        let dot_out_db = dot_after_gain.min(ceiling_db);
+                        let dot_x_norm = (dot_in_db + 60.0) / 60.0;
+                        let dot_y_norm = 1.0 - (dot_out_db + 60.0) / 60.0;
+                        let dot_px = vis_x + (dot_x_norm * w_f).clamp(0.0, w_f - 1.0) as i32;
+                        let dot_py = vis_y + (dot_y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 255, 100, 240));
+                        for dy in -3i32..=3 {
+                            for dx in -3i32..=3 {
+                                if dx * dx + dy * dy <= 9 {
+                                    let _ = canvas.draw_point(sdl2::rect::Point::new(
+                                        dot_px + dx,
+                                        dot_py + dy,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Meters on bottom third (IN, GR) ──
                     let meter_y = vis_y + curve_h + 3;
                     let meter_h = (vis_h - curve_h - 6).max(4);
 
@@ -6493,14 +6736,15 @@ fn draw_instrument_rack(
                     } else {
                         -60.0_f32
                     };
-                    let gr_db = {
-                        let after = in_db_live + gain_db;
-                        if after > ceiling_db {
-                            ceiling_db - after
-                        } else {
-                            0.0_f32
-                        }
-                    };
+                    // Use actual gain reduction from audio engine
+                    let gr_db = state
+                        .meters
+                        .track_effect_gr
+                        .get(ti)
+                        .and_then(|v| v.get(slot_idx))
+                        .copied()
+                        .unwrap_or(0.0)
+                        .min(0.0);
 
                     // Input level bar (horizontal)
                     let in_meter_w = (vis_w as i32 - 4) / 2 - 1;
@@ -6524,9 +6768,9 @@ fn draw_instrument_rack(
                         canvas.set_draw_color(col);
                         let _ = canvas.fill_rect(Rect::new(
                             vis_x + 2,
-                            meter_y + meter_h - 1,
+                            meter_y,
                             in_fill_w as u32,
-                            1,
+                            meter_h as u32,
                         ));
                     }
                     draw_pixel_label(
@@ -7099,8 +7343,7 @@ fn draw_instrument_rack(
 
             if item_hover {
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 75, 255));
-                let _ =
-                    canvas.fill_rect(Rect::new(popup_x, iy, popup_w as u32, item_h as u32));
+                let _ = canvas.fill_rect(Rect::new(popup_x, iy, popup_w as u32, item_h as u32));
             }
             if is_selected {
                 canvas.set_draw_color(Theme::c(state.theme.accent));
@@ -7112,7 +7355,15 @@ fn draw_instrument_rack(
             } else {
                 sdl2::pixels::Color::RGBA(210, 210, 210, 255)
             };
-            draw_pixel_label(canvas, &state.theme, label, popup_x + 6, iy + 4, popup_w - 10, text_col);
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                label,
+                popup_x + 6,
+                iy + 4,
+                popup_w - 10,
+                text_col,
+            );
 
             if item_hover && input.mouse_pressed {
                 clicked_choice = Some(*sc_val);
@@ -7288,7 +7539,9 @@ fn draw_master_rack(
         if toggle_clicked {
             let snapshot = state.project.clone();
             state.project.master_rack[slot_idx].enabled = !slot_enabled;
-            state.commands.push_undo_snapshot(snapshot, "Toggle Master Effect");
+            state
+                .commands
+                .push_undo_snapshot(snapshot, "Toggle Master Effect");
             state.dirty = true;
         }
 
@@ -7314,7 +7567,9 @@ fn draw_master_rack(
         if del_clicked {
             let snapshot = state.project.clone();
             state.project.master_rack.remove(slot_idx);
-            state.commands.push_undo_snapshot(snapshot, "Remove Master Effect");
+            state
+                .commands
+                .push_undo_snapshot(snapshot, "Remove Master Effect");
             state.dirty = true;
             state.push_status("Master effect removed".to_string());
             break;
@@ -7685,19 +7940,51 @@ fn draw_master_rack(
                     let meter_y = vis_y + curve_h + 2;
                     let meter_h = (vis_h - curve_h - 4).max(4);
                     let track_rms_pre: f32 = state.meters.master_rms_pre;
-                    let track_rms_post: f32 = state.meters.master_rms;
 
                     let in_db_rms = if track_rms_pre > 1e-6 {
                         20.0 * track_rms_pre.log10()
                     } else {
                         -60.0_f32
                     };
-                    let out_db_rms = if track_rms_post > 1e-6 {
-                        20.0 * track_rms_post.log10()
-                    } else {
-                        -60.0_f32
-                    };
-                    let gr_db_live = (out_db_rms - in_db_rms).min(0.0);
+                    // Use actual gain reduction from audio engine
+                    let gr_db_live = state
+                        .meters
+                        .master_effect_gr
+                        .get(slot_idx)
+                        .copied()
+                        .unwrap_or(0.0)
+                        .min(0.0);
+
+                    // ── Real-time dot on the compression curve ──
+                    {
+                        let dot_in_db = in_db_rms;
+                        let dot_over = dot_in_db - thresh_db;
+                        let dot_gr = if dot_over <= -half_knee {
+                            0.0_f32
+                        } else if dot_over >= half_knee {
+                            -slope * dot_over
+                        } else {
+                            let x = dot_over + half_knee;
+                            let t = x / knee_db.max(0.01);
+                            -slope * knee_db * t * t * 0.5
+                        };
+                        let dot_out_db = dot_in_db + dot_gr;
+                        let dot_x_norm = (dot_in_db + 60.0) / 60.0;
+                        let dot_y_norm = 1.0 - (dot_out_db + 60.0) / 60.0;
+                        let dot_px = vis_x + (dot_x_norm * w_f).clamp(0.0, w_f - 1.0) as i32;
+                        let dot_py = vis_y + (dot_y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 255, 100, 240));
+                        for dy in -3i32..=3 {
+                            for dx in -3i32..=3 {
+                                if dx * dx + dy * dy <= 9 {
+                                    let _ = canvas.draw_point(sdl2::rect::Point::new(
+                                        dot_px + dx,
+                                        dot_py + dy,
+                                    ));
+                                }
+                            }
+                        }
+                    }
 
                     // Draw input level bar
                     let in_meter_w = (vis_w as i32 - 4) / 2 - 1;
@@ -7721,9 +8008,9 @@ fn draw_master_rack(
                         canvas.set_draw_color(col);
                         let _ = canvas.fill_rect(Rect::new(
                             vis_x + 2,
-                            meter_y + meter_h - 1,
+                            meter_y,
                             in_fill_w as u32,
-                            1,
+                            meter_h as u32,
                         ));
                     }
                     draw_pixel_label(
@@ -7849,12 +8136,17 @@ fn draw_master_rack(
                 }
 
                 "Delay" => {
-                    // Delay tap bars (synced with track rack vis)
-                    let time = params_snap
+                    // Stereo delay tap bars (synced with track rack vis)
+                    let div_l = params_snap
                         .iter()
-                        .find(|(k, _)| k == "time")
-                        .map(|(_, v)| *v)
-                        .unwrap_or(0.3);
+                        .find(|(k, _)| k == "time_l")
+                        .map(|(_, v)| v.round() as usize)
+                        .unwrap_or(5);
+                    let div_r = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "time_r")
+                        .map(|(_, v)| v.round() as usize)
+                        .unwrap_or(3);
                     let feedback = params_snap
                         .iter()
                         .find(|(k, _)| k == "feedback")
@@ -7867,28 +8159,86 @@ fn draw_master_rack(
                         .unwrap_or(0.5);
                     let w_f = vis_w as f32;
                     let h_f = vis_h as f32;
+                    let half_h = (h_f * 0.5) as i32;
                     let accent = Theme::c(state.theme.accent);
-                    let mut level = mix;
-                    let tap_spacing = (time * w_f * 0.5).max(6.0) as i32;
-                    let tap_w = (tap_spacing / 2).max(3);
-                    let mut tap_x = vis_x + 4;
-                    for _ in 0..8 {
-                        if level < 0.02 || tap_x + tap_w > vis_x + vis_w as i32 - 2 {
-                            break;
+                    let beat_vals: [f32; 10] = [
+                        4.0,
+                        2.0,
+                        4.0 / 3.0,
+                        1.0,
+                        2.0 / 3.0,
+                        0.5,
+                        1.0 / 3.0,
+                        0.25,
+                        0.5 / 3.0,
+                        0.125,
+                    ];
+                    // L taps (top half)
+                    {
+                        let beats = beat_vals.get(div_l).copied().unwrap_or(0.5);
+                        let tap_spacing =
+                            ((beats / 4.0) * w_f * 0.9).max(4.0).min(w_f * 0.45) as i32;
+                        let tap_w = (tap_spacing / 3).clamp(2, 12);
+                        let mut tap_x = vis_x + 2;
+                        let mut level = mix;
+                        for _ in 0..12 {
+                            if level < 0.02 || tap_x + tap_w > vis_x + vis_w as i32 - 1 {
+                                break;
+                            }
+                            let bar_h = (level * half_h as f32 * 0.85) as i32;
+                            let bar_y = vis_y + half_h - bar_h;
+                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                                accent.r,
+                                accent.g,
+                                accent.b,
+                                (level * 220.0) as u8,
+                            ));
+                            let _ = canvas.fill_rect(Rect::new(
+                                tap_x,
+                                bar_y,
+                                tap_w as u32,
+                                bar_h as u32,
+                            ));
+                            tap_x += tap_spacing;
+                            level *= feedback;
                         }
-                        let bar_h = (level * h_f * 0.85) as i32;
-                        let bar_y = vis_y + vis_h - bar_h;
-                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(
-                            accent.r,
-                            accent.g,
-                            accent.b,
-                            (level * 220.0) as u8,
-                        ));
-                        let _ =
-                            canvas.fill_rect(Rect::new(tap_x, bar_y, tap_w as u32, bar_h as u32));
-                        tap_x += tap_spacing;
-                        level *= feedback;
                     }
+                    // R taps (bottom half)
+                    {
+                        let beats = beat_vals.get(div_r).copied().unwrap_or(1.0);
+                        let tap_spacing =
+                            ((beats / 4.0) * w_f * 0.9).max(4.0).min(w_f * 0.45) as i32;
+                        let tap_w = (tap_spacing / 3).clamp(2, 12);
+                        let mut tap_x = vis_x + 2;
+                        let mut level = mix;
+                        for _ in 0..12 {
+                            if level < 0.02 || tap_x + tap_w > vis_x + vis_w as i32 - 1 {
+                                break;
+                            }
+                            let bar_h = (level * half_h as f32 * 0.85) as i32;
+                            let bar_y = vis_y + half_h;
+                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                                100,
+                                accent.g,
+                                accent.b,
+                                (level * 200.0) as u8,
+                            ));
+                            let _ = canvas.fill_rect(Rect::new(
+                                tap_x,
+                                bar_y,
+                                tap_w as u32,
+                                bar_h as u32,
+                            ));
+                            tap_x += tap_spacing;
+                            level *= feedback;
+                        }
+                    }
+                    // Centre divider
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 80));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, vis_y + half_h),
+                        sdl2::rect::Point::new(vis_x + vis_w as i32, vis_y + half_h),
+                    );
                 }
 
                 "Limiter" => {
@@ -7945,6 +8295,33 @@ fn draw_master_rack(
                         sdl2::rect::Point::new(vis_x + vis_w as i32, ceil_y),
                     );
 
+                    // ── Real-time dot on the limiter transfer curve ──
+                    {
+                        let input_rms_dot = state.meters.master_rms_pre;
+                        let dot_in_db = if input_rms_dot > 1e-6 {
+                            20.0 * input_rms_dot.log10()
+                        } else {
+                            -60.0_f32
+                        };
+                        let dot_after_gain = dot_in_db + gain_db;
+                        let dot_out_db = dot_after_gain.min(ceiling_db);
+                        let dot_x_norm = (dot_in_db + 60.0) / 60.0;
+                        let dot_y_norm = 1.0 - (dot_out_db + 60.0) / 60.0;
+                        let dot_px = vis_x + (dot_x_norm * w_f).clamp(0.0, w_f - 1.0) as i32;
+                        let dot_py = vis_y + (dot_y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 255, 100, 240));
+                        for dy in -3i32..=3 {
+                            for dx in -3i32..=3 {
+                                if dx * dx + dy * dy <= 9 {
+                                    let _ = canvas.draw_point(sdl2::rect::Point::new(
+                                        dot_px + dx,
+                                        dot_py + dy,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
                     // ── Meters on bottom third (IN + GR) ──
                     let meter_y = vis_y + curve_h + 3;
                     let meter_h = (vis_h - curve_h - 6).max(4);
@@ -7991,9 +8368,9 @@ fn draw_master_rack(
                         canvas.set_draw_color(col);
                         let _ = canvas.fill_rect(Rect::new(
                             vis_x + 2,
-                            meter_y + meter_h - 1,
+                            meter_y,
                             in_fill_w as u32,
-                            1,
+                            meter_h as u32,
                         ));
                     }
                     draw_pixel_label(
@@ -8139,7 +8516,9 @@ fn draw_master_rack(
                     if replace_idx < state.project.master_rack.len() {
                         state.project.master_rack.remove(replace_idx);
                         state.project.master_rack.insert(replace_idx, new_slot);
-                        state.commands.push_undo_snapshot(snapshot, "Replace Master Effect");
+                        state
+                            .commands
+                            .push_undo_snapshot(snapshot, "Replace Master Effect");
                         state.push_status(format!(
                             "Replaced slot {} with {}",
                             replace_idx + 1,
@@ -8151,7 +8530,9 @@ fn draw_master_rack(
                     if let Some(idx) = insert_idx {
                         let idx = idx.min(state.project.master_rack.len());
                         state.project.master_rack.insert(idx, new_slot);
-                        state.commands.push_undo_snapshot(snapshot, "Add Master Effect");
+                        state
+                            .commands
+                            .push_undo_snapshot(snapshot, "Add Master Effect");
                         state.push_status(format!(
                             "Added {} to master rack at position {}",
                             module_name,
@@ -8159,7 +8540,9 @@ fn draw_master_rack(
                         ));
                     } else {
                         state.project.master_rack.push(new_slot);
-                        state.commands.push_undo_snapshot(snapshot, "Add Master Effect");
+                        state
+                            .commands
+                            .push_undo_snapshot(snapshot, "Add Master Effect");
                         state.push_status(format!("Added {} to master rack", module_name));
                     }
                 }
@@ -8836,6 +9219,8 @@ fn draw_left_panel_files(
                         gain: 1.0,
                         name: file_name.clone(),
                         color: [100, 220, 130, 200],
+                        fade_in: 0.0,
+                        fade_out: 0.0,
                     });
                     // Add to clip library if not already there
                     let already = state.clip_library.iter().any(|(_, lc)| {
@@ -9196,6 +9581,8 @@ fn draw_left_panel_files(
                                         gain: 1.0,
                                         name: stem.clone(),
                                         color: [100, 160, 255, 255],
+                                        fade_in: 0.0,
+                                        fade_out: 0.0,
                                     });
 
                                 if let Some(row) = target_row {
@@ -10255,7 +10642,11 @@ pub fn draw_project_manager(
     // When the project browser overlay or new-project popup is open, the
     // underlying card must not react to input — use a dead InputState so
     // buttons are drawn but inert.
-    let mut dead_input = InputState { mouse_x: input.mouse_x, mouse_y: input.mouse_y, ..Default::default() };
+    let mut dead_input = InputState {
+        mouse_x: input.mouse_x,
+        mouse_y: input.mouse_y,
+        ..Default::default()
+    };
     let card_input = if state.project_browser_open || state.new_project_popup_open {
         &mut dead_input
     } else {
@@ -10528,196 +10919,37 @@ pub fn draw_project_manager(
         sdl2::pixels::Color::RGBA(60, 65, 80, 180),
     );
 
-    // ── Project file browser overlay ──────────────────────────────────
+    // ── Project file browser overlay (uses generic file browser) ────
     if state.project_browser_open {
-        // Dim background
-        canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 160));
-        let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
-
-        // Browser panel
-        let bw = 500i32;
-        let bh = 440i32;
-        let bx = (w - bw) / 2;
-        let by = (h - bh) / 2;
-
-        // Shadow
-        canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 120));
-        let _ = canvas.fill_rect(Rect::new(bx + 4, by + 4, bw as u32, bh as u32));
-
-        // Panel background
-        canvas.set_draw_color(Theme::c(state.theme.panel_bg));
-        let _ = canvas.fill_rect(Rect::new(bx, by, bw as u32, bh as u32));
-        canvas.set_draw_color(Theme::c(state.theme.panel_border));
-        let _ = canvas.draw_rect(Rect::new(bx, by, bw as u32, bh as u32));
-
-        // Accent top bar
-        canvas.set_draw_color(Theme::c(state.theme.accent));
-        let _ = canvas.fill_rect(Rect::new(bx, by, bw as u32, 3));
-
-        // Title
-        draw_pixel_label(
-            canvas,
-            &state.theme,
-            "Open Project",
-            bx + 16,
-            by + 10,
-            bw - 80,
-            Theme::c(state.theme.text_primary),
-        );
-
-        // Close button (X)
-        let __auto_id_pb_close = input.next_id();
-        let close_clicked = button(
-            canvas,
-            input,
-            &state.theme,
-            &ButtonParams {
-                id: __auto_id_pb_close,
-                x: bx + bw - 30,
-                y: by + 6,
-                width: 22,
-                height: 18,
-                label: "✕".into(),
-                toggled: false,
-                icon: ButtonIcon::None,
-                hint: Some("Cancel".into()),
-                ..Default::default()
-            },
-        );
-        if close_clicked {
-            state.project_browser_open = false;
-        }
-
-        // Current path label
-        let path_str = state.project_browser_path.to_string_lossy().to_string();
-        let display_path = if path_str.len() > 60 {
-            format!("...{}", &path_str[path_str.len() - 60..])
-        } else {
-            path_str
-        };
-        draw_pixel_label(
-            canvas,
-            &state.theme,
-            &display_path,
-            bx + 16,
-            by + 30,
-            bw - 32,
-            Theme::c(state.theme.text_secondary),
-        );
-
-        // Back button
-        let __auto_id_pb_back = input.next_id();
-        let back_clicked = button(
-            canvas,
-            input,
-            &state.theme,
-            &ButtonParams {
-                id: __auto_id_pb_back,
-                x: bx + 16,
-                y: by + 44,
-                width: 80,
-                height: 20,
-                label: "← Back".into(),
-                toggled: false,
-                icon: ButtonIcon::None,
-                hint: Some("Go to parent folder".into()),
-                ..Default::default()
-            },
-        );
-        if back_clicked {
-            if let Some(parent) = state.project_browser_path.parent() {
-                state.project_browser_path = parent.to_path_buf();
-                state.refresh_project_browser();
-            }
-        }
-
-        // File listing
-        let list_y = by + 70;
-        let list_h = bh - 80;
-        let row_h = 24i32;
-        let visible_rows = list_h / row_h;
-
-        // Scroll
-        if input.mouse_in_rect(bx, list_y, bw, list_h)
-            && input.scroll_y != 0
-            && !input.scroll_consumed
-        {
-            state.project_browser_scroll -= input.scroll_y * 3;
-            let total = state.project_browser_entries.len() as i32;
-            state.project_browser_scroll = state
-                .project_browser_scroll
-                .max(0)
-                .min((total - visible_rows).max(0));
-            input.scroll_consumed = true;
-        }
-
-        let entries = state.project_browser_entries.clone();
-        let scroll = state.project_browser_scroll;
-
-        if entries.is_empty() {
-            draw_pixel_label(
-                canvas,
-                &state.theme,
-                "No project files found",
-                bx + 20,
-                list_y + 16,
-                bw - 40,
-                sdl2::pixels::Color::RGBA(80, 85, 100, 180),
+        // Redirect to generic file browser if not already open
+        if !state.file_browser_open {
+            let start_path = state.project_browser_path.clone();
+            state.open_file_browser(
+                crate::state::FileBrowserCaller::OpenProject,
+                "Open Project",
+                ".eden.json",
+                false,
+                Some(&start_path),
             );
         }
-
-        for (i, (name, path, is_dir)) in entries.iter().enumerate().skip(scroll as usize) {
-            let row_idx = i as i32 - scroll;
-            if row_idx >= visible_rows {
-                break;
-            }
-            let ry = list_y + row_idx * row_h;
-
-            let is_hovered = input.mouse_in_rect(bx + 4, ry, bw - 8, row_h - 2);
-
-            if is_hovered {
-                canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 70, 200));
-                let _ =
-                    canvas.fill_rect(Rect::new(bx + 4, ry, (bw - 8) as u32, (row_h - 2) as u32));
-            }
-
-            // Icon + name
-            let icon = if *is_dir { "▸" } else { "♫" };
-            let col = if *is_dir {
-                Theme::c(state.theme.text_secondary)
-            } else {
-                Theme::c(state.theme.accent)
-            };
-            draw_pixel_label(canvas, &state.theme, icon, bx + 12, ry + 6, 14, col);
-            draw_pixel_label(canvas, &state.theme, name, bx + 28, ry + 6, bw - 48, col);
-
-            // Click handling
-            if is_hovered && input.mouse_pressed && !input.consumed {
-                if *is_dir {
-                    // Navigate into directory
-                    state.project_browser_path = path.clone();
-                    state.refresh_project_browser();
-                } else {
-                    // Load the project file
-                    let path_str = path.to_string_lossy().to_string();
-                    match state.load_project(&path_str) {
-                        Ok(()) => {
-                            state.project_browser_open = false;
-                            state.mode = crate::state::AppMode::Arrangement;
-                        }
-                        Err(e) => {
-                            state.push_status(format!("Failed to load: {}", e));
-                        }
+        if state.file_browser_open {
+            if let Some(selected) = draw_file_browser_popup(canvas, input, state) {
+                // Load the selected project file
+                let path_str = selected.to_string_lossy().to_string();
+                match state.load_project(&path_str) {
+                    Ok(()) => {
+                        state.project_browser_open = false;
+                        state.mode = crate::state::AppMode::Arrangement;
+                    }
+                    Err(e) => {
+                        state.push_status(format!("Failed to load: {}", e));
                     }
                 }
-                input.consume();
             }
-        }
-
-        // Click outside the browser panel to dismiss
-        if input.mouse_pressed && !input.consumed && !input.mouse_in_rect(bx, by, bw, bh) {
-            state.project_browser_open = false;
-            input.consume();
+            // If file browser was closed without selection, close project browser too
+            if !state.file_browser_open {
+                state.project_browser_open = false;
+            }
         }
     }
 
@@ -10740,7 +10972,12 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
     // Build a dead input for background draws: preserves mouse position (so
     // hover highlights still track the cursor visually) but has no events.
-    let mut dead_input = InputState { mouse_x: input.mouse_x, mouse_y: input.mouse_y, mouse_down: false, ..Default::default() };
+    let mut dead_input = InputState {
+        mouse_x: input.mouse_x,
+        mouse_y: input.mouse_y,
+        mouse_down: false,
+        ..Default::default()
+    };
 
     // Helper: pick which input to give to a background draw function.
     // Block input when an overlay is active (popups, dialogs, etc.).
@@ -11194,14 +11431,18 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         let is_audio_track = track_rows[row].3 == crate::models::TrackType::Audio;
                         if is_audio_track {
                             canvas.set_draw_color(sdl2::pixels::Color::RGBA(100, 200, 140, 80));
-                            let _ = canvas.fill_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
+                            let _ =
+                                canvas.fill_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
                             canvas.set_draw_color(sdl2::pixels::Color::RGBA(100, 200, 140, 200));
-                            let _ = canvas.draw_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
+                            let _ =
+                                canvas.draw_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
                         } else {
                             canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 200, 60, 60));
-                            let _ = canvas.fill_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
+                            let _ =
+                                canvas.fill_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
                             canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 200, 60, 180));
-                            let _ = canvas.draw_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
+                            let _ =
+                                canvas.draw_rect(Rect::new(gx, gy, gw.max(4) as u32, gh as u32));
                         }
                         canvas.set_clip_rect(None);
                     }
@@ -11225,9 +11466,14 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                                 gain: 1.0,
                                 name: {
                                     let p = std::path::Path::new(&state.audio_drag_source);
-                                    p.file_stem().and_then(|s| s.to_str()).unwrap_or("audio").to_string()
+                                    p.file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("audio")
+                                        .to_string()
                                 },
                                 color: [100, 200, 140, 255],
+                                fade_in: 0.0,
+                                fade_out: 0.0,
                             });
                             state.commands.execute(
                                 Box::new(crate::commands::AddClips {
@@ -11525,7 +11771,17 @@ fn draw_overlays(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mu
 
     // Render popup (RenderDialog layer — above Popup)
     if state.render_popup_open {
-        draw_render_popup(canvas, input, state);
+        if state.file_browser_open {
+            let mut dead = InputState {
+                mouse_x: input.mouse_x,
+                mouse_y: input.mouse_y,
+                mouse_down: false,
+                ..Default::default()
+            };
+            draw_render_popup(canvas, &mut dead, state);
+        } else {
+            draw_render_popup(canvas, input, state);
+        }
     }
 
     // New-project name prompt popup
@@ -11540,12 +11796,68 @@ fn draw_overlays(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mu
 
     // Audio Export popup
     if state.audio_export_popup_open {
-        draw_audio_export_popup(canvas, input, state);
+        if state.file_browser_open {
+            // Draw visually but block input when file browser is on top
+            let mut dead = InputState {
+                mouse_x: input.mouse_x,
+                mouse_y: input.mouse_y,
+                mouse_down: false,
+                ..Default::default()
+            };
+            draw_audio_export_popup(canvas, &mut dead, state);
+        } else {
+            draw_audio_export_popup(canvas, input, state);
+        }
     }
 
     // MIDI Export popup
     if state.midi_export_popup_open {
-        draw_midi_export_popup(canvas, input, state);
+        if state.file_browser_open {
+            let mut dead = InputState {
+                mouse_x: input.mouse_x,
+                mouse_y: input.mouse_y,
+                mouse_down: false,
+                ..Default::default()
+            };
+            draw_midi_export_popup(canvas, &mut dead, state);
+        } else {
+            draw_midi_export_popup(canvas, input, state);
+        }
+    }
+
+    // Generic file browser popup (drawn on top of export popups)
+    if state.file_browser_open {
+        if let Some(selected_path) = draw_file_browser_popup(canvas, input, state) {
+            match state.file_browser_caller {
+                Some(crate::state::FileBrowserCaller::AudioExportDir) => {
+                    state.audio_export_dir = selected_path.to_string_lossy().to_string();
+                    // Update text field buffer if directory field is active
+                    if state.text_field_active_id == 303 {
+                        state.text_field_buffer = state.audio_export_dir.clone();
+                        state.text_field_cursor = state.text_field_buffer.len();
+                    }
+                }
+                Some(crate::state::FileBrowserCaller::MidiExportDir) => {
+                    state.midi_export_dir = selected_path.to_string_lossy().to_string();
+                    if state.text_field_active_id == 304 {
+                        state.text_field_buffer = state.midi_export_dir.clone();
+                        state.text_field_cursor = state.text_field_buffer.len();
+                    }
+                }
+                Some(crate::state::FileBrowserCaller::OpenProject) => {
+                    // Handled in draw_home_screen
+                }
+                Some(crate::state::FileBrowserCaller::RenderExportDir) => {
+                    state.render_export_dir = selected_path.to_string_lossy().to_string();
+                    if state.text_field_active_id == 88002 {
+                        state.text_field_buffer = state.render_export_dir.clone();
+                        state.text_field_cursor = state.text_field_buffer.len();
+                    }
+                }
+                None => {}
+            }
+            state.file_browser_caller = None;
+        }
     }
 
     // ── Confirmation dialogs (ConfirmDialog layer — highest priority) ─────────
@@ -12258,6 +12570,250 @@ fn draw_project_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
     }
 }
 
+/// Generic file browser popup.
+/// Returns `Some(path)` when a file/directory was selected, `None` otherwise.
+/// The popup is self-contained: it reads/writes `state.file_browser_*` fields.
+pub fn draw_file_browser_popup(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    state: &mut AppState,
+) -> Option<std::path::PathBuf> {
+    let w = state.window_width as i32;
+    let h = state.window_height as i32;
+
+    // Dim background
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 160));
+    let _ = canvas.fill_rect(Rect::new(0, 0, w as u32, h as u32));
+
+    // Browser panel
+    let bw = 500i32;
+    let bh = 440i32;
+    let bx = (w - bw) / 2;
+    let by = (h - bh) / 2;
+
+    // Shadow
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 120));
+    let _ = canvas.fill_rect(Rect::new(bx + 4, by + 4, bw as u32, bh as u32));
+
+    // Panel background
+    canvas.set_draw_color(Theme::c(state.theme.panel_bg));
+    let _ = canvas.fill_rect(Rect::new(bx, by, bw as u32, bh as u32));
+    canvas.set_draw_color(Theme::c(state.theme.panel_border));
+    let _ = canvas.draw_rect(Rect::new(bx, by, bw as u32, bh as u32));
+
+    // Accent top bar
+    canvas.set_draw_color(Theme::c(state.theme.accent));
+    let _ = canvas.fill_rect(Rect::new(bx, by, bw as u32, 3));
+
+    // Title
+    let title = state.file_browser_title.clone();
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        &title,
+        bx + 16,
+        by + 10,
+        bw - 80,
+        Theme::c(state.theme.text_primary),
+    );
+
+    // Close button (X)
+    let close_id = input.next_id();
+    let close_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: close_id,
+            x: bx + bw - 30,
+            y: by + 6,
+            width: 22,
+            height: 18,
+            label: "✕".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Close".into()),
+            ..Default::default()
+        },
+    );
+
+    // Current path label
+    let path_str = state.file_browser_path.to_string_lossy().to_string();
+    let display_path = if path_str.len() > 60 {
+        format!("...{}", &path_str[path_str.len() - 60..])
+    } else {
+        path_str
+    };
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        &display_path,
+        bx + 16,
+        by + 30,
+        bw - 32,
+        Theme::c(state.theme.text_secondary),
+    );
+
+    // Back button
+    let back_id = input.next_id();
+    let back_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: back_id,
+            x: bx + 16,
+            y: by + 44,
+            width: 80,
+            height: 20,
+            label: "← Back".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Go to parent folder".into()),
+            ..Default::default()
+        },
+    );
+    if back_clicked {
+        if let Some(parent) = state.file_browser_path.parent() {
+            state.file_browser_path = parent.to_path_buf();
+            state.refresh_file_browser();
+        }
+    }
+
+    // "Select this folder" button (only when in dir-selection mode)
+    let select_dir = state.file_browser_select_dir;
+    if select_dir {
+        let sel_id = input.next_id();
+        let sel_clicked = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: sel_id,
+                x: bx + bw - 150,
+                y: by + 44,
+                width: 134,
+                height: 20,
+                label: "Select Folder".into(),
+                toggled: false,
+                icon: ButtonIcon::None,
+                hint: Some("Use this folder".into()),
+                ..Default::default()
+            },
+        );
+        if sel_clicked {
+            let selected = state.file_browser_path.clone();
+            state.file_browser_open = false;
+            input.consumed = true;
+            return Some(selected);
+        }
+    }
+
+    // File listing
+    let list_y = by + 70;
+    let list_h = bh - 80;
+    let row_h = 24i32;
+    let visible_rows = list_h / row_h;
+
+    // Scroll
+    if input.mouse_in_rect(bx, list_y, bw, list_h) && input.scroll_y != 0 && !input.scroll_consumed
+    {
+        state.file_browser_scroll -= input.scroll_y * 3;
+        let total = state.file_browser_entries.len() as i32;
+        state.file_browser_scroll = state
+            .file_browser_scroll
+            .max(0)
+            .min((total - visible_rows).max(0));
+        input.scroll_consumed = true;
+    }
+
+    let entries = state.file_browser_entries.clone();
+    let scroll = state.file_browser_scroll;
+
+    if entries.is_empty() {
+        let msg = if select_dir {
+            "No sub-folders found"
+        } else {
+            "No matching files found"
+        };
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            msg,
+            bx + 20,
+            list_y + 16,
+            bw - 40,
+            sdl2::pixels::Color::RGBA(80, 85, 100, 180),
+        );
+    }
+
+    let mut result: Option<std::path::PathBuf> = None;
+
+    for (i, (name, path, is_dir)) in entries.iter().enumerate().skip(scroll as usize) {
+        let row_idx = i as i32 - scroll;
+        if row_idx >= visible_rows {
+            break;
+        }
+        let ry = list_y + row_idx * row_h;
+
+        let is_hovered = input.mouse_in_rect(bx + 4, ry, bw - 8, row_h - 2);
+
+        if is_hovered {
+            canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 70, 200));
+            let _ = canvas.fill_rect(Rect::new(bx + 4, ry, (bw - 8) as u32, (row_h - 2) as u32));
+        }
+
+        // Icon + name
+        let icon = if *is_dir { "▸" } else { "♫" };
+        let col = if *is_dir {
+            Theme::c(state.theme.text_secondary)
+        } else {
+            Theme::c(state.theme.accent)
+        };
+        draw_pixel_label(canvas, &state.theme, icon, bx + 12, ry + 6, 14, col);
+        draw_pixel_label(canvas, &state.theme, name, bx + 28, ry + 6, bw - 48, col);
+
+        // Click handling
+        if is_hovered && input.mouse_pressed && !input.consumed {
+            if *is_dir {
+                state.file_browser_path = path.clone();
+                state.refresh_file_browser();
+            } else {
+                // File selected
+                result = Some(path.clone());
+            }
+            input.consume();
+        }
+    }
+
+    // Escape to close
+    let esc_pressed = input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Escape);
+
+    if close_clicked || esc_pressed {
+        state.file_browser_open = false;
+        input.consumed = true;
+        return None;
+    }
+
+    // Click outside the browser panel to dismiss
+    if input.mouse_pressed && !input.consumed && !input.mouse_in_rect(bx, by, bw, bh) {
+        state.file_browser_open = false;
+        input.consume();
+        return None;
+    }
+
+    if result.is_some() {
+        state.file_browser_open = false;
+    }
+
+    // Block all input from passing through
+    input.consumed = true;
+
+    result
+}
+
 fn draw_new_project_popup(
     canvas: &mut Canvas<Window>,
     input: &mut InputState,
@@ -12446,11 +13002,7 @@ fn draw_new_project_popup(
     input.consumed = true;
 }
 
-fn draw_save_as_popup(
-    canvas: &mut Canvas<Window>,
-    input: &mut InputState,
-    state: &mut AppState,
-) {
+fn draw_save_as_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
     let w = state.window_width as i32;
     let h = state.window_height as i32;
     let popup_w = 400i32;
@@ -12686,6 +13238,8 @@ fn draw_audio_export_popup(
     let lx = popup_x + 14;
     let vx = popup_x + 80;
     let rw = popup_w - 94;
+    let browse_w = 60i32;
+    let field_rw = rw - browse_w - 4;
     let row0_y = popup_y + 34;
     let row_h = 28;
 
@@ -12707,7 +13261,7 @@ fn draw_audio_export_popup(
             id: 303,
             x: vx,
             y: row0_y,
-            width: rw,
+            width: field_rw,
             height: 20,
             hint: Some("/path/to/export/directory".into()),
         },
@@ -12716,6 +13270,37 @@ fn draw_audio_export_popup(
         &mut state.text_field_buffer,
         &mut state.text_field_cursor,
     );
+    // Browse button
+    let browse_id = input.next_id();
+    let browse_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: browse_id,
+            x: vx + field_rw + 4,
+            y: row0_y,
+            width: browse_w,
+            height: 20,
+            label: "Browse".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Browse for folder".into()),
+            ..Default::default()
+        },
+    );
+    if browse_clicked {
+        let dir_clone = state.audio_export_dir.clone();
+        let start = std::path::PathBuf::from(&dir_clone);
+        let start_path = if start.is_dir() { Some(start) } else { None };
+        state.open_file_browser(
+            crate::state::FileBrowserCaller::AudioExportDir,
+            "Select Export Folder",
+            "",
+            true,
+            start_path.as_deref(),
+        );
+    }
     if dir_committed {
         if let Some(new_dir) = dir_new_val {
             let trimmed = new_dir.trim().to_string();
@@ -12839,6 +13424,9 @@ fn draw_audio_export_popup(
             ..Default::default()
         },
     );
+    // Fallback: also detect a raw single-frame click on the cancel area
+    // (text-field deactivation can occasionally swallow the press/release pair)
+    let cancel_raw = input.mouse_pressed && input.mouse_in_rect(vx + btn_w + 6, btn_y, btn_w, 26);
 
     // Accept Enter as Export, Escape as Cancel
     let enter_pressed = input
@@ -12903,16 +13491,13 @@ fn draw_audio_export_popup(
         state.text_field_active_id = 0;
     }
 
-    if cancel_clicked || esc_pressed {
+    if cancel_clicked || cancel_raw || esc_pressed {
         state.audio_export_popup_open = false;
         state.text_field_active_id = 0;
     }
 
-    // Block clicks outside popup (closing it)
-    if input.mouse_pressed
-        && !input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h)
-        && input.active_widget == WidgetId::None
-    {
+    // Click outside popup to dismiss
+    if input.mouse_pressed && !input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h) {
         state.audio_export_popup_open = false;
         state.text_field_active_id = 0;
     }
@@ -12970,6 +13555,8 @@ fn draw_midi_export_popup(
     let lx = popup_x + 14;
     let vx = popup_x + 80;
     let rw = popup_w - 94;
+    let browse_w = 60i32;
+    let field_rw = rw - browse_w - 4;
     let row0_y = popup_y + 34;
     let row_h = 28;
 
@@ -12991,7 +13578,7 @@ fn draw_midi_export_popup(
             id: 304,
             x: vx,
             y: row0_y,
-            width: rw,
+            width: field_rw,
             height: 20,
             hint: Some("/path/to/export/directory".into()),
         },
@@ -13000,6 +13587,37 @@ fn draw_midi_export_popup(
         &mut state.text_field_buffer,
         &mut state.text_field_cursor,
     );
+    // Browse button
+    let midi_browse_id = input.next_id();
+    let midi_browse_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: midi_browse_id,
+            x: vx + field_rw + 4,
+            y: row0_y,
+            width: browse_w,
+            height: 20,
+            label: "Browse".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Browse for folder".into()),
+            ..Default::default()
+        },
+    );
+    if midi_browse_clicked {
+        let dir_clone = state.midi_export_dir.clone();
+        let start = std::path::PathBuf::from(&dir_clone);
+        let start_path = if start.is_dir() { Some(start) } else { None };
+        state.open_file_browser(
+            crate::state::FileBrowserCaller::MidiExportDir,
+            "Select Export Folder",
+            "",
+            true,
+            start_path.as_deref(),
+        );
+    }
     if dir_committed {
         if let Some(new_dir) = dir_new_val {
             let trimmed = new_dir.trim().to_string();
@@ -13123,6 +13741,8 @@ fn draw_midi_export_popup(
             ..Default::default()
         },
     );
+    // Fallback: also detect a raw single-frame click on the cancel area
+    let cancel_raw = input.mouse_pressed && input.mouse_in_rect(vx + btn_w + 6, btn_y, btn_w, 26);
 
     // Accept Enter as Export, Escape as Cancel
     let enter_pressed = input
@@ -13206,16 +13826,13 @@ fn draw_midi_export_popup(
         state.text_field_active_id = 0;
     }
 
-    if cancel_clicked || esc_pressed {
+    if cancel_clicked || cancel_raw || esc_pressed {
         state.midi_export_popup_open = false;
         state.text_field_active_id = 0;
     }
 
-    // Block clicks outside popup
-    if input.mouse_pressed
-        && !input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h)
-        && input.active_widget == WidgetId::None
-    {
+    // Click outside popup to dismiss
+    if input.mouse_pressed && !input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h) {
         state.midi_export_popup_open = false;
         state.text_field_active_id = 0;
     }
@@ -13668,7 +14285,7 @@ fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
 fn draw_render_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
     let w = state.window_width as i32;
     let popup_w = 380i32;
-    let popup_h = 300i32;
+    let popup_h = 340i32;
     let popup_x = w / 2 - popup_w / 2;
     let popup_y = 80i32;
 
@@ -13871,11 +14488,88 @@ fn draw_render_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state:
         }
     }
 
+    // ── Directory row (text field + Browse button) ──
+    let row_dir = popup_y + 58;
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "DIRECTORY",
+        cx,
+        row_dir + 4,
+        100,
+        Theme::c(state.theme.text_secondary),
+    );
+    {
+        let tf_id: u32 = 88002;
+        let dir_clone = state.render_export_dir.clone();
+        let mut buf = state.text_field_buffer.clone();
+        let mut cursor = state.text_field_cursor;
+        let mut active_id = state.text_field_active_id;
+        let (committed, new_val) = text_field(
+            canvas,
+            input,
+            &state.theme,
+            &TextFieldParams {
+                id: tf_id,
+                x: cx + 105,
+                y: row_dir,
+                width: cw - 105 - 64,
+                height: 20,
+                hint: Some("./".into()),
+            },
+            &dir_clone,
+            &mut active_id,
+            &mut buf,
+            &mut cursor,
+        );
+        state.text_field_active_id = active_id;
+        state.text_field_buffer = buf;
+        state.text_field_cursor = cursor;
+        if committed {
+            if let Some(new_dir) = new_val {
+                state.render_export_dir = new_dir;
+            }
+        }
+    }
+    // Browse button
+    let browse_id = input.next_id();
+    let browse_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: browse_id,
+            x: cx + cw - 56,
+            y: row_dir,
+            width: 56,
+            height: 20,
+            label: "Browse".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Choose export directory".into()),
+            ..Default::default()
+        },
+    );
+    if browse_clicked {
+        let start = if state.render_export_dir.is_empty() {
+            std::env::current_dir().unwrap_or_default()
+        } else {
+            std::path::PathBuf::from(&state.render_export_dir)
+        };
+        state.open_file_browser(
+            crate::state::FileBrowserCaller::RenderExportDir,
+            "Select Export Directory",
+            "",
+            true,
+            Some(start.as_path()),
+        );
+    }
+
     let sr_labels: &[&str] = &["44100 Hz", "48000 Hz", "96000 Hz"][..];
     let sr_values = [44100u32, 48000, 96000];
 
     // ── Sample Rate (dropdown) ──
-    let row2 = popup_y + 60;
+    let row2 = popup_y + 88;
     draw_pixel_label(
         canvas,
         &state.theme,
@@ -13900,7 +14594,7 @@ fn draw_render_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state:
     );
 
     // ── Bit Depth (dropdown) ──
-    let row3 = popup_y + 90;
+    let row3 = popup_y + 118;
     draw_pixel_label(
         canvas,
         &state.theme,
@@ -13926,7 +14620,7 @@ fn draw_render_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state:
     );
 
     // ── Song length info ──
-    let row4 = popup_y + 122;
+    let row4 = popup_y + 150;
     let bpm = state.project.tempo_map.bpm_at(0.0);
     let loop_start = state.project.transport.loop_region.start;
     let loop_end = state.project.transport.loop_region.end;
@@ -13985,7 +14679,7 @@ fn draw_render_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state:
     );
 
     // ── Loop-only toggle ──
-    let row5 = popup_y + 155;
+    let row5 = popup_y + 185;
     draw_pixel_label(
         canvas,
         &state.theme,
@@ -14043,7 +14737,14 @@ fn draw_render_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state:
         },
     );
     if render_clicked {
-        let path = state.render_filename.clone();
+        let path = if state.render_export_dir.is_empty() {
+            state.render_filename.clone()
+        } else {
+            let dir = std::path::Path::new(&state.render_export_dir);
+            dir.join(&state.render_filename)
+                .to_string_lossy()
+                .to_string()
+        };
         let settings = crate::render::RenderSettings {
             master_volume: 0.8,
             sample_rate_idx: state.render_sample_rate_idx,
@@ -14092,9 +14793,53 @@ fn draw_render_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state:
         state.render_popup_open = false;
     }
 
-    // Click outside to dismiss
+    // ── Dropdown popup overlays (draw on top of everything) ──
+    let dd_w = 200i32;
+    let dd_h = 22i32;
+    let dd_x = cx + 130;
+    dropdown_popup_overlay(
+        canvas,
+        &state.theme,
+        8810,
+        dd_x,
+        row2,
+        dd_w,
+        dd_h,
+        dd_w,
+        sr_labels,
+        state.render_sample_rate_idx,
+        state.dropdown_open_id,
+        input.mouse_x,
+        input.mouse_y,
+    );
+    dropdown_popup_overlay(
+        canvas,
+        &state.theme,
+        8820,
+        dd_x,
+        row3,
+        dd_w,
+        dd_h,
+        dd_w,
+        bd_labels,
+        state.render_bit_depth_idx,
+        state.dropdown_open_id,
+        input.mouse_x,
+        input.mouse_y,
+    );
+
+    // Click outside to dismiss (but not if clicking on an open dropdown list)
     let in_popup = input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h);
-    if !in_popup && input.mouse_pressed {
+    let in_dropdown_list = if state.dropdown_open_id == 8810 {
+        let list_h = sr_labels.len() as i32 * dd_h;
+        input.mouse_in_rect(dd_x, row2, dd_w, dd_h + list_h)
+    } else if state.dropdown_open_id == 8820 {
+        let list_h = bd_labels.len() as i32 * dd_h;
+        input.mouse_in_rect(dd_x, row3, dd_w, dd_h + list_h)
+    } else {
+        false
+    };
+    if !in_popup && !in_dropdown_list && input.mouse_pressed {
         state.render_popup_open = false;
     }
 }
@@ -14166,6 +14911,7 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
 
         // Volume fader (vertical)
         let mut vol_pos = vol_gain_to_pos(state.project.tracks[i].volume);
+        let mixer_db_label = gain_to_db_label(state.project.tracks[i].volume);
         let btm_vol_id = input.next_id();
         let vol_changed = slider(
             canvas,
@@ -14180,7 +14926,7 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
                 min: 0.0,
                 max: 1.0,
                 orientation: SliderOrientation::Vertical,
-                label: None,
+                label: Some(mixer_db_label),
                 default_value: Some(vol_gain_to_pos(0.8)),
             },
             &mut vol_pos,
@@ -15539,8 +16285,8 @@ fn draw_piano_roll_impl(
         }
         let ny = pitch_to_y(pitch);
         let is_black = matches!(pitch % 12, 1 | 3 | 6 | 8 | 10);
-        let is_kbd_held = state.piano_keyboard_mode
-            && state.piano_keyboard_held.contains(&(pitch as u8));
+        let is_kbd_held =
+            state.piano_keyboard_mode && state.piano_keyboard_held.contains(&(pitch as u8));
 
         // Row background
         let row_col = if is_kbd_held {
@@ -15582,8 +16328,8 @@ fn draw_piano_roll_impl(
             }
             let ny = pitch_to_y(pitch);
             let is_black = matches!(pitch % 12, 1 | 3 | 6 | 8 | 10);
-            let is_kbd_held = state.piano_keyboard_mode
-                && state.piano_keyboard_held.contains(&(pitch as u8));
+            let is_kbd_held =
+                state.piano_keyboard_mode && state.piano_keyboard_held.contains(&(pitch as u8));
 
             // Note name lookup
             let note_names = [
@@ -15843,8 +16589,7 @@ fn draw_piano_roll_impl(
 
         // Velocity brightness strip (top 2px)
         let vel_t = velocity as f32 / 127.0;
-        let strip_h = ((vel_t * (NOTE_H - 2) as f32) as i32)
-            .clamp(1, NOTE_H - 2);
+        let strip_h = ((vel_t * (NOTE_H - 2) as f32) as i32).clamp(1, NOTE_H - 2);
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 255, 255, 50));
         let _ = canvas.fill_rect(Rect::new(nx, ny + 1, nw as u32, strip_h as u32));
 
@@ -15937,15 +16682,17 @@ fn draw_piano_roll_impl(
             // Find the track index for the selected clip's track
             if let Some(ti) = state.project.tracks.iter().position(|t| t.id == track_id) {
                 state.preview_notes.push((ti, pitch as u8, 100));
+                // Remember which pitch we started so note-off is correct
+                // even if the mouse moves vertically before release.
+                state.piano_roll_preview_pitch = Some(pitch as u8);
             }
         }
     }
     // Release key → stop preview note (works even if released outside keys area)
     if input.mouse_released {
-        let pitch = y_to_pitch(input.mouse_y);
-        if (0..128).contains(&pitch) {
-            state.preview_notes.retain(|&(_, p, _)| p != pitch as u8);
-            state.piano_note_off_queue.push(pitch as u8);
+        if let Some(pressed_pitch) = state.piano_roll_preview_pitch.take() {
+            state.preview_notes.retain(|&(_, p, _)| p != pressed_pitch);
+            state.piano_note_off_queue.push(pressed_pitch);
         }
     }
     // If mouse leaves the keys area while held, also stop preview
@@ -15956,6 +16703,7 @@ fn draw_piano_roll_impl(
                 state.piano_note_off_queue.push(p);
             }
             state.preview_notes.clear();
+            state.piano_roll_preview_pitch = None;
         }
     }
 
@@ -16920,7 +17668,7 @@ fn draw_audio_editor(
     }
 
     // ── Gather clip info ─────────────────────────────────────────────
-    let clip_info: Option<(String, String, f64, f64, f32)> =
+    let clip_info: Option<(String, String, f64, f64, f32, f64, f64, f64)> =
         if let Some((track_id, clip_idx)) = state.selected_clip {
             state
                 .project
@@ -16939,7 +17687,16 @@ fn draw_audio_editor(
                         } else {
                             ac.name.clone()
                         };
-                        Some((name, ac.source_file.clone(), ac.length, ac.offset, ac.gain))
+                        Some((
+                            name,
+                            ac.source_file.clone(),
+                            ac.length,
+                            ac.offset,
+                            ac.gain,
+                            ac.start_time,
+                            ac.fade_in,
+                            ac.fade_out,
+                        ))
                     } else {
                         None
                     }
@@ -16948,7 +17705,16 @@ fn draw_audio_editor(
             None
         };
 
-    let (clip_name, source_file, clip_len_beats, clip_offset_secs, clip_gain) = match clip_info {
+    let (
+        clip_name,
+        source_file,
+        clip_len_beats,
+        clip_offset_secs,
+        clip_gain,
+        clip_start_beats,
+        clip_fade_in,
+        clip_fade_out,
+    ) = match clip_info {
         Some(info) => info,
         None => {
             draw_pixel_label(
@@ -16964,6 +17730,10 @@ fn draw_audio_editor(
         }
     };
 
+    // Sync fade state from clip (keeps sliders in sync when clip changes)
+    state.audio_editor_fade_in = clip_fade_in;
+    state.audio_editor_fade_out = clip_fade_out;
+
     // ── Full audio file duration (seconds) ───────────────────────────
     let file_dur_secs = state
         .waveform_cache
@@ -16978,6 +17748,19 @@ fn draw_audio_editor(
     };
 
     let bpm_early = state.project.tempo_map.bpm_at(0.0);
+
+    // ── Sync audio editor playhead to main transport during playback ──
+    if state.project.transport.playing && !state.audio_editor_playing {
+        let transport_beats = state.project.transport.position;
+        if bpm_early > 0.0 {
+            let beats_into_clip = transport_beats - clip_start_beats;
+            let secs_into_clip = beats_into_clip * 60.0 / bpm_early;
+            let file_pos = clip_offset_secs + secs_into_clip;
+            if file_pos >= 0.0 && file_pos <= total_secs {
+                state.audio_editor_playhead = file_pos;
+            }
+        }
+    }
     let clip_len_secs = if bpm_early > 0.0 {
         clip_len_beats * 60.0 / bpm_early
     } else {
@@ -16989,7 +17772,7 @@ fn draw_audio_editor(
 
     // ── Layout constants ─────────────────────────────────────────────
     let toolbar_h = 28i32;
-    let loop_ruler_h = 14i32;  // NEW: loop region bar
+    let loop_ruler_h = 14i32; // NEW: loop region bar
     let ruler_h = 20i32;
     let info_h = 18i32;
     let scroll_bar_h = 14i32;
@@ -17051,8 +17834,11 @@ fn draw_audio_editor(
             if is_previewing && !source_file.is_empty() {
                 let preview_sr = 44100usize;
                 state.sample_preview_start_sample = 0;
-                if state.audio_editor_loop_enabled && state.audio_editor_loop_end > state.audio_editor_loop_start {
-                    state.sample_preview_end_sample = (state.audio_editor_loop_end * preview_sr as f64) as usize;
+                if state.audio_editor_loop_enabled
+                    && state.audio_editor_loop_end > state.audio_editor_loop_start
+                {
+                    state.sample_preview_end_sample =
+                        (state.audio_editor_loop_end * preview_sr as f64) as usize;
                 } else {
                     state.sample_preview_end_sample = 0;
                 }
@@ -17125,11 +17911,15 @@ fn draw_audio_editor(
                 state.audio_editor_playhead = s;
                 state.sample_preview_start_sample = (s * preview_sr as f64) as usize;
                 state.sample_preview_end_sample = (e * preview_sr as f64) as usize;
-            } else if state.audio_editor_loop_enabled && state.audio_editor_loop_end > state.audio_editor_loop_start {
+            } else if state.audio_editor_loop_enabled
+                && state.audio_editor_loop_end > state.audio_editor_loop_start
+            {
                 // Play from playhead (or loop start), loop between loop_start and loop_end
                 let loop_s = state.audio_editor_loop_start;
                 let loop_e = state.audio_editor_loop_end;
-                let start = if state.audio_editor_playhead >= loop_s && state.audio_editor_playhead < loop_e {
+                let start = if state.audio_editor_playhead >= loop_s
+                    && state.audio_editor_playhead < loop_e
+                {
                     state.audio_editor_playhead
                 } else {
                     loop_s
@@ -17170,27 +17960,129 @@ fn draw_audio_editor(
         }
     }
 
+    // ── Make Unique button ──
+    // Only available when the current clip's source_file is shared by another clip.
+    let is_clone = if !source_file.is_empty() {
+        let sf = &source_file;
+        let mut count = 0usize;
+        for track in &state.project.tracks {
+            for clip in &track.clips {
+                if let crate::models::Clip::Audio(ac) = clip {
+                    if ac.source_file == *sf {
+                        count += 1;
+                        if count > 1 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if count > 1 {
+                break;
+            }
+        }
+        count > 1
+    } else {
+        false
+    };
+    if is_clone {
+        let unique_id = input.next_id();
+        let unique_clicked = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: unique_id,
+                x: 106,
+                y: top + 4,
+                width: 52,
+                height: 20,
+                label: "UNIQUE".into(),
+                toggled: false,
+                icon: ButtonIcon::None,
+                hint: Some(
+                    "Make a unique copy of this clip's audio so edits don't affect clones".into(),
+                ),
+                ..Default::default()
+            },
+        );
+        if unique_clicked {
+            // Snapshot for undo before mutating
+            let snapshot = state.project.clone();
+            // Copy source file to a new unique file
+            let src_path = std::path::Path::new(&source_file);
+            let dir = src_path.parent().unwrap_or(std::path::Path::new("."));
+            let stem = src_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("audio");
+            let ext = src_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("wav");
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let new_name = format!("{}_unique_{}.{}", stem, ts, ext);
+            let new_path = dir.join(&new_name);
+            match std::fs::copy(&source_file, &new_path) {
+                Ok(_) => {
+                    let new_path_str = new_path.to_string_lossy().to_string();
+                    // Update this clip's source_file to the new copy
+                    if let Some((track_id, clip_idx)) = state.selected_clip {
+                        if let Some(track) =
+                            state.project.tracks.iter_mut().find(|t| t.id == track_id)
+                        {
+                            if let Some(crate::models::Clip::Audio(ac)) =
+                                track.clips.get_mut(clip_idx)
+                            {
+                                ac.source_file = new_path_str.clone();
+                            }
+                        }
+                    }
+                    // Invalidate caches for the new file so it loads fresh
+                    state.waveform_cache.remove(&new_path_str);
+                    state.dirty = true;
+                    state
+                        .commands
+                        .push_undo_snapshot(snapshot, "Make Clip Unique");
+                    state.push_status("Clip made unique — edits are now independent");
+                }
+                Err(e) => {
+                    state.push_status(format!("Make unique failed: {}", e));
+                }
+            }
+        }
+    }
+
     // Toolbar buttons — SEL, NORM, TRIM, FIT, CUT, PASTE
     let tool_labels = ["SEL", "NORM", "TRIM", "FIT", "CUT", "PASTE"];
-    let mut bx = 106i32;
+    let mut bx = if is_clone { 164i32 } else { 106i32 };
 
     // ── Keyboard shortcuts for toolbar tools (left-hand keys) ────────
     // Q=SEL(all), W=NORM, E=TRIM, R=FIT, T=CUT, Y=PASTE
-    let key_triggered_tool: Option<usize> = if state.focused_panel == crate::state::FocusedPanel::AudioEditor
+    let key_triggered_tool: Option<usize> = if state.focused_panel
+        == crate::state::FocusedPanel::AudioEditor
         && state.text_field_active_id == 0
     {
         if input.key_available(sdl2::keyboard::Keycode::Q) {
-            input.consume_key(sdl2::keyboard::Keycode::Q); Some(0)
+            input.consume_key(sdl2::keyboard::Keycode::Q);
+            Some(0)
         } else if input.key_available(sdl2::keyboard::Keycode::W) && !input.ctrl() {
-            input.consume_key(sdl2::keyboard::Keycode::W); Some(1)
+            input.consume_key(sdl2::keyboard::Keycode::W);
+            Some(1)
         } else if input.key_available(sdl2::keyboard::Keycode::E) {
-            input.consume_key(sdl2::keyboard::Keycode::E); Some(2)
+            input.consume_key(sdl2::keyboard::Keycode::E);
+            Some(2)
         } else if input.key_available(sdl2::keyboard::Keycode::R) {
-            input.consume_key(sdl2::keyboard::Keycode::R); Some(3)
+            input.consume_key(sdl2::keyboard::Keycode::R);
+            Some(3)
         } else if input.key_available(sdl2::keyboard::Keycode::T) {
-            input.consume_key(sdl2::keyboard::Keycode::T); Some(4)
+            input.consume_key(sdl2::keyboard::Keycode::T);
+            Some(4)
         } else if input.key_available(sdl2::keyboard::Keycode::Y) {
-            input.consume_key(sdl2::keyboard::Keycode::Y); Some(5)
+            input.consume_key(sdl2::keyboard::Keycode::Y);
+            Some(5)
         } else {
             None
         }
@@ -17203,8 +18095,14 @@ fn draw_audio_editor(
     let make_undo_backup = |src: &str| -> Result<String, String> {
         let src_path = std::path::Path::new(src);
         let dir = src_path.parent().unwrap_or(std::path::Path::new("."));
-        let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
-        let ext = src_path.extension().and_then(|s| s.to_str()).unwrap_or("wav");
+        let stem = src_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("audio");
+        let ext = src_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wav");
         // Use a timestamp-based backup name to avoid collisions
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -17260,14 +18158,17 @@ fn draw_audio_editor(
                             .unwrap_or((0.0, total_secs));
                         if (sel_e - sel_s) > 0.001 {
                             let path = std::path::Path::new(&source_file);
-                            if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                            if let Ok((raw, channels, sr)) =
+                                crate::audio::load_audio_interleaved(path)
+                            {
                                 let total_frames = raw.len() / channels.max(1);
                                 let start_frame = ((sel_s * sr as f64) as usize).min(total_frames);
                                 let end_frame = ((sel_e * sr as f64) as usize).min(total_frames);
                                 if end_frame > start_frame {
                                     // Find peak in selected region
                                     let region = &raw[start_frame * channels..end_frame * channels];
-                                    let peak = region.iter().cloned().map(f32::abs).fold(0.0f32, f32::max);
+                                    let peak =
+                                        region.iter().cloned().map(f32::abs).fold(0.0f32, f32::max);
                                     if peak > 0.001 {
                                         // Create undo backup
                                         match make_undo_backup(&source_file) {
@@ -17282,29 +18183,44 @@ fn draw_audio_editor(
                                                 // Scale the selected region
                                                 let gain = 1.0 / peak;
                                                 let mut modified = raw.clone();
-                                                for s in &mut modified[start_frame * channels..end_frame * channels] {
+                                                for s in &mut modified
+                                                    [start_frame * channels..end_frame * channels]
+                                                {
                                                     *s *= gain;
                                                 }
                                                 let save_result = if channels >= 2 {
-                                                    crate::audio::save_wav_stereo(path, &modified, sr)
+                                                    crate::audio::save_wav_stereo(
+                                                        path, &modified, sr,
+                                                    )
                                                 } else {
                                                     crate::audio::save_wav_mono(path, &modified, sr)
                                                 };
                                                 match save_result {
                                                     Ok(()) => {
                                                         state.waveform_cache.remove(&source_file);
-                                                        state.waveform_stereo_cache.remove(&source_file);
-                                                        state.waveform_raw_cache.remove(&source_file);
-                                                        state.audio_sample_invalidate.push(source_file.clone());
+                                                        state
+                                                            .waveform_stereo_cache
+                                                            .remove(&source_file);
+                                                        state
+                                                            .waveform_raw_cache
+                                                            .remove(&source_file);
+                                                        state
+                                                            .audio_sample_invalidate
+                                                            .push(source_file.clone());
                                                         state.push_status(format!("Normalized selection (peak {:.1}dB → 0dB)", 20.0 * peak.log10()));
                                                     }
-                                                    Err(e) => state.push_status(format!("Normalize failed: {}", e)),
+                                                    Err(e) => state.push_status(format!(
+                                                        "Normalize failed: {}",
+                                                        e
+                                                    )),
                                                 }
                                             }
                                             Err(e) => state.push_status(e),
                                         }
                                     } else {
-                                        state.push_status("Selection is silent, nothing to normalize");
+                                        state.push_status(
+                                            "Selection is silent, nothing to normalize",
+                                        );
                                     }
                                 }
                             }
@@ -17318,7 +18234,9 @@ fn draw_audio_editor(
                         let e = sel_s.max(sel_e);
                         if (e - s) > 0.01 {
                             let path = std::path::Path::new(&source_file);
-                            if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                            if let Ok((raw, channels, sr)) =
+                                crate::audio::load_audio_interleaved(path)
+                            {
                                 let ch = channels.max(1);
                                 let total_frames = raw.len() / ch;
                                 let start_frame_raw = ((s * sr as f64) as usize).min(total_frames);
@@ -17327,8 +18245,10 @@ fn draw_audio_editor(
                                 let (start_frame, end_frame) = if !state.audio_editor_snap_enabled {
                                     let mono: Vec<f32> = raw.iter().step_by(ch).copied().collect();
                                     let zc_search = (sr as usize / 100).max(64);
-                                    (nearest_zero_crossing(&mono, start_frame_raw, zc_search),
-                                     nearest_zero_crossing(&mono, end_frame_raw, zc_search))
+                                    (
+                                        nearest_zero_crossing(&mono, start_frame_raw, zc_search),
+                                        nearest_zero_crossing(&mono, end_frame_raw, zc_search),
+                                    )
                                 } else {
                                     (start_frame_raw, end_frame_raw)
                                 };
@@ -17342,7 +18262,8 @@ fn draw_audio_editor(
                                                 "Trim".to_string(),
                                                 Some(state.project.clone()),
                                             ));
-                                            let trimmed: Vec<f32> = raw[start_frame * ch..end_frame * ch].to_vec();
+                                            let trimmed: Vec<f32> =
+                                                raw[start_frame * ch..end_frame * ch].to_vec();
                                             let save_result = if ch >= 2 {
                                                 crate::audio::save_wav_stereo(path, &trimmed, sr)
                                             } else {
@@ -17351,16 +18272,32 @@ fn draw_audio_editor(
                                             match save_result {
                                                 Ok(()) => {
                                                     state.waveform_cache.remove(&source_file);
-                                                    state.waveform_stereo_cache.remove(&source_file);
+                                                    state
+                                                        .waveform_stereo_cache
+                                                        .remove(&source_file);
                                                     state.waveform_raw_cache.remove(&source_file);
-                                                    state.audio_sample_invalidate.push(source_file.clone());
-                                                    if let Some((track_id, clip_idx)) = state.selected_clip {
-                                                        if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                                                            if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                                                    state
+                                                        .audio_sample_invalidate
+                                                        .push(source_file.clone());
+                                                    if let Some((track_id, clip_idx)) =
+                                                        state.selected_clip
+                                                    {
+                                                        if let Some(t) = state
+                                                            .project
+                                                            .tracks
+                                                            .iter_mut()
+                                                            .find(|t| t.id == track_id)
+                                                        {
+                                                            if let Some(
+                                                                crate::models::Clip::Audio(ac),
+                                                            ) = t.clips.get_mut(clip_idx)
+                                                            {
                                                                 let old_offset = ac.offset;
-                                                                ac.offset = (old_offset - s).max(0.0);
+                                                                ac.offset =
+                                                                    (old_offset - s).max(0.0);
                                                                 let new_dur = e - s;
-                                                                let max_len_beats = new_dur * bpm / 60.0;
+                                                                let max_len_beats =
+                                                                    new_dur * bpm / 60.0;
                                                                 if ac.length > max_len_beats {
                                                                     ac.length = max_len_beats;
                                                                 }
@@ -17373,7 +18310,9 @@ fn draw_audio_editor(
                                                     state.audio_editor_playhead = 0.0;
                                                     state.push_status("Audio trimmed to selection (file modified)");
                                                 }
-                                                Err(e) => state.push_status(format!("Trim failed: {}", e)),
+                                                Err(e) => {
+                                                    state.push_status(format!("Trim failed: {}", e))
+                                                }
                                             }
                                         }
                                         Err(e) => state.push_status(e),
@@ -17392,7 +18331,9 @@ fn draw_audio_editor(
                             if let Some((track_id, clip_idx)) = state.selected_clip {
                                 // Snapshot project state before modifying clip (undoable via Ctrl+Z)
                                 let snapshot = state.project.clone();
-                                state.commands.push_undo_snapshot(snapshot, "Fit clip to selection");
+                                state
+                                    .commands
+                                    .push_undo_snapshot(snapshot, "Fit clip to selection");
                                 if let Some(t) =
                                     state.project.tracks.iter_mut().find(|t| t.id == track_id)
                                 {
@@ -17411,8 +18352,7 @@ fn draw_audio_editor(
                         }
                     } else if total_secs > 0.0 {
                         // No selection: zoom to fit view
-                        state.audio_editor_zoom =
-                            (wave_w as f64 / total_secs).clamp(1.0, 4000.0);
+                        state.audio_editor_zoom = (wave_w as f64 / total_secs).clamp(1.0, 4000.0);
                         state.audio_editor_scroll = 0.0;
                     }
                 }
@@ -17423,7 +18363,9 @@ fn draw_audio_editor(
                         let e = sel_s.max(sel_e);
                         if (e - s) > 0.001 {
                             let path = std::path::Path::new(&source_file);
-                            if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                            if let Ok((raw, channels, sr)) =
+                                crate::audio::load_audio_interleaved(path)
+                            {
                                 let ch = channels.max(1);
                                 let total_frames = raw.len() / ch;
                                 let start_frame_raw = ((s * sr as f64) as usize).min(total_frames);
@@ -17432,8 +18374,10 @@ fn draw_audio_editor(
                                 let (start_frame, end_frame) = if !state.audio_editor_snap_enabled {
                                     let mono: Vec<f32> = raw.iter().step_by(ch).copied().collect();
                                     let zc_search = (sr as usize / 100).max(64);
-                                    (nearest_zero_crossing(&mono, start_frame_raw, zc_search),
-                                     nearest_zero_crossing(&mono, end_frame_raw, zc_search))
+                                    (
+                                        nearest_zero_crossing(&mono, start_frame_raw, zc_search),
+                                        nearest_zero_crossing(&mono, end_frame_raw, zc_search),
+                                    )
                                 } else {
                                     (start_frame_raw, end_frame_raw)
                                 };
@@ -17451,7 +18395,9 @@ fn draw_audio_editor(
                                             let cut_region: Vec<f32> = if ch >= 2 {
                                                 raw[start_frame * ch..end_frame * ch]
                                                     .chunks(ch)
-                                                    .map(|frame| frame.iter().sum::<f32>() / ch as f32)
+                                                    .map(|frame| {
+                                                        frame.iter().sum::<f32>() / ch as f32
+                                                    })
                                                     .collect()
                                             } else {
                                                 raw[start_frame..end_frame].to_vec()
@@ -17459,7 +18405,9 @@ fn draw_audio_editor(
                                             state.audio_clipboard = Some(cut_region);
                                             state.audio_clipboard_sr = sr;
 
-                                            let mut remaining = Vec::with_capacity(raw.len() - (end_frame - start_frame) * ch);
+                                            let mut remaining = Vec::with_capacity(
+                                                raw.len() - (end_frame - start_frame) * ch,
+                                            );
                                             remaining.extend_from_slice(&raw[..start_frame * ch]);
                                             remaining.extend_from_slice(&raw[end_frame * ch..]);
 
@@ -17471,13 +18419,27 @@ fn draw_audio_editor(
                                             match save_result {
                                                 Ok(()) => {
                                                     state.waveform_cache.remove(&source_file);
-                                                    state.waveform_stereo_cache.remove(&source_file);
+                                                    state
+                                                        .waveform_stereo_cache
+                                                        .remove(&source_file);
                                                     state.waveform_raw_cache.remove(&source_file);
-                                                    state.audio_sample_invalidate.push(source_file.clone());
+                                                    state
+                                                        .audio_sample_invalidate
+                                                        .push(source_file.clone());
                                                     let cut_dur = e - s;
-                                                    if let Some((track_id, clip_idx)) = state.selected_clip {
-                                                        if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                                                            if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                                                    if let Some((track_id, clip_idx)) =
+                                                        state.selected_clip
+                                                    {
+                                                        if let Some(t) = state
+                                                            .project
+                                                            .tracks
+                                                            .iter_mut()
+                                                            .find(|t| t.id == track_id)
+                                                        {
+                                                            if let Some(
+                                                                crate::models::Clip::Audio(ac),
+                                                            ) = t.clips.get_mut(clip_idx)
+                                                            {
                                                                 if ac.offset >= e {
                                                                     ac.offset -= cut_dur;
                                                                 } else if ac.offset > s {
@@ -17488,9 +18450,12 @@ fn draw_audio_editor(
                                                     }
                                                     state.audio_editor_selection = None;
                                                     state.audio_editor_playhead = s;
-                                                    state.push_status("Audio cut to clipboard (file modified)");
+                                                    state.push_status(
+                                                        "Audio cut to clipboard (file modified)",
+                                                    );
                                                 }
-                                                Err(err) => state.push_status(format!("Cut failed: {}", err)),
+                                                Err(err) => state
+                                                    .push_status(format!("Cut failed: {}", err)),
                                             }
                                         }
                                         Err(e) => state.push_status(e),
@@ -17505,7 +18470,8 @@ fn draw_audio_editor(
                     if let Some(ref clip_data) = state.audio_clipboard.clone() {
                         let paste_sec = state.audio_editor_playhead;
                         let path = std::path::Path::new(&source_file);
-                        if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path) {
+                        if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path)
+                        {
                             match make_undo_backup(&source_file) {
                                 Ok(backup) => {
                                     state.audio_redo_stack.clear();
@@ -17517,10 +18483,12 @@ fn draw_audio_editor(
                                     ));
                                     let ch = channels.max(1);
                                     let total_frames = raw.len() / ch;
-                                    let insert_frame_raw = ((paste_sec * sr as f64) as usize).min(total_frames);
+                                    let insert_frame_raw =
+                                        ((paste_sec * sr as f64) as usize).min(total_frames);
                                     // Snap insertion point to zero crossing only when snap is off
                                     let insert_frame = if !state.audio_editor_snap_enabled {
-                                        let mono: Vec<f32> = raw.iter().step_by(ch).copied().collect();
+                                        let mono: Vec<f32> =
+                                            raw.iter().step_by(ch).copied().collect();
                                         let zc_search = (sr as usize / 100).max(64);
                                         nearest_zero_crossing(&mono, insert_frame_raw, zc_search)
                                     } else {
@@ -17533,7 +18501,8 @@ fn draw_audio_editor(
                                         let new_len = (clip_data.len() as f64 * ratio) as usize;
                                         (0..new_len)
                                             .map(|i| {
-                                                let src_idx = ((i as f64 / ratio) as usize).min(clip_data.len().saturating_sub(1));
+                                                let src_idx = ((i as f64 / ratio) as usize)
+                                                    .min(clip_data.len().saturating_sub(1));
                                                 clip_data[src_idx]
                                             })
                                             .collect()
@@ -17547,7 +18516,8 @@ fn draw_audio_editor(
                                         resampled
                                     };
 
-                                    let mut result = Vec::with_capacity(raw.len() + interleaved_paste.len());
+                                    let mut result =
+                                        Vec::with_capacity(raw.len() + interleaved_paste.len());
                                     result.extend_from_slice(&raw[..insert_frame * ch]);
                                     result.extend_from_slice(&interleaved_paste);
                                     result.extend_from_slice(&raw[insert_frame * ch..]);
@@ -17563,10 +18533,19 @@ fn draw_audio_editor(
                                             state.waveform_stereo_cache.remove(&source_file);
                                             state.waveform_raw_cache.remove(&source_file);
                                             state.audio_sample_invalidate.push(source_file.clone());
-                                            let paste_dur = interleaved_paste.len() as f64 / (sr as f64 * ch as f64);
-                                            if let Some((track_id, clip_idx)) = state.selected_clip {
-                                                if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                                                    if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                                            let paste_dur = interleaved_paste.len() as f64
+                                                / (sr as f64 * ch as f64);
+                                            if let Some((track_id, clip_idx)) = state.selected_clip
+                                            {
+                                                if let Some(t) = state
+                                                    .project
+                                                    .tracks
+                                                    .iter_mut()
+                                                    .find(|t| t.id == track_id)
+                                                {
+                                                    if let Some(crate::models::Clip::Audio(ac)) =
+                                                        t.clips.get_mut(clip_idx)
+                                                    {
                                                         if ac.offset >= paste_sec {
                                                             ac.offset += paste_dur;
                                                         }
@@ -17574,9 +18553,13 @@ fn draw_audio_editor(
                                                 }
                                             }
                                             state.audio_editor_playhead = paste_sec + paste_dur;
-                                            state.push_status("Audio pasted from clipboard (file modified)");
+                                            state.push_status(
+                                                "Audio pasted from clipboard (file modified)",
+                                            );
                                         }
-                                        Err(err) => state.push_status(format!("Paste failed: {}", err)),
+                                        Err(err) => {
+                                            state.push_status(format!("Paste failed: {}", err))
+                                        }
                                     }
                                 }
                                 Err(e) => state.push_status(e),
@@ -17664,7 +18647,7 @@ fn draw_audio_editor(
                 min: 0.0,
                 max: 4.0,
                 orientation: SliderOrientation::Horizontal,
-                label: Some(format!("{:.0}%", clip_gain * 100.0)),
+                label: Some(gain_to_db_label(clip_gain)),
                 default_value: Some(1.0),
             },
             &mut gain_val,
@@ -17737,6 +18720,15 @@ fn draw_audio_editor(
         );
         if fade_changed {
             state.audio_editor_fade_in = fade_val as f64;
+            // Write back to the clip model
+            if let Some((track_id, clip_idx)) = state.selected_clip {
+                if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
+                    if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                        ac.fade_in = fade_val as f64;
+                        state.dirty = true;
+                    }
+                }
+            }
         }
         bx += 22 + slider_w + 6;
     }
@@ -17778,6 +18770,15 @@ fn draw_audio_editor(
         );
         if fade_changed {
             state.audio_editor_fade_out = fade_val as f64;
+            // Write back to the clip model
+            if let Some((track_id, clip_idx)) = state.selected_clip {
+                if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
+                    if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                        ac.fade_out = fade_val as f64;
+                        state.dirty = true;
+                    }
+                }
+            }
         }
         bx += 30 + slider_w + 8;
     }
@@ -17806,7 +18807,10 @@ fn draw_audio_editor(
         if export_clicked && !source_file.is_empty() {
             // Populate the export popup with a default filename
             let src_path = std::path::Path::new(&source_file);
-            let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
+            let stem = src_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("audio");
             state.audio_export_name = format!("{}_export.wav", stem);
             state.audio_export_source = source_file.clone();
             // Default export directory to source file's parent
@@ -17820,7 +18824,15 @@ fn draw_audio_editor(
     }
 
     // ── Effects dropdown + APPLY button (right side of toolbar) ──────
-    let audio_fx_labels: Vec<&str> = vec!["Reverse", "Fade In", "Fade Out", "Silence", "Gain +6dB", "Gain -6dB", "Invert"];
+    let audio_fx_labels: Vec<&str> = vec![
+        "Reverse",
+        "Fade In",
+        "Fade Out",
+        "Silence",
+        "Gain +6dB",
+        "Gain -6dB",
+        "Invert",
+    ];
     let fx_dropdown_w = 80i32;
     let apply_w = 50i32;
     let fx_area_w = fx_dropdown_w + 4 + apply_w;
@@ -17842,12 +18854,13 @@ fn draw_audio_editor(
     }
     {
         let apply_id = input.next_id();
-        // Shift+A triggers apply when audio editor is visible (no text field active)
+        // B key triggers apply when audio editor is visible (no text field active)
         let apply_key_triggered = state.text_field_active_id == 0
-            && input.shift()
-            && input.key_available(sdl2::keyboard::Keycode::A);
+            && !input.shift()
+            && !input.ctrl()
+            && input.key_available(sdl2::keyboard::Keycode::B);
         if apply_key_triggered {
-            input.consume_key(sdl2::keyboard::Keycode::A);
+            input.consume_key(sdl2::keyboard::Keycode::B);
         }
         let apply_clicked = button(
             canvas,
@@ -17862,7 +18875,7 @@ fn draw_audio_editor(
                 label: "APPLY".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
-                hint: Some("Apply selected effect to selection (Shift+A)".into()),
+                hint: Some("Apply selected effect to selection (B)".into()),
                 ..Default::default()
             },
         );
@@ -17905,7 +18918,8 @@ fn draw_audio_editor(
                                     None,
                                 ));
                                 let mut modified = raw.clone();
-                                let region = &mut modified[start_frame * channels..end_frame * channels];
+                                let region =
+                                    &mut modified[start_frame * channels..end_frame * channels];
                                 match fx_idx {
                                     0 => {
                                         // Reverse
@@ -17914,7 +18928,8 @@ fn draw_audio_editor(
                                             for i in 0..frame_count / 2 {
                                                 let j = frame_count - 1 - i;
                                                 for ch in 0..channels {
-                                                    region.swap(i * channels + ch, j * channels + ch);
+                                                    region
+                                                        .swap(i * channels + ch, j * channels + ch);
                                                 }
                                             }
                                         } else {
@@ -17943,21 +18958,29 @@ fn draw_audio_editor(
                                     }
                                     3 => {
                                         // Silence
-                                        for s in region.iter_mut() { *s = 0.0; }
+                                        for s in region.iter_mut() {
+                                            *s = 0.0;
+                                        }
                                     }
                                     4 => {
                                         // Gain +6dB (~2x)
                                         let gain = 2.0f32;
-                                        for s in region.iter_mut() { *s = (*s * gain).clamp(-1.0, 1.0); }
+                                        for s in region.iter_mut() {
+                                            *s = (*s * gain).clamp(-1.0, 1.0);
+                                        }
                                     }
                                     5 => {
                                         // Gain -6dB (~0.5x)
                                         let gain = 0.5f32;
-                                        for s in region.iter_mut() { *s *= gain; }
+                                        for s in region.iter_mut() {
+                                            *s *= gain;
+                                        }
                                     }
                                     6 => {
                                         // Invert (phase flip)
-                                        for s in region.iter_mut() { *s = -*s; }
+                                        for s in region.iter_mut() {
+                                            *s = -*s;
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -17972,7 +18995,10 @@ fn draw_audio_editor(
                                         state.waveform_stereo_cache.remove(&source_file);
                                         state.waveform_raw_cache.remove(&source_file);
                                         state.audio_sample_invalidate.push(source_file.clone());
-                                        state.push_status(format!("{} applied to selection", fx_name));
+                                        state.push_status(format!(
+                                            "{} applied to selection",
+                                            fx_name
+                                        ));
                                     }
                                     Err(e) => state.push_status(format!("Apply failed: {}", e)),
                                 }
@@ -18023,6 +19049,21 @@ fn draw_audio_editor(
             let lx2 = sec_to_x(loop_e);
             let lc = state.theme.loop_color;
 
+            // Filled region between handles
+            {
+                let fill_x0 = lx1.max(wave_left);
+                let fill_x1 = lx2.min(wave_left + wave_w);
+                if fill_x1 > fill_x0 {
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(lc[0], lc[1], lc[2], 45));
+                    let _ = canvas.fill_rect(Rect::new(
+                        fill_x0,
+                        loop_ruler_top,
+                        (fill_x1 - fill_x0) as u32,
+                        loop_ruler_h as u32,
+                    ));
+                }
+            }
+
             // Left edge line
             if lx1 >= wave_left && lx1 <= wave_left + wave_w {
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(lc[0], lc[1], lc[2], 200));
@@ -18031,12 +19072,18 @@ fn draw_audio_editor(
             // Right edge line
             if lx2 >= wave_left && lx2 <= wave_left + wave_w {
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(lc[0], lc[1], lc[2], 200));
-                let _ = canvas.fill_rect(Rect::new(lx2 - 1, loop_ruler_top, 2, loop_ruler_h as u32));
+                let _ =
+                    canvas.fill_rect(Rect::new(lx2 - 1, loop_ruler_top, 2, loop_ruler_h as u32));
             }
         }
 
         // "LOOP" label
-        canvas.set_clip_rect(Some(Rect::new(wave_left, loop_ruler_top, wave_w as u32, loop_ruler_h as u32)));
+        canvas.set_clip_rect(Some(Rect::new(
+            wave_left,
+            loop_ruler_top,
+            wave_w as u32,
+            loop_ruler_h as u32,
+        )));
         if !loop_enabled || loop_e <= loop_s {
             draw_pixel_label(
                 canvas,
@@ -18058,7 +19105,7 @@ fn draw_audio_editor(
         );
     }
 
-    // ── Time ruler (in seconds) ───────────────────────────────────────
+    // ── Time ruler (in beats) ───────────────────────────────────────
     let ruler_top = loop_ruler_top + loop_ruler_h;
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(35, 38, 48, 255));
     let _ = canvas.fill_rect(Rect::new(
@@ -18074,45 +19121,78 @@ fn draw_audio_editor(
         wave_w as u32,
         ruler_h as u32,
     )));
-    if total_secs > 0.0 {
-        let step = if zoom < 10.0 {
-            10.0
-        } else if zoom < 50.0 {
-            2.0
-        } else if zoom < 200.0 {
+    if total_secs > 0.0 && bpm > 0.0 {
+        let beat_dur = 60.0 / bpm;
+        // Choose a beat subdivision for ruler ticks based on zoom
+        // zoom is px/sec; beat_px = beat_dur * zoom
+        let beat_px = beat_dur * zoom;
+        // Pick subdivision: 4 beats (bar), 1 beat, 1/2, 1/4, 1/8
+        let sub_beat = if beat_px < 8.0 {
+            4.0 // show bars only
+        } else if beat_px < 20.0 {
+            1.0
+        } else if beat_px < 50.0 {
             0.5
+        } else if beat_px < 100.0 {
+            0.25
         } else {
-            0.1
+            0.125
         };
-        let first = (scroll / step).floor() * step;
+        let sub_dur = sub_beat * beat_dur;
+        let first = (scroll / sub_dur).floor() * sub_dur;
         let mut t = first;
-        while t <= scroll + visible_secs + step {
+        while t <= scroll + visible_secs + sub_dur {
             if t >= 0.0 && t <= total_secs + 0.001 {
                 let x = sec_to_x(t);
-                let is_sec = (t - t.floor()).abs() < 0.01;
-                let tick_h = if is_sec { ruler_h - 4 } else { ruler_h / 2 };
-                canvas.set_draw_color(if is_sec {
-                    sdl2::pixels::Color::RGBA(160, 160, 180, 200)
+                let beat_num = t / beat_dur;
+                let is_bar = (beat_num.round() as i64 % 4 == 0)
+                    && (beat_num - beat_num.round()).abs() < 0.01;
+                let is_beat = (beat_num - beat_num.round()).abs() < 0.01;
+                let tick_h = if is_bar {
+                    ruler_h - 4
+                } else if is_beat {
+                    ruler_h / 2 + 2
                 } else {
-                    sdl2::pixels::Color::RGBA(80, 85, 100, 160)
+                    ruler_h / 3
+                };
+                canvas.set_draw_color(if is_bar {
+                    sdl2::pixels::Color::RGBA(160, 160, 180, 200)
+                } else if is_beat {
+                    sdl2::pixels::Color::RGBA(110, 115, 130, 180)
+                } else {
+                    sdl2::pixels::Color::RGBA(80, 85, 100, 140)
                 });
                 let _ = canvas.draw_line(
                     sdl2::rect::Point::new(x, ruler_top + ruler_h - tick_h),
                     sdl2::rect::Point::new(x, ruler_top + ruler_h - 1),
                 );
-                if is_sec && x + 2 < wave_left + wave_w {
+                // Label at bar and beat boundaries
+                if is_bar && x + 2 < wave_left + wave_w {
+                    let bar = (beat_num.round() as i64 / 4) + 1;
                     draw_pixel_label(
                         canvas,
                         &state.theme,
-                        &format!("{:.1}s", t),
+                        &format!("{}", bar),
+                        x + 2,
+                        ruler_top + 3,
+                        30,
+                        sdl2::pixels::Color::RGBA(160, 165, 180, 220),
+                    );
+                } else if is_beat && beat_px >= 20.0 && x + 2 < wave_left + wave_w {
+                    let bar = (beat_num.round() as i64 / 4) + 1;
+                    let beat_in_bar = (beat_num.round() as i64 % 4) + 1;
+                    draw_pixel_label(
+                        canvas,
+                        &state.theme,
+                        &format!("{}.{}", bar, beat_in_bar),
                         x + 2,
                         ruler_top + 3,
                         40,
-                        sdl2::pixels::Color::RGBA(140, 145, 160, 200),
+                        sdl2::pixels::Color::RGBA(120, 125, 140, 180),
                     );
                 }
             }
-            t += step;
+            t += sub_dur;
         }
     }
     canvas.set_clip_rect(None);
@@ -18238,8 +19318,24 @@ fn draw_audio_editor(
             );
         }
     }
-    draw_pixel_label(canvas, &state.theme, "L", wave_left + 2, wave_top + 2, 10, sdl2::pixels::Color::RGBA(80, 90, 110, 180));
-    draw_pixel_label(canvas, &state.theme, "R", wave_left + 2, ch_sep_y + 2, 10, sdl2::pixels::Color::RGBA(80, 90, 110, 180));
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "L",
+        wave_left + 2,
+        wave_top + 2,
+        10,
+        sdl2::pixels::Color::RGBA(80, 90, 110, 180),
+    );
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "R",
+        wave_left + 2,
+        ch_sep_y + 2,
+        10,
+        sdl2::pixels::Color::RGBA(80, 90, 110, 180),
+    );
 
     // ── Selection highlight ──────────────────────────────────────────
     if let Some((sel_s, sel_e)) = state.audio_editor_selection {
@@ -18263,7 +19359,12 @@ fn draw_audio_editor(
     }
 
     // ── Draw waveform ────────────────────────────────────────────────
-    canvas.set_clip_rect(Some(Rect::new(wave_left, wave_top, wave_w as u32, wave_h as u32)));
+    canvas.set_clip_rect(Some(Rect::new(
+        wave_left,
+        wave_top,
+        wave_w as u32,
+        wave_h as u32,
+    )));
     let raw_data = state.waveform_raw_cache.get(&source_file);
     let stereo_data = state.waveform_stereo_cache.get(&source_file);
     if let Some((ref left_raw, ref right_raw, raw_sr)) = raw_data {
@@ -18276,7 +19377,9 @@ fn draw_audio_editor(
             for px_i in 0..wave_w as usize {
                 let sec0 = x_to_sec(wave_left + px_i as i32);
                 let sec1 = x_to_sec(wave_left + px_i as i32 + 1);
-                if sec1 < 0.0 || sec0 > total_secs { continue; }
+                if sec1 < 0.0 || sec0 > total_secs {
+                    continue;
+                }
                 let s0 = ((sec0 * sr_f64) as usize).min(num_samples.saturating_sub(1));
                 let s1 = ((sec1 * sr_f64) as usize).min(num_samples).max(s0 + 1);
                 // Compute per-pixel min/max from raw samples
@@ -18287,12 +19390,22 @@ fn draw_audio_editor(
                 for si in s0..s1 {
                     let ls = left_raw[si];
                     let rs = right_raw[si];
-                    if ls > l_px_max { l_px_max = ls; }
-                    if ls < l_px_min { l_px_min = ls; }
-                    if rs > r_px_max { r_px_max = rs; }
-                    if rs < r_px_min { r_px_min = rs; }
+                    if ls > l_px_max {
+                        l_px_max = ls;
+                    }
+                    if ls < l_px_min {
+                        l_px_min = ls;
+                    }
+                    if rs > r_px_max {
+                        r_px_max = rs;
+                    }
+                    if rs < r_px_min {
+                        r_px_min = rs;
+                    }
                 }
-                if l_px_max == f32::NEG_INFINITY { continue; }
+                if l_px_max == f32::NEG_INFINITY {
+                    continue;
+                }
                 let in_window = sec0 >= clip_win_start_secs && sec0 <= clip_win_end_secs;
                 let (wave_r, wave_g, wave_b, alpha) = if in_window {
                     (70u8, 200u8, 130u8, 230u8)
@@ -18323,7 +19436,9 @@ fn draw_audio_editor(
             let half1 = half0;
             for px_i in 0..wave_w as usize {
                 let sec = x_to_sec(wave_left + px_i as i32);
-                if sec < 0.0 || sec > total_secs { continue; }
+                if sec < 0.0 || sec > total_secs {
+                    continue;
+                }
                 let frac = sec / total_secs;
                 let idx = ((frac * num_peaks as f64) as usize).min(num_peaks - 1);
                 let in_window = sec >= clip_win_start_secs && sec <= clip_win_end_secs;
@@ -18349,57 +19464,65 @@ fn draw_audio_editor(
             }
         }
     } else if !source_file.is_empty() {
-        draw_pixel_label(canvas, &state.theme, "loading waveform...", wave_left + wave_w / 2 - 60, ch0_center - 5, 140, sdl2::pixels::Color::RGBA(100, 180, 130, 150));
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            "loading waveform...",
+            wave_left + wave_w / 2 - 60,
+            ch0_center - 5,
+            140,
+            sdl2::pixels::Color::RGBA(100, 180, 130, 150),
+        );
     }
     canvas.set_clip_rect(None);
 
-    // ── Grid lines (time-based, always stable; plus subtle beat grid) ─
-    canvas.set_clip_rect(Some(Rect::new(wave_left, wave_top, wave_w as u32, wave_h as u32)));
-    if total_secs > 0.0 {
-        // Primary time-based grid — step is zoom-dependent and NEVER changes with snap
-        let step = if zoom < 10.0 { 10.0 } else if zoom < 50.0 { 2.0 } else if zoom < 200.0 { 0.5 } else { 0.1 };
-        let first = (scroll / step).floor() * step;
-        let mut t = if first <= 0.0 { step } else { first };
-        while t < total_secs && t <= scroll + visible_secs + step {
+    // ── Grid lines (beat-based, matching ruler) ─────────────────────
+    canvas.set_clip_rect(Some(Rect::new(
+        wave_left,
+        wave_top,
+        wave_w as u32,
+        wave_h as u32,
+    )));
+    if total_secs > 0.0 && bpm > 0.0 {
+        let beat_dur = 60.0 / bpm;
+        let beat_px = beat_dur * zoom;
+        // Use the snap resolution for grid subdivision, but fall back to
+        // beat-density–based stepping for overall readability
+        let snap_div_beats_grid = SNAP_RESOLUTIONS[state.audio_editor_snap_idx].1;
+        let grid_beat = if state.audio_editor_snap_enabled {
+            snap_div_beats_grid
+        } else if beat_px < 8.0 {
+            4.0
+        } else if beat_px < 20.0 {
+            1.0
+        } else if beat_px < 50.0 {
+            0.5
+        } else if beat_px < 100.0 {
+            0.25
+        } else {
+            0.125
+        };
+        let grid_dur = grid_beat * beat_dur;
+        let first = (scroll / grid_dur).floor() * grid_dur;
+        let mut t = if first <= 0.0 { grid_dur } else { first };
+        while t < total_secs && t <= scroll + visible_secs + grid_dur {
             let x = sec_to_x(t);
-            let is_sec = (t - t.floor()).abs() < 0.01;
-            canvas.set_draw_color(if is_sec {
-                sdl2::pixels::Color::RGBA(50, 55, 65, 80)
+            let beat_num = t / beat_dur;
+            let is_bar =
+                (beat_num.round() as i64 % 4 == 0) && (beat_num - beat_num.round()).abs() < 0.01;
+            let is_beat = (beat_num - beat_num.round()).abs() < 0.01;
+            canvas.set_draw_color(if is_bar {
+                sdl2::pixels::Color::RGBA(70, 75, 95, 70)
+            } else if is_beat {
+                sdl2::pixels::Color::RGBA(55, 60, 78, 45)
             } else {
-                sdl2::pixels::Color::RGBA(40, 44, 52, 40)
+                sdl2::pixels::Color::RGBA(45, 48, 60, 30)
             });
             let _ = canvas.draw_line(
                 sdl2::rect::Point::new(x, wave_top),
                 sdl2::rect::Point::new(x, wave_top + wave_h),
             );
-            t += step;
-        }
-
-        // Subtle beat grid — always drawn based on BPM, independent of snap
-        if bpm_early > 0.0 {
-            let beat_step = 60.0 / bpm_early;
-            // Only draw beat lines if they're spaced far enough apart to be legible
-            let beat_px_width = beat_step * zoom;
-            if beat_px_width >= 4.0 {
-                let first_beat = (scroll / beat_step).floor() * beat_step;
-                let mut tb = if first_beat <= 0.0 { beat_step } else { first_beat };
-                while tb < total_secs && tb <= scroll + visible_secs + beat_step {
-                    let x = sec_to_x(tb);
-                    // Detect bar lines (every 4 beats)
-                    let beat_num = (tb / beat_step).round() as i64;
-                    let is_bar = beat_num % 4 == 0;
-                    canvas.set_draw_color(if is_bar {
-                        sdl2::pixels::Color::RGBA(70, 75, 95, 60)
-                    } else {
-                        sdl2::pixels::Color::RGBA(55, 60, 78, 35)
-                    });
-                    let _ = canvas.draw_line(
-                        sdl2::rect::Point::new(x, wave_top),
-                        sdl2::rect::Point::new(x, wave_top + wave_h),
-                    );
-                    tb += beat_step;
-                }
-            }
+            t += grid_dur;
         }
     }
     canvas.set_clip_rect(None);
@@ -18411,12 +19534,7 @@ fn draw_audio_editor(
             let cx = sec_to_x(ph_sec);
             if cx >= wave_left && cx <= wave_left + wave_w {
                 canvas.set_draw_color(Theme::c(state.theme.playhead));
-                let _ = canvas.fill_rect(Rect::new(
-                    cx,
-                    ruler_top,
-                    1,
-                    (ruler_h + wave_h) as u32,
-                ));
+                let _ = canvas.fill_rect(Rect::new(cx, ruler_top, 1, (ruler_h + wave_h) as u32));
                 // Triangle indicator at top of time ruler
                 let tri_sz = 4i32;
                 for dy in 0..tri_sz {
@@ -18433,7 +19551,9 @@ fn draw_audio_editor(
     }
 
     // ── Also draw loop region highlight on waveform (edge lines only) ──
-    if state.audio_editor_loop_enabled && state.audio_editor_loop_end > state.audio_editor_loop_start {
+    if state.audio_editor_loop_enabled
+        && state.audio_editor_loop_end > state.audio_editor_loop_start
+    {
         let lx1 = sec_to_x(state.audio_editor_loop_start).max(wave_left);
         let lx2 = sec_to_x(state.audio_editor_loop_end).min(wave_left + wave_w);
         if lx2 > lx1 {
@@ -18493,16 +19613,38 @@ fn draw_audio_editor(
 
     // ── Info bar at bottom ───────────────────────────────────────────
     let info_y = wave_top + wave_h + scroll_bar_h + 2;
+    let sec_to_bar_beat = |s: f64| -> String {
+        if bpm > 0.0 {
+            let beat_dur = 60.0 / bpm;
+            let beat = s / beat_dur;
+            let bar = (beat as i64 / 4) + 1;
+            let b_in_bar = (beat as i64 % 4) + 1;
+            format!("{}.{}", bar, b_in_bar)
+        } else {
+            format!("{:.3}s", s)
+        }
+    };
     let sel_info = if let Some((ss, se)) = state.audio_editor_selection {
         let s = ss.min(se);
         let e = ss.max(se);
+        let dur = e - s;
+        let dur_beats = if bpm > 0.0 { dur * bpm / 60.0 } else { 0.0 };
         format!(
-            "Sel: {:.3}s – {:.3}s  ({:.2}s)  |  Playhead: {:.3}s  |  Zoom: {:.0}px/s",
-            s, e, e - s, state.audio_editor_playhead, zoom
+            "Sel: {} – {}  ({:.2} beats)  |  Playhead: {}  |  Snap: {}",
+            sec_to_bar_beat(s),
+            sec_to_bar_beat(e),
+            dur_beats,
+            sec_to_bar_beat(state.audio_editor_playhead),
+            SNAP_RESOLUTIONS[state.audio_editor_snap_idx].0,
         )
     } else {
-        format!("File: {:.2}s  |  Playhead: {:.3}s  |  View: {:.2}s – {:.2}s  |  Zoom: {:.0}px/s",
-            total_secs, state.audio_editor_playhead, scroll, scroll + visible_secs, zoom)
+        format!(
+            "File: {:.2}s  |  Playhead: {}  |  BPM: {:.0}  |  Snap: {}",
+            total_secs,
+            sec_to_bar_beat(state.audio_editor_playhead),
+            bpm,
+            SNAP_RESOLUTIONS[state.audio_editor_snap_idx].0,
+        )
     };
     draw_pixel_label(
         canvas,
@@ -18582,8 +19724,12 @@ fn draw_audio_editor(
         let loop_e = state.audio_editor_loop_end;
         let ls_x = sec_to_x(loop_s);
         let le_x = sec_to_x(loop_e);
-        let near_start = state.audio_editor_loop_enabled && loop_e > loop_s && (mx - ls_x).abs() <= handle_hit_loop;
-        let near_end = state.audio_editor_loop_enabled && loop_e > loop_s && (mx - le_x).abs() <= handle_hit_loop;
+        let near_start = state.audio_editor_loop_enabled
+            && loop_e > loop_s
+            && (mx - ls_x).abs() <= handle_hit_loop;
+        let near_end = state.audio_editor_loop_enabled
+            && loop_e > loop_s
+            && (mx - le_x).abs() <= handle_hit_loop;
 
         if near_start && !near_end {
             input.drag_widget = WidgetId::Auto(7080);
@@ -18617,7 +19763,11 @@ fn draw_audio_editor(
     if input.drag_widget == WidgetId::Auto(7082) && input.mouse_down {
         let sec = snap_sec(x_to_sec(input.mouse_x).clamp(0.0, total_secs));
         let anchor = input.drag_start_value;
-        let (lo, hi) = if sec < anchor { (sec, anchor) } else { (anchor, sec) };
+        let (lo, hi) = if sec < anchor {
+            (sec, anchor)
+        } else {
+            (anchor, sec)
+        };
         state.audio_editor_loop_start = lo.max(0.0);
         state.audio_editor_loop_end = hi.max(lo + 0.01);
     }
@@ -18691,11 +19841,7 @@ fn draw_audio_editor(
     }
 
     // Wave: Ctrl+click-drag with existing selection → drag region to arranger
-    if in_wave
-        && input.mouse_pressed
-        && input.ctrl()
-        && !source_file.is_empty()
-    {
+    if in_wave && input.mouse_pressed && input.ctrl() && !source_file.is_empty() {
         if let Some((sel_s, sel_e)) = state.audio_editor_selection {
             let s = sel_s.min(sel_e);
             let e = sel_s.max(sel_e);
@@ -18796,7 +19942,15 @@ fn draw_audio_editor(
         );
     }
     {
-        let fx_labels: Vec<&str> = vec!["Reverse", "Fade In", "Fade Out", "Silence", "Gain +6dB", "Gain -6dB", "Invert"];
+        let fx_labels: Vec<&str> = vec![
+            "Reverse",
+            "Fade In",
+            "Fade Out",
+            "Silence",
+            "Gain +6dB",
+            "Gain -6dB",
+            "Invert",
+        ];
         let fx_dropdown_w = 80i32;
         let apply_w = 50i32;
         let fx_area_w = fx_dropdown_w + 4 + apply_w;
@@ -19868,7 +21022,15 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
     // ── Tab sidebar ──────────────────────────────────────────────────
     let tab_w = 120i32;
-    let tab_labels = ["General", "Arrangement", "Piano Roll", "Audio Editor", "Automation", "Rack", "Mixer"];
+    let tab_labels = [
+        "General",
+        "Arrangement",
+        "Piano Roll",
+        "Audio Editor",
+        "Automation",
+        "Rack",
+        "Mixer",
+    ];
     let tab_top = py + 24;
     let tab_h = 22i32;
 
@@ -19896,7 +21058,15 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         } else {
             sdl2::pixels::Color::RGBA(150, 155, 170, 220)
         };
-        draw_pixel_label(canvas, &state.theme, label, px + 10, ty + 6, tab_w - 14, col);
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            label,
+            px + 10,
+            ty + 6,
+            tab_w - 14,
+            col,
+        );
 
         if hover && input.mouse_pressed {
             state.help_screen_tab = i;
@@ -19919,241 +21089,381 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     let line_h = 13i32;
 
     let c_section = sdl2::pixels::Color::RGBA(200, 165, 80, 255);
-    let c_key     = sdl2::pixels::Color::RGBA(255, 220, 140, 230);
-    let c_desc    = sdl2::pixels::Color::RGBA(178, 184, 200, 220);
-    let c_note    = sdl2::pixels::Color::RGBA(130, 200, 130, 200);
+    let c_key = sdl2::pixels::Color::RGBA(255, 220, 140, 230);
+    let c_desc = sdl2::pixels::Color::RGBA(178, 184, 200, 220);
+    let c_note = sdl2::pixels::Color::RGBA(130, 200, 130, 200);
 
     // Build content for the active tab
     type HelpEntry = (&'static str, &'static str, bool);
     let entries: Vec<HelpEntry> = match state.help_screen_tab {
         0 => vec![
             // General
-            ("── Transport ──",              "",  true),
-            ("Space",                        "Play / Stop",  false),
-            ("Space (preview playing)",      "Stops sample preview instead",  false),
-            ("Enter",                        "Stop and rewind to start (or loop start)",  false),
-            ("L",                            "Toggle loop on / off",  false),
-            ("",                             "",  false),
-            ("── Views ──",                  "",  true),
-            ("1",                            "Arrangement view",  false),
-            ("2",                            "Mixer view",  false),
-            ("3",                            "Edit / piano-roll view",  false),
-            ("F1",                           "Toggle this help screen",  false),
-            ("Escape",                       "Deselect / close popup / close help",  false),
-            ("T",                            "Cycle colour theme",  false),
-            ("",                             "",  false),
-            ("── Global ──",                 "",  true),
-            ("Ctrl+S",                       "Save project",  false),
-            ("Right-click Save btn",         "Open Save As dialog",  false),
-            ("Ctrl+Z",                       "Undo",  false),
-            ("Ctrl+Shift+Z / Ctrl+R",        "Redo",  false),
-            ("",                             "",  false),
-            ("── Knobs ──",                  "",  true),
-            ("Left-drag up / down",          "Adjust value",  false),
-            ("Middle-drag up / down",        "Fine adjustment (5x slower)",  false),
-            ("Shift+Click",                  "Reset to default value",  false),
-            ("Hover",                        "Shows current value as tooltip",  false),
-            ("",                             "",  false),
-            ("── Sliders ──",                "",  true),
-            ("Left-drag",                    "Adjust value",  false),
-            ("Shift+Click",                  "Reset to default value",  false),
-            ("",                             "",  false),
-            ("── Dropdowns ──",              "",  true),
-            ("Left-click",                   "Open dropdown / cycle options",  false),
-            ("Scroll wheel (on dropdown)",   "Cycle through options",  false),
+            ("── Transport ──", "", true),
+            ("Space", "Play / Stop", false),
+            (
+                "Space (preview playing)",
+                "Stops sample preview instead",
+                false,
+            ),
+            ("Enter", "Stop and rewind to start (or loop start)", false),
+            ("L", "Toggle loop on / off", false),
+            ("", "", false),
+            ("── Views ──", "", true),
+            ("1", "Arrangement view", false),
+            ("2", "Mixer view", false),
+            ("3", "Edit / piano-roll view", false),
+            ("F1", "Toggle this help screen", false),
+            ("Escape", "Deselect / close popup / close help", false),
+            ("T", "Cycle colour theme", false),
+            ("", "", false),
+            ("── Global ──", "", true),
+            ("Ctrl+S", "Save project", false),
+            ("Right-click Save btn", "Open Save As dialog", false),
+            ("Ctrl+Z", "Undo", false),
+            ("Ctrl+Shift+Z / Ctrl+R", "Redo", false),
+            ("S", "Toggle snap to grid on / off", false),
+            ("", "", false),
+            ("── Knobs ──", "", true),
+            ("Left-drag up / down", "Adjust value", false),
+            (
+                "Middle-drag up / down",
+                "Fine adjustment (5x slower)",
+                false,
+            ),
+            ("Shift+Click", "Reset to default value", false),
+            ("Hover", "Shows current value as tooltip", false),
+            ("", "", false),
+            ("── Sliders ──", "", true),
+            ("Left-drag", "Adjust value", false),
+            ("Shift+Click", "Reset to default value", false),
+            ("", "", false),
+            ("── Dropdowns ──", "", true),
+            ("Left-click", "Open dropdown / cycle options", false),
+            ("Scroll wheel (on dropdown)", "Cycle through options", false),
         ],
         1 => vec![
             // Arrangement
-            ("── Navigation ──",             "",  true),
-            ("Middle-drag",                  "Pan view left/right and up/down",  false),
-            ("Scroll wheel",                 "Scroll tracks up / down",  false),
-            ("Shift+Scroll",                 "Scroll timeline left / right",  false),
-            ("Ctrl+Scroll",                  "Zoom timeline (anchored to cursor)",  false),
-            ("+ / =  or  -",                 "Zoom in / out",  false),
-            ("",                             "",  false),
-            ("── Clip Selection ──",         "",  true),
-            ("Left-click clip",              "Select clip",  false),
-            ("Shift+Click clip",             "Add / remove from multi-selection",  false),
-            ("Ctrl+A",                       "Select all clips",  false),
-            ("Ctrl+C / Ctrl+V",              "Copy / Paste at playhead",  false),
-            ("Ctrl+D",                       "Duplicate selected clips",  false),
-            ("Delete / Backspace",           "Delete selected clips",  false),
-            ("",                             "",  false),
-            ("── Clip Editing ──",           "",  true),
-            ("Drag clip",                    "Move clip; hold Ctrl to copy",  false),
-            ("Drag clip up / down",          "Move clip to another track",  false),
-            ("Drag clip edge",               "Resize clip (trim start/end)",  false),
-            ("Double-click clip",            "Open in Piano Roll / Audio Editor",  false),
-            ("Double-click empty lane",      "Create new clip",  false),
-            ("Right-click clip",             "Delete; hold+drag to erase range",  false),
-            ("",                             "",  false),
-            ("── Loop Region ──",            "",  true),
-            ("Drag ruler",                   "Set loop region start / end",  false),
-            ("Right-click ruler",            "Clear loop region",  false),
-            ("",                             "",  false),
-            ("── Tracks ──",                 "",  true),
-            ("Shift+Up / Down",              "Reorder selected track",  false),
-            ("",                             "",  false),
-            ("── Join ──",                   "",  true),
-            ("J",                            "Join adjacent selected clips into one",  false),
+            ("── Navigation ──", "", true),
+            ("Middle-drag", "Pan view left/right and up/down", false),
+            ("Scroll wheel", "Scroll tracks up / down", false),
+            ("Shift+Scroll", "Scroll timeline left / right", false),
+            ("Ctrl+Scroll", "Zoom timeline (anchored to cursor)", false),
+            ("+ / =  or  -", "Zoom in / out", false),
+            ("", "", false),
+            ("── Clip Selection ──", "", true),
+            ("Left-click clip", "Select clip", false),
+            (
+                "Shift+Click clip",
+                "Add / remove from multi-selection",
+                false,
+            ),
+            ("Ctrl+A", "Select all clips", false),
+            ("Ctrl+C / Ctrl+V", "Copy / Paste at playhead", false),
+            ("Ctrl+D", "Duplicate selected clips", false),
+            ("Delete / Backspace", "Delete selected clips", false),
+            ("", "", false),
+            ("── Clip Editing ──", "", true),
+            ("Drag clip", "Move clip; hold Ctrl to copy", false),
+            ("Drag clip up / down", "Move clip to another track", false),
+            ("Drag clip edge", "Resize clip (trim start/end)", false),
+            (
+                "Double-click clip",
+                "Open in Piano Roll / Audio Editor",
+                false,
+            ),
+            ("Double-click empty lane", "Create new clip", false),
+            (
+                "Right-click clip",
+                "Delete; hold+drag to erase range",
+                false,
+            ),
+            ("", "", false),
+            ("── Loop Region ──", "", true),
+            ("Drag ruler", "Set loop region start / end", false),
+            ("Right-click ruler", "Clear loop region", false),
+            ("", "", false),
+            ("── Tracks ──", "", true),
+            ("Shift+Up / Down", "Reorder selected track", false),
+            ("", "", false),
+            ("── Join ──", "", true),
+            ("J", "Join adjacent selected clips into one", false),
         ],
         2 => vec![
             // Piano Roll
-            ("── Navigation ──",             "",  true),
-            ("Middle-drag",                  "Pan view in any direction",  false),
-            ("Scroll wheel",                 "Scroll pitch up / down",  false),
-            ("Shift+Scroll",                 "Scroll timeline left / right",  false),
-            ("Ctrl+Scroll",                  "Zoom timeline (anchored to cursor)",  false),
-            ("",                             "",  false),
-            ("── Note Editing ──",           "",  true),
-            ("Left-click (draw mode)",       "Place new note",  false),
-            ("Left-drag (draw mode)",        "Draw note and set length",  false),
-            ("Right-click note",             "Delete note; drag to erase multiple",  false),
-            ("Ctrl+Drag (select mode)",      "Rubber-band select notes",  false),
-            ("Ctrl+A",                       "Select all notes",  false),
-            ("Ctrl+D",                       "Duplicate selected notes",  false),
-            ("Delete / Backspace",           "Delete selected notes",  false),
-            ("",                             "",  false),
-            ("── Note Movement ──",          "",  true),
-            ("Arrow Up / Down",              "Transpose +/- 1 semitone",  false),
-            ("Shift+Up / Down",              "Transpose +/- 1 octave",  false),
-            ("Arrow Left / Right",           "Nudge by snap unit",  false),
-            ("",                             "",  false),
-            ("── Keyboard Piano ──",         "",  true),
-            ("Left-click piano key strip",   "Audition / preview a note",  false),
-            ("",                             "",  false),
-            ("── Computer Keyboard ──",      "",  true),
-            ("A  W  S  E  D  F  T",          "C  C#  D  D#  E  F  F#",  false),
-            ("G  Y  H  U  J",               "G  G#  A  A#  B",  false),
-            ("K  O  L",                      "C  C#  D (next octave)",  false),
-            ("Z / X",                        "Octave down / up",  false),
-            ("",                             "",  false),
-            ("  * Piano keyboard mode",      "active when KBD icon is lit",  false),
-            ("",                             "",  false),
-            ("── MIDI Export ──",            "",  true),
-            ("MID button (toolbar)",         "Export current clip as .mid file",  false),
+            ("── Navigation ──", "", true),
+            ("Middle-drag", "Pan view in any direction", false),
+            ("Scroll wheel", "Scroll pitch up / down", false),
+            ("Shift+Scroll", "Scroll timeline left / right", false),
+            ("Ctrl+Scroll", "Zoom timeline (anchored to cursor)", false),
+            ("", "", false),
+            ("── Note Editing ──", "", true),
+            ("Left-click (draw mode)", "Place new note", false),
+            ("Left-drag (draw mode)", "Draw note and set length", false),
+            (
+                "Right-click note",
+                "Delete note; drag to erase multiple",
+                false,
+            ),
+            ("Ctrl+Drag (select mode)", "Rubber-band select notes", false),
+            ("Ctrl+A", "Select all notes", false),
+            ("Ctrl+D", "Duplicate selected notes", false),
+            ("Delete / Backspace", "Delete selected notes", false),
+            ("", "", false),
+            ("── Note Movement ──", "", true),
+            ("Arrow Up / Down", "Transpose +/- 1 semitone", false),
+            ("Shift+Up / Down", "Transpose +/- 1 octave", false),
+            ("Arrow Left / Right", "Nudge by snap unit", false),
+            ("", "", false),
+            ("── Keyboard Piano ──", "", true),
+            (
+                "Left-click piano key strip",
+                "Audition / preview a note",
+                false,
+            ),
+            ("", "", false),
+            ("── Computer Keyboard ──", "", true),
+            ("A  W  S  E  D  F  T", "C  C#  D  D#  E  F  F#", false),
+            ("G  Y  H  U  J", "G  G#  A  A#  B", false),
+            ("K  O  L", "C  C#  D (next octave)", false),
+            ("Z / X", "Octave down / up", false),
+            ("", "", false),
+            (
+                "  * Piano keyboard mode",
+                "active when KBD icon is lit",
+                false,
+            ),
+            ("", "", false),
+            ("── MIDI Export ──", "", true),
+            (
+                "MID button (toolbar)",
+                "Export current clip as .mid file",
+                false,
+            ),
         ],
         3 => vec![
             // Audio Editor
-            ("── Overview ──",               "",  true),
-            ("  The audio editor opens",     "when you select an audio clip",  false),
-            ("  in the arrangement view.",   "It shows the waveform for editing.",  false),
-            ("",                             "",  false),
-            ("── Navigation ──",             "",  true),
-            ("Middle-drag",                  "Pan waveform left / right",  false),
-            ("Ctrl+Scroll",                  "Zoom in / out (horizontal)",  false),
-            ("Shift+Scroll",                 "Scroll left / right",  false),
-            ("",                             "",  false),
-            ("── Selection ──",              "",  true),
-            ("Left-click + drag",            "Select a time range on the waveform",  false),
-            ("A",                            "Select entire waveform",  false),
-            ("Escape",                       "Clear selection",  false),
-            ("",                             "",  false),
-            ("── Toolbar ──",                "",  true),
-            ("SEL  (Q)",                     "Selection tool (click+drag to select)",  false),
-            ("NORM (W)",                     "Normalize selected region to 0dB",  false),
-            ("TRIM (E)",                     "Trim file to selection",  false),
-            ("FIT  (R)",                     "Fit clip length to new audio duration",  false),
-            ("CUT  (T)",                     "Cut selected region from file",  false),
-            ("PASTE(Y)",                     "Paste clipboard at playhead position",  false),
-            ("EXP",                          "Export audio clip to WAV file",  false),
-            ("",                             "",  false),
-            ("── Drag to Arranger ──",       "",  true),
-            ("Ctrl+drag selection",          "Drag selected region to arranger as clip",  false),
-            ("",                             "",  false),
-            ("── Effects (Apply) ──",        "",  true),
-            ("Effects dropdown (top right)", "Choose effect: Reverse, Fade In/Out, etc.",  false),
-            ("APPLY button / Shift+A",       "Apply chosen effect to selection",  false),
-            ("",                             "",  false),
-            ("── Undo / Redo ──",            "",  true),
-            ("Ctrl+Z",                       "Undo last audio edit (when focused)",  false),
-            ("Ctrl+Shift+Z",                 "Redo last audio edit (when focused)",  false),
-            ("",                             "",  false),
-            ("── Playback ──",               "",  true),
-            ("Space",                        "Play / stop from playhead (when focused)",  false),
-            ("Click ruler",                  "Set playhead position",  false),
-            ("",                             "",  false),
-            ("── Loop Region ──",            "",  true),
-            ("Drag loop ruler handles",      "Set loop start / end",  false),
-            ("Loop region highlighted",      "Playback loops within region",  false),
-            ("Gain slider (toolbar)",        "Adjust clip gain",  false),
+            ("── Overview ──", "", true),
+            (
+                "  The audio editor opens",
+                "when you select an audio clip",
+                false,
+            ),
+            (
+                "  in the arrangement view.",
+                "It shows the waveform for editing.",
+                false,
+            ),
+            ("", "", false),
+            ("── Navigation ──", "", true),
+            ("Middle-drag", "Pan waveform left / right", false),
+            ("Ctrl+Scroll", "Zoom in / out (horizontal)", false),
+            ("Shift+Scroll", "Scroll left / right", false),
+            ("", "", false),
+            ("── Selection ──", "", true),
+            (
+                "Left-click + drag",
+                "Select a time range on the waveform",
+                false,
+            ),
+            ("A", "Select entire waveform", false),
+            ("Escape", "Clear selection", false),
+            ("", "", false),
+            ("── Toolbar ──", "", true),
+            ("UNIQUE", "Make a unique copy of cloned clip audio", false),
+            ("SEL  (Q)", "Selection tool (click+drag to select)", false),
+            ("NORM (W)", "Normalize selected region to 0dB", false),
+            ("TRIM (E)", "Trim file to selection", false),
+            ("FIT  (R)", "Fit clip length to new audio duration", false),
+            ("CUT  (T)", "Cut selected region from file", false),
+            ("PASTE(Y)", "Paste clipboard at playhead position", false),
+            ("EXP", "Export audio clip to WAV file", false),
+            ("", "", false),
+            ("── Drag to Arranger ──", "", true),
+            (
+                "Ctrl+drag selection",
+                "Drag selected region to arranger as clip",
+                false,
+            ),
+            ("", "", false),
+            ("── Effects (Apply) ──", "", true),
+            (
+                "Effects dropdown (top right)",
+                "Choose effect: Reverse, Fade In/Out, etc.",
+                false,
+            ),
+            (
+                "APPLY button / B",
+                "Apply chosen effect to selection",
+                false,
+            ),
+            ("", "", false),
+            ("── Undo / Redo ──", "", true),
+            ("Ctrl+Z", "Undo last audio edit (when focused)", false),
+            ("Ctrl+Shift+Z", "Redo last audio edit (when focused)", false),
+            ("", "", false),
+            ("── Playback ──", "", true),
+            ("Space", "Play / stop from playhead (when focused)", false),
+            ("Click ruler", "Set playhead position", false),
+            ("", "", false),
+            ("── Loop Region ──", "", true),
+            ("Drag loop ruler handles", "Set loop start / end", false),
+            (
+                "Loop region highlighted",
+                "Playback loops within region",
+                false,
+            ),
+            ("Gain slider (toolbar)", "Adjust clip gain", false),
         ],
         4 => vec![
             // Automation Editor
-            ("── Overview ──",               "",  true),
-            ("  The automation editor opens","when you select an automation clip",  false),
-            ("  in the arrangement view.",   "Draw curves to modulate parameters.",  false),
-            ("",                             "",  false),
-            ("── Navigation ──",             "",  true),
-            ("Middle-drag",                  "Pan view in any direction",  false),
-            ("Scroll wheel",                 "Scroll up / down",  false),
-            ("Shift+Scroll",                 "Scroll timeline left / right",  false),
-            ("Ctrl+Scroll",                  "Zoom timeline (anchored to cursor)",  false),
-            ("",                             "",  false),
-            ("── Point Editing ──",          "",  true),
-            ("Left-click (empty area)",      "Add a new control point",  false),
-            ("Left-drag point",              "Move existing control point",  false),
-            ("Right-click point",            "Delete control point",  false),
-            ("",                             "",  false),
-            ("── Curve Types ──",            "",  true),
-            ("Linear (default)",             "Straight line between points",  false),
-            ("Stepped",                      "Value jumps at each point (no interp)",  false),
-            ("",                             "",  false),
-            ("── Snap ──",                   "",  true),
-            ("Snap dropdown (toolbar)",      "Set grid snap resolution",  false),
-            ("Snap toggle (S)",              "Enable / disable snap to grid",  false),
-            ("",                             "",  false),
-            ("── Automation Targets ──",     "",  true),
-            ("Right-click rack knob",        "Assign knob to automation lane",  false),
-            ("Automation track",             "Routes values to assigned parameter",  false),
+            ("── Overview ──", "", true),
+            (
+                "  The automation editor opens",
+                "when you select an automation clip",
+                false,
+            ),
+            (
+                "  in the arrangement view.",
+                "Draw curves to modulate parameters.",
+                false,
+            ),
+            ("", "", false),
+            ("── Navigation ──", "", true),
+            ("Middle-drag", "Pan view in any direction", false),
+            ("Scroll wheel", "Scroll up / down", false),
+            ("Shift+Scroll", "Scroll timeline left / right", false),
+            ("Ctrl+Scroll", "Zoom timeline (anchored to cursor)", false),
+            ("", "", false),
+            ("── Point Editing ──", "", true),
+            ("Left-click (empty area)", "Add a new control point", false),
+            ("Left-drag point", "Move existing control point", false),
+            ("Right-click point", "Delete control point", false),
+            ("", "", false),
+            ("── Curve Types ──", "", true),
+            ("Linear (default)", "Straight line between points", false),
+            ("Stepped", "Value jumps at each point (no interp)", false),
+            ("", "", false),
+            ("── Snap ──", "", true),
+            ("Snap dropdown (toolbar)", "Set grid snap resolution", false),
+            ("Snap toggle (S)", "Enable / disable snap to grid", false),
+            ("", "", false),
+            ("── Automation Targets ──", "", true),
+            (
+                "Right-click rack knob",
+                "Assign knob to automation lane",
+                false,
+            ),
+            (
+                "Automation track",
+                "Routes values to assigned parameter",
+                false,
+            ),
         ],
         5 => vec![
             // Rack
-            ("── Overview ──",               "",  true),
-            ("  The Instrument Rack shows",  "modules loaded on the selected track.",  false),
-            ("  Open it by double-clicking", "a track header.",  false),
-            ("",                             "",  false),
-            ("── Module Browser ──",         "",  true),
-            ("Left panel browser",           "Lists available instruments & effects",  false),
-            ("Drag module to rack",          "Add module to the signal chain",  false),
-            ("Drag module to lane",          "Create new track with that module",  false),
-            ("",                             "",  false),
-            ("── Rack Layout ──",            "",  true),
-            ("Right-drag module header",     "Reorder modules in the chain",  false),
-            ("Middle-click module header",   "Open sidechain source dropdown",  false),
-            ("Delete / right-click header",  "Remove module from rack",  false),
-            ("",                             "",  false),
-            ("── Knob Controls ──",          "",  true),
-            ("Left-drag up / down",          "Adjust parameter value",  false),
-            ("Middle-drag up / down",        "Fine adjustment (5x slower)",  false),
-            ("Shift+Click knob",             "Reset to default value",  false),
-            ("Right-click knob",             "Assign to automation lane",  false),
-            ("Hover over knob",              "Shows parameter name & value",  false),
-            ("",                             "",  false),
-            ("── Presets ──",                "",  true),
-            ("Preset dropdown (module)",     "Load / switch presets",  false),
+            ("── Overview ──", "", true),
+            (
+                "  The Instrument Rack shows",
+                "modules loaded on the selected track.",
+                false,
+            ),
+            ("  Open it by double-clicking", "a track header.", false),
+            ("", "", false),
+            ("── Module Browser ──", "", true),
+            (
+                "Left panel browser",
+                "Lists available instruments & effects",
+                false,
+            ),
+            (
+                "Drag module to rack",
+                "Add module to the signal chain",
+                false,
+            ),
+            (
+                "Drag module to lane",
+                "Create new track with that module",
+                false,
+            ),
+            ("", "", false),
+            ("── Rack Layout ──", "", true),
+            (
+                "Right-drag module header",
+                "Reorder modules in the chain",
+                false,
+            ),
+            (
+                "Middle-click module header",
+                "Open sidechain source dropdown",
+                false,
+            ),
+            (
+                "Delete / right-click header",
+                "Remove module from rack",
+                false,
+            ),
+            ("", "", false),
+            ("── Knob Controls ──", "", true),
+            ("Left-drag up / down", "Adjust parameter value", false),
+            (
+                "Middle-drag up / down",
+                "Fine adjustment (5x slower)",
+                false,
+            ),
+            ("Shift+Click knob", "Reset to default value", false),
+            ("Right-click knob", "Assign to automation lane", false),
+            ("Hover over knob", "Shows parameter name & value", false),
+            ("", "", false),
+            ("── Presets ──", "", true),
+            ("Preset dropdown (module)", "Load / switch presets", false),
+            ("", "", false),
+            ("── Effects Info ──", "", true),
+            ("Delay", "Stereo delay with beat-synced L/R times", false),
+            (
+                "  Time L / Time R dropdowns",
+                "Beat divisions incl. triplets",
+                false,
+            ),
+            ("Compressor", "Real-time curve dot + GR / IN meters", false),
+            ("Limiter", "Ceiling curve + real-time dot + GR meter", false),
         ],
         6 => vec![
             // Mixer
-            ("── Mixer Overview ──",         "",  true),
-            ("  Press 2 to switch",          "to the mixer view",  false),
-            ("",                             "",  false),
-            ("── Channel Strip ──",          "",  true),
-            ("Volume fader",                 "Drag to set channel volume",  false),
-            ("Pan knob",                     "Drag to set stereo panning",  false),
-            ("Mute / Solo buttons",          "Toggle mute or solo per track",  false),
-            ("",                             "",  false),
-            ("── Effect Rack ──",            "",  true),
-            ("Drag from browser",            "Add effect / instrument to rack",  false),
-            ("Right-drag module header",     "Reorder modules in the rack",  false),
-            ("Middle-click effect slot",     "Open sidechain source dropdown",  false),
-            ("Right-click knob",             "Assign knob to automation lane",  false),
-            ("",                             "",  false),
-            ("── Automation ──",             "",  true),
-            ("Click automation lane",        "Add control point",  false),
-            ("Drag point",                   "Move control point",  false),
-            ("Right-click point",            "Delete control point",  false),
-            ("Snap dropdown (toolbar)",      "Set grid snap resolution",  false),
+            ("── Mixer Overview ──", "", true),
+            ("  Press 2 to switch", "to the mixer view", false),
+            ("", "", false),
+            ("── Channel Strip ──", "", true),
+            ("Volume fader", "Drag to set channel volume (dB)", false),
+            ("Pan knob", "Drag to set stereo panning", false),
+            (
+                "Mute / Solo buttons",
+                "Toggle mute or solo per track",
+                false,
+            ),
+            ("", "", false),
+            ("── Effect Rack ──", "", true),
+            (
+                "Drag from browser",
+                "Add effect / instrument to rack",
+                false,
+            ),
+            (
+                "Right-drag module header",
+                "Reorder modules in the rack",
+                false,
+            ),
+            (
+                "Middle-click effect slot",
+                "Open sidechain source dropdown",
+                false,
+            ),
+            ("Right-click knob", "Assign knob to automation lane", false),
+            ("", "", false),
+            ("── Automation ──", "", true),
+            ("Click automation lane", "Add control point", false),
+            ("Drag point", "Move control point", false),
+            ("Right-click point", "Delete control point", false),
+            ("Snap dropdown (toolbar)", "Set grid snap resolution", false),
         ],
         _ => vec![],
     };
@@ -20164,23 +21474,39 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     let desc_w = content_w - key_w - 4;
     let mut y = content_top;
     for (key, desc, is_section) in &entries {
-        if y + line_h > content_bot { break; }
+        if y + line_h > content_bot {
+            break;
+        }
         if key.is_empty() && desc.is_empty() {
             y += 5;
             continue;
         }
         if *is_section {
-            draw_pixel_label(canvas, &state.theme, key, content_x, y, content_w, c_section);
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                key,
+                content_x,
+                y,
+                content_w,
+                c_section,
+            );
         } else {
-            let col = if key.starts_with("  *") || key.starts_with("  ") { c_note } else { c_key };
-            draw_pixel_label(canvas, &state.theme, key,  content_x, y, key_w,  col);
-            draw_pixel_label(canvas, &state.theme, desc, desc_x,    y, desc_w, c_desc);
+            let col = if key.starts_with("  *") || key.starts_with("  ") {
+                c_note
+            } else {
+                c_key
+            };
+            draw_pixel_label(canvas, &state.theme, key, content_x, y, key_w, col);
+            draw_pixel_label(canvas, &state.theme, desc, desc_x, y, desc_w, c_desc);
         }
         y += line_h;
     }
 
     // Click outside sidebar to dismiss (but not on sidebar tabs)
-    if input.mouse_pressed && !input.mouse_in_rect(px, tab_top, tab_w, tab_labels.len() as i32 * tab_h) {
+    if input.mouse_pressed
+        && !input.mouse_in_rect(px, tab_top, tab_w, tab_labels.len() as i32 * tab_h)
+    {
         state.help_screen_visible = false;
     }
 }
