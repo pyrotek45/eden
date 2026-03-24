@@ -1702,7 +1702,7 @@ fn main() {
                 };
 
             // ── Now acquire the lock briefly just to swap data in/out ──
-            if let Ok(mut audio) = shared.lock() {
+            if let Ok(mut audio) = shared.try_lock() {
                 audio.playing = state.project.transport.playing;
                 audio.bpm = state.project.tempo_map.bpm_at(0.0);
 

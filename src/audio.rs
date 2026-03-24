@@ -507,15 +507,40 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         // Per-track keyboard arp state: (step_index, last_beat)
         let mut keyboard_arp_state: Vec<(usize, f64)> = Vec::new();
 
+        // ── Pre-allocated RT-safe scratch buffers ─────────────────────────────
+        // These are allocated ONCE here (outside the callback closure) and reused
+        // every callback invocation with .clear()/.resize() — no heap allocation
+        // inside the hot audio path.
+        let mut cb_pending_preview: Vec<(usize, u8, u8)> = Vec::with_capacity(16);
+        let mut cb_pending_note_offs: Vec<u8> = Vec::with_capacity(16);
+        let mut cb_cur_held_pitches: Vec<(usize, Vec<u8>)> = Vec::with_capacity(8);
+        // Output sample buffers — resized only when frame count changes (rare).
+        let mut cb_frame_l: Vec<f32> = Vec::with_capacity(2048);
+        let mut cb_frame_r: Vec<f32> = Vec::with_capacity(2048);
+        // Per-track accumulators — resized only when track count changes (rare).
+        let mut cb_per_track_sample: Vec<(f64, f64)> = Vec::with_capacity(64);
+        let mut cb_per_track_voices: Vec<usize> = Vec::with_capacity(64);
+        let mut cb_track_rms: Vec<f32> = Vec::with_capacity(64);
+        let mut cb_track_rms_pre: Vec<f32> = Vec::with_capacity(64);
+        let mut cb_preview_rms: Vec<f32> = Vec::with_capacity(64);
+        let mut cb_preview_rms_pre: Vec<f32> = Vec::with_capacity(64);
+        // Arp scratch — reused per-track per-sample.
+        let mut cb_arp_active_pitches: Vec<u8> = Vec::with_capacity(32);
+        let mut cb_arp_pool: Vec<u8> = Vec::with_capacity(64);
+
         let stream = match device.build_output_stream(
             &config.into(),
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 // Take a non-blocking snapshot of shared state.
                 // If the mutex is contended, reuse the previous snapshot.
-                let mut pending_preview: Vec<(usize, u8, u8)> = Vec::new();
-                let mut pending_note_offs: Vec<u8> = Vec::new();
+                // Reuse pre-allocated scratch vecs — no heap allocation here.
+                cb_pending_preview.clear();
+                cb_pending_note_offs.clear();
+                cb_cur_held_pitches.clear();
+                let pending_preview = &mut cb_pending_preview;
+                let pending_note_offs = &mut cb_pending_note_offs;
+                let cur_held_pitches = &mut cb_cur_held_pitches;
                 let mut sustain_mode = false;
-                let mut cur_held_pitches: Vec<(usize, Vec<u8>)> = Vec::new();
                 let snap: AudioShared = match shared_cb.try_lock() {
                     Ok(mut s) => {
                         // If UI requested a seek, jump to that position, clear voices,
@@ -558,13 +583,14 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             voices.clear();
                             s.preview_playing = false;
                         }
-                        // Extract preview note request (take() so it's consumed)
-                        pending_preview = std::mem::take(&mut s.preview_notes);
-                        // Extract note-offs (piano key releases)
-                        pending_note_offs = std::mem::take(&mut s.preview_note_off);
+                        // Extract preview note request — drain into pre-allocated vec (no alloc)
+                        pending_preview.extend(s.preview_notes.drain(..));
+                        // Extract note-offs — drain into pre-allocated vec (no alloc)
+                        pending_note_offs.extend(s.preview_note_off.drain(..));
                         sustain_mode = s.preview_sustain;
-                        // Snapshot the currently-held keyboard pitches (for keyboard arp)
-                        cur_held_pitches = s.preview_held_pitches.clone();
+                        // Snapshot the currently-held keyboard pitches (for keyboard arp).
+                        // Clone is small (a few u8 vecs) and happens only when lock succeeds.
+                        cur_held_pitches.extend(s.preview_held_pitches.iter().cloned());
                         let snap = s.clone();
                         prev_snapshot = Some(snap.clone());
                         snap
@@ -581,7 +607,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 // Handle note-off signals (piano key released).
                 // Match by original_pitch so MIDI-effect-expanded voices (e.g. Chord)
                 // are also released even though their .pitch differs from the key pressed.
-                for off_pitch in &pending_note_offs {
+                for off_pitch in pending_note_offs.iter() {
                     for voice in voices.iter_mut() {
                         if (voice.original_pitch == *off_pitch || voice.pitch == *off_pitch)
                             && !voice.released
@@ -595,7 +621,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 // For tracks with an Arpeggiator, pressing a key updates the keyboard arp held
                 // set and lets the keyboard arp clock fire voices; no direct spawn here.
                 // For all other MIDI effects (Chord, Transpose, Velocity) spawn voices normally.
-                for (preview_ti, preview_pitch, preview_vel) in &pending_preview {
+                for (preview_ti, preview_pitch, preview_vel) in pending_preview.iter() {
                     if *preview_ti < snap.tracks.len() {
                         let track = &snap.tracks[*preview_ti];
                         let vel = *preview_vel as f32 / 127.0;
@@ -717,8 +743,14 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // but still process sample preview, note preview voices,
                     // and drain any remaining effect tails.
                     let frames = data.len() / channels;
-                    // Stereo preview frame buffer: (left, right)
-                    let mut frame_samples = vec![(0.0_f32, 0.0_f32); frames];
+                    // Stereo preview frame buffer — reuse pre-allocated scratch (no alloc)
+                    cb_frame_l.resize(frames, 0.0_f32);
+                    cb_frame_r.resize(frames, 0.0_f32);
+                    for v in cb_frame_l.iter_mut().take(frames) { *v = 0.0; }
+                    for v in cb_frame_r.iter_mut().take(frames) { *v = 0.0; }
+                    // Alias as a zipped iterator-friendly form via index access below.
+                    let frame_samples_l = &mut cb_frame_l;
+                    let frame_samples_r = &mut cb_frame_r;
 
                     // ── Preview sample playback (plays even when transport is stopped) ──
                     let mut preview_pos_local = snap.preview_pos;
@@ -727,7 +759,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         let preview_end = snap.preview_end_sample; // 0 = play to file end
                         let loop_enabled = snap.preview_loop_enabled;
                         let loop_start = snap.preview_loop_start;
-                        for s in frame_samples.iter_mut() {
+                        for fi in 0..frames {
                             // Check end boundary
                             if preview_end > 0 && preview_pos_local >= preview_end {
                                 if loop_enabled {
@@ -755,8 +787,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     let frac = (src_pos2 - src_pos2.floor()) as f32;
                                     let interp = s0 + (s1 - s0) * frac;
                                     let ps = (interp * snap.master_volume).clamp(-1.0, 1.0);
-                                    s.0 = ps;
-                                    s.1 = ps;
+                                    frame_samples_l[fi] = ps;
+                                    frame_samples_r[fi] = ps;
                                     preview_pos_local += 1;
                                     continue;
                                 } else {
@@ -773,8 +805,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             let interp = s0 + (s1 - s0) * frac;
                             let ps = (interp * snap.master_volume).clamp(-1.0, 1.0);
                             // Preview samples are mono — write equally to both channels
-                            s.0 = ps;
-                            s.1 = ps;
+                            frame_samples_l[fi] = ps;
+                            frame_samples_r[fi] = ps;
                             preview_pos_local += 1;
                         }
                     }
@@ -821,34 +853,36 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                     }
 
-                    // Process each voice sample-by-sample
-                    let mut preview_rms_accum = vec![0.0_f32; num_tracks];
-                    let mut preview_rms_pre_accum = vec![0.0_f32; num_tracks];
+                    // Process each voice sample-by-sample — use pre-allocated scratch bufs
+                    cb_preview_rms.clear();
+                    cb_preview_rms.resize(num_tracks, 0.0_f32);
+                    cb_preview_rms_pre.clear();
+                    cb_preview_rms_pre.resize(num_tracks, 0.0_f32);
+                    let preview_rms_accum = &mut cb_preview_rms;
+                    let preview_rms_pre_accum = &mut cb_preview_rms_pre;
+
+                    // Per-track accumulators for the inner loop
+                    cb_per_track_sample.clear();
+                    cb_per_track_sample.resize(num_tracks, (0.0_f64, 0.0_f64));
+                    cb_per_track_voices.clear();
+                    cb_per_track_voices.resize(num_tracks, 0usize);
+
                     let beats_per_sample_kbd = snap.bpm / 60.0 / sample_rate;
                     #[allow(clippy::needless_range_loop)]
                     for fi in 0..frames {
                         // ── Keyboard arp clock ──────────────────────────────────────────
-                        // Advance a beat clock driven by BPM (independent of transport).
                         keyboard_arp_beat += beats_per_sample_kbd;
-                        // Grow state arrays as needed
                         while keyboard_arp_state.len() < snap.tracks.len() {
                             keyboard_arp_state.push((0, -999.0));
                         }
                         for (ti, track) in snap.tracks.iter().enumerate() {
-                            // Only process tracks with an arp
                             let has_arp = ti < track_midi_effects.len()
                                 && track_midi_effects[ti].iter().any(|m| m.manages_voices());
                             if !has_arp {
                                 continue;
                             }
-                            // Find currently-held pitches for this track from UI snapshot
-                            let held: Vec<u8> = cur_held_pitches
-                                .iter()
-                                .find(|(t, _)| *t == ti)
-                                .map(|(_, pitches)| pitches.clone())
-                                .unwrap_or_default();
-                            if held.is_empty() {
-                                // No keys held — release arp voices and reset step
+                            let held_opt = cur_held_pitches.iter().find(|(t, _)| *t == ti);
+                            if held_opt.map_or(true, |(_, v)| v.is_empty()) {
                                 for v in voices.iter_mut() {
                                     if v.track_idx == ti
                                         && !v.released
@@ -860,7 +894,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 keyboard_arp_state[ti] = (0, -999.0);
                                 continue;
                             }
-                            // Find arp params
+                            let held = held_opt.unwrap().1.as_slice();
                             let arp_params_opt = track
                                 .midi_effect_slots
                                 .iter()
@@ -880,37 +914,36 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 let vel_default = track.volume;
                                 let (ref mut step, ref mut last_beat) = keyboard_arp_state[ti];
 
-                                // Build pool
-                                let mut pool: Vec<u8> = Vec::new();
+                                // Build pool — reuse scratch vec
+                                cb_arp_pool.clear();
                                 for oct in 0..octaves {
-                                    for &p in &held {
-                                        pool.push((p as i32 + oct * 12).clamp(0, 127) as u8);
+                                    for &p in held {
+                                        cb_arp_pool.push((p as i32 + oct * 12).clamp(0, 127) as u8);
                                     }
                                 }
                                 match pattern {
-                                    1 => pool.reverse(),
+                                    1 => cb_arp_pool.reverse(),
                                     2 => {
-                                        let mut down = pool.clone();
-                                        down.reverse();
-                                        if down.len() > 1 {
-                                            pool.extend_from_slice(&down[1..down.len() - 1]);
-                                        }
+                                        let down_start = cb_arp_pool.len();
+                                        // append reversed interior
+                                        let mid: Vec<u8> = cb_arp_pool[1..down_start.saturating_sub(1)].iter().rev().copied().collect();
+                                        cb_arp_pool.extend_from_slice(&mid);
                                     }
                                     3 => {
                                         let seed = (keyboard_arp_beat * 1000.0) as u64;
-                                        for i in (1..pool.len()).rev() {
+                                        for i in (1..cb_arp_pool.len()).rev() {
                                             let j = (seed
                                                 .wrapping_mul(6364136223846793005)
                                                 .wrapping_add(1442695040888963407)
                                                 >> 33)
                                                 as usize
                                                 % (i + 1);
-                                            pool.swap(i, j);
+                                            cb_arp_pool.swap(i, j);
                                         }
                                     }
                                     _ => {}
                                 }
-                                if pool.is_empty() {
+                                if cb_arp_pool.is_empty() {
                                     continue;
                                 }
 
@@ -923,7 +956,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     steps_now > steps_last
                                 };
                                 if fire {
-                                    // Release previous arp voice on this track
                                     for v in voices.iter_mut() {
                                         if v.track_idx == ti
                                             && !v.released
@@ -932,15 +964,15 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                             v.released = true;
                                         }
                                     }
-                                    let idx = *step % pool.len();
-                                    let pitch = pool[idx];
+                                    let idx = *step % cb_arp_pool.len();
+                                    let pitch = cb_arp_pool[idx];
                                     voices.push(ModuleVoice::new(
                                         midi_to_freq(pitch),
                                         vel_default,
                                         ti,
                                         pitch,
                                     ));
-                                    *step = (*step + 1) % pool.len().max(1);
+                                    *step = (*step + 1) % cb_arp_pool.len().max(1);
                                     *last_beat = keyboard_arp_beat;
                                 }
                             }
@@ -957,9 +989,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 }
                             }
                         }
-                        // Accumulate per-track stereo samples (same as main playback path)
-                        let mut per_track_sample = vec![(0.0_f64, 0.0_f64); num_tracks];
-                        let mut per_track_voices = vec![0usize; num_tracks];
+                        // Accumulate per-track stereo samples — reset scratch bufs
+                        for v in cb_per_track_sample.iter_mut() { *v = (0.0, 0.0); }
+                        for v in cb_per_track_voices.iter_mut() { *v = 0; }
                         for voice in voices.iter_mut() {
                             let ti = voice.track_idx;
                             if ti >= num_tracks {
@@ -973,28 +1005,27 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     sample_rate,
                                     &track.extra,
                                 );
-                                per_track_sample[ti].0 += sl;
-                                per_track_sample[ti].1 += sr;
-                                per_track_voices[ti] += 1;
+                                cb_per_track_sample[ti].0 += sl;
+                                cb_per_track_sample[ti].1 += sr;
+                                cb_per_track_voices[ti] += 1;
                             }
                         }
                         // Normalize + run effect chain per track (same as main path)
                         for ti in 0..num_tracks {
-                            if per_track_sample[ti] == (0.0, 0.0) && per_track_voices[ti] == 0 {
+                            if cb_per_track_sample[ti] == (0.0, 0.0) && cb_per_track_voices[ti] == 0 {
                                 let has_tail = ti < track_effects.len()
                                     && track_effects[ti].iter().any(|(_, fx)| fx.has_tail());
                                 if !has_tail {
                                     continue;
                                 }
                             }
-                            if per_track_voices[ti] > 0 {
-                                let norm = (per_track_voices[ti] as f64).sqrt();
-                                per_track_sample[ti].0 /= norm;
-                                per_track_sample[ti].1 /= norm;
+                            if cb_per_track_voices[ti] > 0 {
+                                let norm = (cb_per_track_voices[ti] as f64).sqrt();
+                                cb_per_track_sample[ti].0 /= norm;
+                                cb_per_track_sample[ti].1 /= norm;
                             }
-                            // Accumulate pre-effect RMS for meters
                             let pre_mono =
-                                ((per_track_sample[ti].0 + per_track_sample[ti].1) * 0.5) as f32;
+                                ((cb_per_track_sample[ti].0 + cb_per_track_sample[ti].1) * 0.5) as f32;
                             if ti < preview_rms_pre_accum.len() {
                                 preview_rms_pre_accum[ti] += pre_mono * pre_mono;
                             }
@@ -1004,18 +1035,17 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     if fi2 < track_effects[ti].len() {
                                         track_effects[ti][fi2].1.set_bpm(snap.bpm);
                                         let (ol, or2) = track_effects[ti][fi2].1.process(
-                                            per_track_sample[ti].0,
-                                            per_track_sample[ti].1,
+                                            cb_per_track_sample[ti].0,
+                                            cb_per_track_sample[ti].1,
                                             fx_params,
                                             sample_rate,
                                         );
-                                        per_track_sample[ti] = (ol, or2);
+                                        cb_per_track_sample[ti] = (ol, or2);
                                     }
                                 }
                             }
-                            // Accumulate post-effect RMS for meters
                             let post_mono =
-                                ((per_track_sample[ti].0 + per_track_sample[ti].1) * 0.5) as f32;
+                                ((cb_per_track_sample[ti].0 + cb_per_track_sample[ti].1) * 0.5) as f32;
                             if ti < preview_rms_accum.len() {
                                 preview_rms_accum[ti] += post_mono * post_mono;
                             }
@@ -1027,7 +1057,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             if ti >= num_tracks {
                                 break;
                             }
-                            let (tl, tr) = per_track_sample[ti];
+                            let (tl, tr) = cb_per_track_sample[ti];
                             let theta =
                                 ((track.pan as f64) + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
                             let pan_l = crate::modules::fast_cos(theta);
@@ -1036,10 +1066,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             mix_r += tr * pan_r * track.volume as f64;
                         }
                         // Apply master rack effects to preview stereo mix
-                        for (fi, (_, fx_params)) in snap.master_effects.iter().enumerate() {
-                            if fi < master_effects.len() {
-                                master_effects[fi].1.set_bpm(snap.bpm);
-                                let (ml, mr) = master_effects[fi].1.process_sidechain(
+                        for (fi2, (_, fx_params)) in snap.master_effects.iter().enumerate() {
+                            if fi2 < master_effects.len() {
+                                master_effects[fi2].1.set_bpm(snap.bpm);
+                                let (ml, mr) = master_effects[fi2].1.process_sidechain(
                                     mix_l,
                                     mix_r,
                                     mix_l,
@@ -1052,10 +1082,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             }
                         }
                         let mv = snap.master_volume as f64;
-                        frame_samples[fi].0 =
-                            (frame_samples[fi].0 as f64 + mix_l * mv).clamp(-1.0, 1.0) as f32;
-                        frame_samples[fi].1 =
-                            (frame_samples[fi].1 as f64 + mix_r * mv).clamp(-1.0, 1.0) as f32;
+                        frame_samples_l[fi] =
+                            (frame_samples_l[fi] as f64 + mix_l * mv).clamp(-1.0, 1.0) as f32;
+                        frame_samples_r[fi] =
+                            (frame_samples_r[fi] as f64 + mix_r * mv).clamp(-1.0, 1.0) as f32;
                     }
                     // Remove dead voices
                     voices.retain(|v| !voice_is_done(v));
@@ -1070,8 +1100,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     if tail_frames_remaining > 0 {
                         tail_frames_remaining = tail_frames_remaining.saturating_sub(frames);
                         if tail_frames_remaining == 0 {
-                            // Tail drain complete — reset all effects so stale
-                            // reverb/delay state doesn't bleed into next playback.
                             for track_fx in track_effects.iter_mut() {
                                 for (_, fx) in track_fx.iter_mut() {
                                     fx.reset();
@@ -1085,8 +1113,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
 
                     // Expand to channels + write back (stereo)
                     for (fi, frame) in data.chunks_mut(channels).enumerate() {
-                        let (l, r) = if fi < frame_samples.len() {
-                            frame_samples[fi]
+                        let (l, r) = if fi < frames {
+                            (frame_samples_l[fi], frame_samples_r[fi])
                         } else {
                             (0.0, 0.0)
                         };
@@ -1097,7 +1125,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 *ch = 0.0;
                             }
                         } else {
-                            // Mono output: downmix
                             frame[0] = (l + r) * 0.5;
                         }
                     }
@@ -1115,8 +1142,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         {
                             s.preview_playing = false;
                         }
-                        // Update track meters with preview voice levels so FX vis
-                        // meters respond during keyboard input (not just playback).
                         let n = num_tracks;
                         if s.track_rms.len() != n {
                             s.track_rms.resize(n, 0.0);
@@ -1149,9 +1174,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 }
                             }
                         }
-                        // Update oscilloscope even when stopped (use L channel for display)
+                        // Update oscilloscope (use L channel for display)
                         let osc_len = s.oscilloscope.len();
-                        for &(l, _r) in &frame_samples {
+                        for &l in frame_samples_l.iter().take(frames) {
                             let w = s.osc_write % osc_len;
                             s.oscilloscope[w] = l;
                             s.osc_write += 1;
@@ -1166,8 +1191,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 let frames = data.len() / channels;
 
                 // Check if any non-automation track is soloed.
-                // Automation tracks produce no audio, so their solo state must not
-                // silence real audio/midi tracks.
                 let any_solo = snap.tracks.iter().any(|t| t.solo && !t.is_automation);
 
                 // Read current position from the atomic (authoritative; set by seek or prev callback)
@@ -1180,11 +1203,27 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
 
                 // Process sample-by-sample to get sample-accurate loop wraparound
                 // and exact clip boundary alignment.
-                let mut frame_samples_l = vec![0.0_f32; frames];
-                let mut frame_samples_r = vec![0.0_f32; frames];
+                let frame_samples_l = {
+                    cb_frame_l.resize(frames, 0.0_f32);
+                    for v in &mut cb_frame_l[..frames] { *v = 0.0; }
+                    &mut cb_frame_l
+                };
+                let frame_samples_r = {
+                    cb_frame_r.resize(frames, 0.0_f32);
+                    for v in &mut cb_frame_r[..frames] { *v = 0.0; }
+                    &mut cb_frame_r
+                };
                 let num_tracks_total = snap.tracks.len();
-                let mut track_rms_accum = vec![0.0_f32; num_tracks_total];
-                let mut track_rms_pre_accum = vec![0.0_f32; num_tracks_total];
+                let track_rms_accum = {
+                    cb_track_rms.resize(num_tracks_total, 0.0_f32);
+                    for v in &mut cb_track_rms[..num_tracks_total] { *v = 0.0; }
+                    &mut cb_track_rms
+                };
+                let track_rms_pre_accum = {
+                    cb_track_rms_pre.resize(num_tracks_total, 0.0_f32);
+                    for v in &mut cb_track_rms_pre[..num_tracks_total] { *v = 0.0; }
+                    &mut cb_track_rms_pre
+                };
                 let mut master_rms_accum = 0.0_f32;
                 let mut master_rms_pre_accum = 0.0_f32;
                 let mut rms_frame_count = 0usize;
@@ -1285,8 +1324,14 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
 
                 // Pre-allocate per-track buffers outside the per-sample loop
                 let num_tracks = snap.tracks.len();
-                let mut per_track_sample = vec![(0.0_f64, 0.0_f64); num_tracks];
-                let mut per_track_voices = vec![0usize; num_tracks];
+                let per_track_sample = {
+                    cb_per_track_sample.resize(num_tracks, (0.0_f64, 0.0_f64));
+                    &mut cb_per_track_sample
+                };
+                let per_track_voices = {
+                    cb_per_track_voices.resize(num_tracks, 0usize);
+                    &mut cb_per_track_voices
+                };
                 // Hoist constant conversions out of the per-sample loop
                 let beats_per_sec = snap.bpm / 60.0;
 
@@ -1431,7 +1476,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                         track_arp_state[ti];
 
                                     // Collect currently-active notes in all clips for this track
-                                    let mut active_pitches: Vec<u8> = Vec::new();
+                                    cb_arp_active_pitches.clear();
+                                    let active_pitches = &mut cb_arp_active_pitches;
                                     for clip in &track.midi_clips {
                                         let clip_end = clip.start_beats + clip.length_beats;
                                         if pos < clip.start_beats || pos >= clip_end {
@@ -1450,9 +1496,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     active_pitches.sort_unstable();
 
                                     // Build arp note pool across octaves
-                                    let mut pool: Vec<u8> = Vec::new();
+                                    cb_arp_pool.clear();
+                                    let pool = &mut cb_arp_pool;
                                     for oct in 0..octaves {
-                                        for &p in &active_pitches {
+                                        for &p in active_pitches.iter() {
                                             let shifted = (p as i32 + oct * 12).clamp(0, 127) as u8;
                                             pool.push(shifted);
                                         }
@@ -1461,11 +1508,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     match pattern {
                                         1 => pool.reverse(),
                                         2 => {
-                                            let mut down = pool.clone();
-                                            down.reverse();
-                                            if down.len() > 1 {
-                                                pool.extend_from_slice(&down[1..down.len() - 1]);
-                                            }
+                                            let down_start = pool.len();
+                                            let mid: Vec<u8> = pool[1..down_start.saturating_sub(1)].iter().rev().copied().collect();
+                                            pool.extend_from_slice(&mid);
                                         }
                                         3 => {
                                             let seed = (pos * 1000.0) as u64;
