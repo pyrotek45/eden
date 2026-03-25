@@ -4959,19 +4959,19 @@ fn draw_bottom_mixer(
         }
 
         // ── Layout zones (top to bottom within strip) ──
-        let content_top = name_y + 14; // below name
-        let bottom_bar_h = 28i32;      // mute/solo/pan row
+        let content_top = name_y + 18; // more padding below name
+        let bottom_bar_h = 40i32;      // mute/solo/pan row (taller for label)
         let content_bottom = sy + sh - bottom_bar_h;
         let avail_h = (content_bottom - content_top).max(10);
 
         // ── VU meter gauge (top of content area, full width) ──
-        let vu_h = 52i32.min(avail_h / 3);
+        let vu_h = 56i32.min(avail_h / 3);
         if vu_h >= 30 {
             let vu_pos = state.meters.vu_needle.get(i).copied().unwrap_or(0.0);
-            vu_meter(canvas, &state.theme, x + 4, content_top, strip_w - 8, vu_h, vu_pos);
+            vu_meter(canvas, &state.theme, x + 6, content_top, strip_w - 12, vu_h, vu_pos);
         }
 
-        let below_vu = content_top + if vu_h >= 30 { vu_h + 4 } else { 0 };
+        let below_vu = content_top + if vu_h >= 30 { vu_h + 8 } else { 0 }; // more padding after VU
         let below_vu_avail = (content_bottom - below_vu).max(10);
 
         // ── Left column: Fader + Stereo meters ──
@@ -4980,7 +4980,7 @@ fn draw_bottom_mixer(
         let meter_bar_w = 5u32;
         let meter_gap = 2i32;
         let left_col_w = fader_w + 4 + (meter_bar_w as i32) * 2 + meter_gap;
-        let fader_h = below_vu_avail.max(20);
+        let fader_h = (below_vu_avail - 8).max(20); // leave gap at bottom
 
         // Fader groove
         {
@@ -5074,25 +5074,12 @@ fn draw_bottom_mixer(
         }
 
         // L/R labels
-        draw_pixel_label(canvas, &state.theme, "L",
+        draw_pixel_label_scaled(canvas, &state.theme, "L",
             meter_x, below_vu + fader_h + 1, meter_bar_w as i32,
-            sdl2::pixels::Color::RGBA(100, 110, 120, 140));
-        draw_pixel_label(canvas, &state.theme, "R",
+            sdl2::pixels::Color::RGBA(100, 110, 120, 140), 1);
+        draw_pixel_label_scaled(canvas, &state.theme, "R",
             meter_x + meter_bar_w as i32 + meter_gap, below_vu + fader_h + 1, meter_bar_w as i32,
-            sdl2::pixels::Color::RGBA(100, 110, 120, 140));
-
-        // dB readout below fader
-        {
-            let rms = state.meters.track_rms.get(i).copied().unwrap_or(0.0);
-            let db_str = if rms > 1e-6 {
-                format!("{:.1}", 20.0 * rms.log10())
-            } else {
-                "-∞".to_string()
-            };
-            draw_pixel_label(canvas, &state.theme, &db_str,
-                fader_x, below_vu + fader_h + 1, fader_w + 8,
-                sdl2::pixels::Color::RGBA(140, 150, 160, 170));
-        }
+            sdl2::pixels::Color::RGBA(100, 110, 120, 140), 1);
 
         // ── Right column: CStrip2 knobs + EQ + Comp curve ──
         let right_x = x + 8 + left_col_w + 10;
@@ -5200,9 +5187,10 @@ fn draw_bottom_mixer(
                         .get(i)
                         .map(|slots| slots.iter().sum::<f32>())
                         .unwrap_or(0.0);
+                    let track_rms = state.meters.track_rms.get(i).copied().unwrap_or(0.0);
                     comp_curve_widget(canvas, &state.theme,
                         right_x, comp_y, eq_w, comp_h,
-                        compress, gr_db);
+                        compress, gr_db, track_rms);
                 }
             }
         }
@@ -5210,20 +5198,25 @@ fn draw_bottom_mixer(
         // ── Bottom bar: Pan + Mute/Solo ──
         let bottom_y = sy + sh - bottom_bar_h;
 
-        // Pan knob
-        if bottom_bar_h >= 20 {
+        // Pan knob with label
+        if bottom_bar_h >= 28 {
+            let pan_knob_y = bottom_y + 14;
             let mut pan_val = state.project.tracks[i].pan;
             let mixer_pan_id = input.next_id();
             let pan_changed = knob(
                 canvas, input, &state.theme,
                 &KnobParams {
-                    id: mixer_pan_id, x: x + 20, y: bottom_y + 12, radius: 10,
+                    id: mixer_pan_id, x: x + 20, y: pan_knob_y, radius: 10,
                     min: -1.0, max: 1.0, sensitivity: 0.008,
                     label: None, bipolar: true, default_value: Some(0.0),
                     hint: Some("Pan".into()), snap_points: vec![0.0],
                 },
                 &mut pan_val,
             );
+            // "Pan" label above knob
+            draw_pixel_label_scaled(canvas, &state.theme, "Pan",
+                x + 10, bottom_y + 2, 24,
+                sdl2::pixels::Color::RGBA(120, 125, 135, 160), 1);
             if pan_changed { state.project.tracks[i].pan = pan_val; }
             if input.mouse_released && input.drag_widget == mixer_pan_id {
                 let old_pan = input.drag_start_value as f32;
@@ -5242,10 +5235,11 @@ fn draw_bottom_mixer(
         {
             let mute_on = state.project.tracks[i].mute;
             let solo_on = state.project.tracks[i].solo;
+            let btn_y = bottom_y + 10;
             let mix_mute_id = input.next_id();
             let mute_clicked = toggle_button(
                 canvas, input, &state.theme,
-                x + 42, bottom_y + 4, 18,
+                x + 42, btn_y, 18,
                 state.theme.mute_on, mute_on, mix_mute_id, "M", Some("Mute track"),
             );
             if mute_clicked {
@@ -5259,7 +5253,7 @@ fn draw_bottom_mixer(
             let mix_solo_id = input.next_id();
             let solo_clicked = toggle_button(
                 canvas, input, &state.theme,
-                x + 64, bottom_y + 4, 18,
+                x + 64, btn_y, 18,
                 state.theme.solo_on, solo_on, mix_solo_id, "S", Some("Solo track"),
             );
             if solo_clicked {

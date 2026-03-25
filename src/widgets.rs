@@ -2459,112 +2459,171 @@ pub fn draw_track_type_icon(
 // ══════════════════════════════════════════════════════════════════════
 // ── VU Meter Widget ──────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════
-/// Draws an analog-style VU meter gauge.
+/// Draws an analog-style VU meter gauge (wide shallow arc like a real VU).
 /// `x, y` = top-left of the bounding box, `w` = width, `h` = height.
 /// `needle_pos` = smoothed 0.0–1.0 value (from VU ballistic state).
-/// The gauge is a semicircular arc at the top with a needle swinging
-/// from left to right across the arc.
 pub fn vu_meter(
     canvas: &mut Canvas<Window>,
     theme: &Theme,
     x: i32, y: i32, w: i32, h: i32,
     needle_pos: f32,
 ) {
-    if w < 20 || h < 16 { return; }
+    use sdl2::gfx::primitives::DrawRenderer;
+    if w < 30 || h < 20 { return; }
+
+    let pad = 3;
+    let inner_w = w - pad * 2;
+    let inner_h = h - pad * 2;
+    let inner_x = x + pad;
+    let inner_y = y + pad;
 
     // Background
-    canvas.set_draw_color(sdl2::pixels::Color::RGBA(22, 22, 28, 240));
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(26, 26, 30, 245));
     let _ = canvas.fill_rect(Rect::new(x, y, w as u32, h as u32));
 
-    // The pivot sits at the bottom centre; the arc sweeps above it.
-    let cx = (x + w / 2) as i16;
-    // Place pivot ~85% down so the arc fans out in the upper portion.
-    let cy = (y + (h as f32 * 0.88) as i32) as i16;
-    let arc_r = ((w as f32 * 0.42).min(h as f32 * 0.75)) as i16;
-    if arc_r < 8 { return; }
+    // ── Geometry: wide shallow arc ──
+    // We want the arc chord to span the full inner width.
+    // The arc is from a large circle, pivot (cx, cy) is far below the widget.
+    // Half the chord = inner_w / 2. We choose sagitta (arc height) to be ~40% of inner_h.
+    let half_chord = inner_w as f64 / 2.0;
+    let sagitta = (inner_h as f64 * 0.35).max(8.0); // how tall the arc bulge is
+    // From chord and sagitta: radius = (half_chord^2 + sagitta^2) / (2 * sagitta)
+    let arc_r = (half_chord * half_chord + sagitta * sagitta) / (2.0 * sagitta);
 
-    // Arc sweeps from left to right.
-    // In SDL2 screen coords, 0° = right (+X), 90° = down (+Y).
-    // We want the arc to go from ~225° (lower-left) to ~315° (lower-right)
-    // but since Y is flipped, the *upper* semicircle is 180°..360°.
-    // A nice gauge: start_angle = 220° (upper-left), end_angle = 320° (upper-right).
-    let start_angle = 220.0_f64; // degrees, screen space
-    let end_angle   = 320.0_f64;
-    let sweep = end_angle - start_angle;
+    // Center of the circle is below the widget
+    let cx = (inner_x + inner_w / 2) as f64;
+    let cy = (inner_y as f64) + sagitta + (arc_r - sagitta); // = inner_y + arc_r
 
-    // Draw the arc track (background)
-    let _ = canvas.arc(cx, cy, arc_r, start_angle as i16, end_angle as i16,
-        sdl2::pixels::Color::RGBA(60, 65, 75, 180));
-    let _ = canvas.arc(cx, cy, (arc_r - 1).max(4), start_angle as i16, end_angle as i16,
-        sdl2::pixels::Color::RGBA(45, 50, 58, 120));
+    // The arc endpoints: leftmost and rightmost points of the chord
+    // Angle from center to left edge: asin(half_chord / arc_r)
+    // In SDL2 coords: 0°=right, 90°=down, so "up" is 270°.
+    // The arc top is at angle 270° (straight up from center).
+    // Left edge angle = 270° - half_angle, Right edge = 270° + half_angle
+    let half_angle_rad = (half_chord / arc_r).asin();
+    let half_angle_deg = half_angle_rad.to_degrees();
+    // SDL2 arc: angles in degrees, screen coords (clockwise from +X)
+    let start_deg = 270.0 - half_angle_deg; // left side
+    let end_deg = 270.0 + half_angle_deg;   // right side
+    let sweep = end_deg - start_deg;
 
-    // Scale markings: -20, -10, -7, -5, -3, 0, +3 dB (VU standard)
+    // The arc top (at 270°) should be at the label area.
+    // Labels sit above the arc, needle below.
+    let label_zone_h = 9i32; // space for tiny scale labels above the arc
+    // Shift the arc down a bit so labels fit above
+    let arc_cy = cy + label_zone_h as f64;
+    let arc_r_i16 = arc_r as i16;
+    let cx_i16 = cx as i16;
+    let cy_i16 = arc_cy as i16;
+
+    // Draw arc tracks
+    let _ = canvas.arc(cx_i16, cy_i16, arc_r_i16, start_deg as i16, end_deg as i16,
+        sdl2::pixels::Color::RGBA(65, 70, 80, 200));
+    if arc_r_i16 > 2 {
+        let _ = canvas.arc(cx_i16, cy_i16, arc_r_i16 - 1, start_deg as i16, end_deg as i16,
+            sdl2::pixels::Color::RGBA(50, 55, 62, 130));
+    }
+
+    // ── Scale markings: -20, -10, -7, -5, -3, 0, +3 dB ──
     let marks: [(f64, &str); 7] = [
         (-20.0, "20"), (-10.0, "10"), (-7.0, "7"), (-5.0, "5"),
         (-3.0, "3"),   (0.0, "0"),    (3.0, "+3"),
     ];
     for &(db, label) in &marks {
-        // Map dB to fraction: -20dB → 0.0, +3dB → 1.0
         let t = ((db + 20.0) / 23.0).clamp(0.0, 1.0);
-        let angle_deg = start_angle + t * sweep;
+        let angle_deg = start_deg + t * sweep;
         let angle_rad = angle_deg.to_radians();
         let cos_a = angle_rad.cos();
         let sin_a = angle_rad.sin();
-        let tick_inner = arc_r as f64 - 5.0;
-        let tick_outer = arc_r as f64 + 1.0;
-        let tx1 = cx as f64 + tick_inner * cos_a;
-        let ty1 = cy as f64 + tick_inner * sin_a;
-        let tx2 = cx as f64 + tick_outer * cos_a;
-        let ty2 = cy as f64 + tick_outer * sin_a;
+
+        // Tick mark (inward from arc)
+        let tick_outer = arc_r - 1.0;
+        let tick_inner = arc_r - 5.0;
+        let tx1 = cx + tick_outer * cos_a;
+        let ty1 = arc_cy + tick_outer * sin_a;
+        let tx2 = cx + tick_inner * cos_a;
+        let ty2 = arc_cy + tick_inner * sin_a;
         let tick_col = if db >= 0.0 {
-            sdl2::pixels::Color::RGBA(200, 80, 60, 200)
+            sdl2::pixels::Color::RGBA(200, 70, 50, 220)
         } else {
-            sdl2::pixels::Color::RGBA(130, 140, 150, 180)
+            sdl2::pixels::Color::RGBA(140, 148, 158, 200)
         };
         canvas.set_draw_color(tick_col);
         let _ = canvas.draw_line(
             sdl2::rect::Point::new(tx1 as i32, ty1 as i32),
             sdl2::rect::Point::new(tx2 as i32, ty2 as i32),
         );
-        // Label outside tick
-        let label_r = tick_outer + 6.0;
-        let lx = cx as f64 + label_r * cos_a;
-        let ly = cy as f64 + label_r * sin_a;
-        draw_pixel_label(canvas, theme, label,
-            lx as i32 - 5, ly as i32 - 4, 14,
-            sdl2::pixels::Color::RGBA(110, 120, 130, 160));
+
+        // Label outside arc (above it) — use scale=1 for tiny text
+        let label_r = arc_r + 3.0;
+        let lx = cx + label_r * cos_a;
+        let ly = arc_cy + label_r * sin_a;
+        let lbl_col = if db >= 0.0 {
+            sdl2::pixels::Color::RGBA(190, 70, 50, 200)
+        } else {
+            sdl2::pixels::Color::RGBA(120, 128, 140, 180)
+        };
+        // Pixel font at scale 1 = 4px wide per char, 5px tall
+        let lbl_w = label.len() as i32 * 5;
+        draw_pixel_label_scaled(canvas, theme, label,
+            lx as i32 - lbl_w / 2, ly as i32 - 6, lbl_w + 4, lbl_col, 1);
     }
 
-    // Red zone arc (from 0dB to +3dB portion)
+    // ── Red zone arc (0dB to +3dB) ──
     {
         let zero_frac = 20.0 / 23.0;
-        let red_start = start_angle + zero_frac * sweep;
-        let _ = canvas.arc(cx, cy, arc_r, red_start as i16, end_angle as i16,
-            sdl2::pixels::Color::RGBA(180, 50, 40, 140));
+        let red_start = start_deg + zero_frac * sweep;
+        let _ = canvas.arc(cx_i16, cy_i16, arc_r_i16, red_start as i16, end_deg as i16,
+            sdl2::pixels::Color::RGBA(180, 50, 40, 160));
+        if arc_r_i16 > 3 {
+            let _ = canvas.arc(cx_i16, cy_i16, arc_r_i16 - 1, red_start as i16, end_deg as i16,
+                sdl2::pixels::Color::RGBA(160, 45, 35, 100));
+        }
     }
 
-    // Needle
+    // "VU" label at bottom-center
+    let vu_label_y = inner_y + inner_h - 7;
+    draw_pixel_label_scaled(canvas, theme, "VU",
+        (cx as i32) - 5, vu_label_y, 14,
+        sdl2::pixels::Color::RGBA(90, 95, 105, 140), 1);
+
+    // ── Needle ──
     let np = (needle_pos as f64).clamp(0.0, 1.0);
-    let needle_angle_deg = start_angle + np * sweep;
+    let needle_angle_deg = start_deg + np * sweep;
     let needle_angle_rad = needle_angle_deg.to_radians();
-    let needle_len = (arc_r as f64 - 9.0).max(4.0);
-    let nx = cx as f64 + needle_len * needle_angle_rad.cos();
-    let ny = cy as f64 + needle_len * needle_angle_rad.sin();
+    let needle_len = arc_r - 7.0;
+    let nx = cx + needle_len * needle_angle_rad.cos();
+    let ny = arc_cy + needle_len * needle_angle_rad.sin();
 
-    // Shadow
-    let _ = canvas.aa_line(cx, cy + 1, (nx as i16) + 1, (ny as i16) + 1,
-        sdl2::pixels::Color::RGBA(0, 0, 0, 80));
-
-    // Needle color: white normally, red in hot zone
-    let needle_col = if needle_pos > 0.87 {
-        sdl2::pixels::Color::RGBA(220, 60, 40, 255)
-    } else {
-        sdl2::pixels::Color::RGBA(220, 225, 230, 240)
-    };
-    let _ = canvas.aa_line(cx, cy, nx as i16, ny as i16, needle_col);
+    // We only want to draw the needle from near the arc down to a visible pivot point.
+    // The visible pivot is at the bottom of the widget inner area.
+    let vis_pivot_y = (inner_y + inner_h - 3) as f64;
+    let vis_pivot_x = cx; // bottom center
+    // But the needle line should point toward (nx, ny) from the visible pivot
+    // Direction from vis_pivot to the arc point
+    let dx = nx - vis_pivot_x;
+    let dy = ny - vis_pivot_y;
+    let dist = (dx * dx + dy * dy).sqrt();
+    if dist > 2.0 {
+        // Shadow
+        let _ = canvas.aa_line(
+            vis_pivot_x as i16, vis_pivot_y as i16 + 1,
+            nx as i16 + 1, ny as i16 + 1,
+            sdl2::pixels::Color::RGBA(0, 0, 0, 60));
+        // Needle
+        let needle_col = if needle_pos > 0.87 {
+            sdl2::pixels::Color::RGBA(220, 55, 35, 255)
+        } else {
+            sdl2::pixels::Color::RGBA(215, 220, 225, 240)
+        };
+        let _ = canvas.aa_line(
+            vis_pivot_x as i16, vis_pivot_y as i16,
+            nx as i16, ny as i16, needle_col);
+    }
 
     // Pivot dot
-    let _ = canvas.filled_circle(cx, cy, 2, sdl2::pixels::Color::RGBA(180, 185, 190, 255));
+    let _ = canvas.filled_circle(
+        vis_pivot_x as i16, vis_pivot_y as i16, 2,
+        sdl2::pixels::Color::RGBA(160, 165, 170, 255));
 
     // Subtle border
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 100));
@@ -2577,13 +2636,16 @@ pub fn vu_meter(
 /// Draws a tiny compressor knee/curve + gain reduction bar.
 /// `compress` = compressor amount param (0.0–1.0),
 /// `gr_db` = actual gain reduction in dB from metering (negative or zero).
+/// `input_rms` = current track RMS level (linear, 0.0–1.0+) for the riding dot.
 pub fn comp_curve_widget(
     canvas: &mut Canvas<Window>,
     theme: &Theme,
     x: i32, y: i32, w: i32, h: i32,
     compress: f32,
     gr_db: f32,
+    input_rms: f32,
 ) {
+    use sdl2::gfx::primitives::DrawRenderer;
     if w < 10 || h < 10 { return; }
 
     // Background
@@ -2631,6 +2693,25 @@ pub fn comp_curve_widget(
         }
         prev_px = px;
         prev_py = py;
+    }
+
+    // ── Riding dot: shows current input level on the curve ──
+    if input_rms > 1e-6 {
+        // Map input RMS to 0..1 fraction (using dB scale: -60dB..0dB → 0..1)
+        let in_db = 20.0 * input_rms.log10();
+        let in_frac = ((in_db + 60.0) / 60.0).clamp(0.0, 1.0);
+        let out_frac = if in_frac < thresh_frac {
+            in_frac
+        } else {
+            thresh_frac + (in_frac - thresh_frac) / ratio
+        };
+        let dot_px = cx0 + (in_frac * cw as f32) as i32;
+        let dot_py = cy0 - (out_frac * ch as f32) as i32;
+        // Bright dot
+        let _ = canvas.filled_circle(dot_px as i16, dot_py as i16, 3,
+            sdl2::pixels::Color::RGBA(255, 200, 80, 255));
+        let _ = canvas.circle(dot_px as i16, dot_py as i16, 3,
+            sdl2::pixels::Color::RGBA(255, 160, 40, 180));
     }
 
     // ── GR bar below the curve ──
