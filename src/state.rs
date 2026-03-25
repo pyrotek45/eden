@@ -804,8 +804,8 @@ impl AppState {
             rubberband: None,
             rubberband_pre_selection: HashSet::new(),
             clipboard: Vec::new(),
-            bottom_panel_height: 24, // collapsed = just the handle
-            bottom_panel_open: false,
+            bottom_panel_height: 300, // default: half-window height
+            bottom_panel_open: true,
             bottom_panel_tab: BottomPanelTab::Mixer,
             bottom_panel_dragging: false,
             bottom_panel_click_type: None,

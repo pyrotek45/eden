@@ -2455,3 +2455,214 @@ pub fn draw_track_type_icon(
         }
     }
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ── VU Meter Widget ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+/// Draws an analog-style VU meter gauge.
+/// `x, y` = top-left of the bounding box, `w` = width, `h` = height.
+/// `needle_pos` = smoothed 0.0–1.0 value (from VU ballistic state).
+/// The gauge is a semicircular arc at the top with a needle swinging
+/// from left to right across the arc.
+pub fn vu_meter(
+    canvas: &mut Canvas<Window>,
+    theme: &Theme,
+    x: i32, y: i32, w: i32, h: i32,
+    needle_pos: f32,
+) {
+    if w < 20 || h < 16 { return; }
+
+    // Background
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(22, 22, 28, 240));
+    let _ = canvas.fill_rect(Rect::new(x, y, w as u32, h as u32));
+
+    // The pivot sits at the bottom centre; the arc sweeps above it.
+    let cx = (x + w / 2) as i16;
+    // Place pivot ~85% down so the arc fans out in the upper portion.
+    let cy = (y + (h as f32 * 0.88) as i32) as i16;
+    let arc_r = ((w as f32 * 0.42).min(h as f32 * 0.75)) as i16;
+    if arc_r < 8 { return; }
+
+    // Arc sweeps from left to right.
+    // In SDL2 screen coords, 0° = right (+X), 90° = down (+Y).
+    // We want the arc to go from ~225° (lower-left) to ~315° (lower-right)
+    // but since Y is flipped, the *upper* semicircle is 180°..360°.
+    // A nice gauge: start_angle = 220° (upper-left), end_angle = 320° (upper-right).
+    let start_angle = 220.0_f64; // degrees, screen space
+    let end_angle   = 320.0_f64;
+    let sweep = end_angle - start_angle;
+
+    // Draw the arc track (background)
+    let _ = canvas.arc(cx, cy, arc_r, start_angle as i16, end_angle as i16,
+        sdl2::pixels::Color::RGBA(60, 65, 75, 180));
+    let _ = canvas.arc(cx, cy, (arc_r - 1).max(4), start_angle as i16, end_angle as i16,
+        sdl2::pixels::Color::RGBA(45, 50, 58, 120));
+
+    // Scale markings: -20, -10, -7, -5, -3, 0, +3 dB (VU standard)
+    let marks: [(f64, &str); 7] = [
+        (-20.0, "20"), (-10.0, "10"), (-7.0, "7"), (-5.0, "5"),
+        (-3.0, "3"),   (0.0, "0"),    (3.0, "+3"),
+    ];
+    for &(db, label) in &marks {
+        // Map dB to fraction: -20dB → 0.0, +3dB → 1.0
+        let t = ((db + 20.0) / 23.0).clamp(0.0, 1.0);
+        let angle_deg = start_angle + t * sweep;
+        let angle_rad = angle_deg.to_radians();
+        let cos_a = angle_rad.cos();
+        let sin_a = angle_rad.sin();
+        let tick_inner = arc_r as f64 - 5.0;
+        let tick_outer = arc_r as f64 + 1.0;
+        let tx1 = cx as f64 + tick_inner * cos_a;
+        let ty1 = cy as f64 + tick_inner * sin_a;
+        let tx2 = cx as f64 + tick_outer * cos_a;
+        let ty2 = cy as f64 + tick_outer * sin_a;
+        let tick_col = if db >= 0.0 {
+            sdl2::pixels::Color::RGBA(200, 80, 60, 200)
+        } else {
+            sdl2::pixels::Color::RGBA(130, 140, 150, 180)
+        };
+        canvas.set_draw_color(tick_col);
+        let _ = canvas.draw_line(
+            sdl2::rect::Point::new(tx1 as i32, ty1 as i32),
+            sdl2::rect::Point::new(tx2 as i32, ty2 as i32),
+        );
+        // Label outside tick
+        let label_r = tick_outer + 6.0;
+        let lx = cx as f64 + label_r * cos_a;
+        let ly = cy as f64 + label_r * sin_a;
+        draw_pixel_label(canvas, theme, label,
+            lx as i32 - 5, ly as i32 - 4, 14,
+            sdl2::pixels::Color::RGBA(110, 120, 130, 160));
+    }
+
+    // Red zone arc (from 0dB to +3dB portion)
+    {
+        let zero_frac = 20.0 / 23.0;
+        let red_start = start_angle + zero_frac * sweep;
+        let _ = canvas.arc(cx, cy, arc_r, red_start as i16, end_angle as i16,
+            sdl2::pixels::Color::RGBA(180, 50, 40, 140));
+    }
+
+    // Needle
+    let np = (needle_pos as f64).clamp(0.0, 1.0);
+    let needle_angle_deg = start_angle + np * sweep;
+    let needle_angle_rad = needle_angle_deg.to_radians();
+    let needle_len = (arc_r as f64 - 9.0).max(4.0);
+    let nx = cx as f64 + needle_len * needle_angle_rad.cos();
+    let ny = cy as f64 + needle_len * needle_angle_rad.sin();
+
+    // Shadow
+    let _ = canvas.aa_line(cx, cy + 1, (nx as i16) + 1, (ny as i16) + 1,
+        sdl2::pixels::Color::RGBA(0, 0, 0, 80));
+
+    // Needle color: white normally, red in hot zone
+    let needle_col = if needle_pos > 0.87 {
+        sdl2::pixels::Color::RGBA(220, 60, 40, 255)
+    } else {
+        sdl2::pixels::Color::RGBA(220, 225, 230, 240)
+    };
+    let _ = canvas.aa_line(cx, cy, nx as i16, ny as i16, needle_col);
+
+    // Pivot dot
+    let _ = canvas.filled_circle(cx, cy, 2, sdl2::pixels::Color::RGBA(180, 185, 190, 255));
+
+    // Subtle border
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 100));
+    let _ = canvas.draw_rect(Rect::new(x, y, w as u32, h as u32));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ── Compressor Curve Widget ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+/// Draws a tiny compressor knee/curve + gain reduction bar.
+/// `compress` = compressor amount param (0.0–1.0),
+/// `gr_db` = actual gain reduction in dB from metering (negative or zero).
+pub fn comp_curve_widget(
+    canvas: &mut Canvas<Window>,
+    theme: &Theme,
+    x: i32, y: i32, w: i32, h: i32,
+    compress: f32,
+    gr_db: f32,
+) {
+    if w < 10 || h < 10 { return; }
+
+    // Background
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(18, 20, 26, 220));
+    let _ = canvas.fill_rect(Rect::new(x, y, w as u32, h as u32));
+
+    let curve_h = (h * 2 / 3).max(6);
+    let bar_h = h - curve_h - 2;
+
+    // ── Tiny transfer curve (input dB → output dB) ──
+    // Diagonal = no compression, bent = compressed
+    let cx0 = x + 1;
+    let cy0 = y + curve_h; // bottom-left of curve area
+    let cw = w - 2;
+    let ch = curve_h - 1;
+
+    // 1:1 reference diagonal (dim)
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 100));
+    let _ = canvas.draw_line(
+        sdl2::rect::Point::new(cx0, cy0),
+        sdl2::rect::Point::new(cx0 + cw, cy0 - ch),
+    );
+
+    // Compressed curve
+    let ratio = 1.0 + compress * 7.0; // 1:1 → 1:8
+    let thresh_frac = 1.0 - compress * 0.5; // threshold moves down with more compression
+    let curve_col = sdl2::pixels::Color::RGBA(200, 140, 60, 220);
+    canvas.set_draw_color(curve_col);
+    let mut prev_px = cx0;
+    let mut prev_py = cy0;
+    for px_i in 0..=cw {
+        let in_frac = px_i as f32 / cw as f32; // 0..1
+        let out_frac = if in_frac < thresh_frac {
+            in_frac
+        } else {
+            thresh_frac + (in_frac - thresh_frac) / ratio
+        };
+        let px = cx0 + px_i;
+        let py = cy0 - (out_frac * ch as f32) as i32;
+        if px_i > 0 {
+            let _ = canvas.draw_line(
+                sdl2::rect::Point::new(prev_px, prev_py),
+                sdl2::rect::Point::new(px, py),
+            );
+        }
+        prev_px = px;
+        prev_py = py;
+    }
+
+    // ── GR bar below the curve ──
+    if bar_h > 2 {
+        let bar_y = y + curve_h + 1;
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(30, 32, 38, 200));
+        let _ = canvas.fill_rect(Rect::new(x, bar_y, w as u32, bar_h as u32));
+
+        // gr_db is typically negative (e.g. -6.0 means 6dB of reduction)
+        // Map: 0dB → empty, -20dB → full bar
+        let gr_frac = (gr_db.abs() / 20.0).clamp(0.0, 1.0);
+        if gr_frac > 0.001 {
+            let fill_w = (gr_frac * (w - 2) as f32) as i32;
+            canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 100, 40, 200));
+            let _ = canvas.fill_rect(Rect::new(x + 1, bar_y, fill_w as u32, bar_h as u32));
+        }
+
+        // "GR" label
+        draw_pixel_label(canvas, theme, "GR",
+            x + 2, bar_y, 14,
+            sdl2::pixels::Color::RGBA(200, 140, 60, 140));
+
+        // dB text
+        if gr_db.abs() > 0.1 {
+            let gr_str = format!("{:.1}", gr_db);
+            draw_pixel_label(canvas, theme, &gr_str,
+                x + w - 28, bar_y, 26,
+                sdl2::pixels::Color::RGBA(200, 160, 80, 180));
+        }
+    }
+
+    // Border
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 80));
+    let _ = canvas.draw_rect(Rect::new(x, y, w as u32, h as u32));
+}
