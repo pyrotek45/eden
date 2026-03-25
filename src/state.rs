@@ -67,35 +67,6 @@ impl SnapSettings {
             beats
         }
     }
-
-    /// Proximity snap that also considers explicit candidate snap points (clip edges).
-    /// Snaps to the nearest candidate or grid line within `threshold_beats`.
-    /// `candidates` should include the ends (and optionally starts) of neighbouring clips.
-    pub fn snap_with_edges(&self, beats: f64, threshold_beats: f64, candidates: &[f64]) -> f64 {
-        if !self.enabled {
-            return beats;
-        }
-        // Best grid-line snap
-        let r = self.resolution_beats();
-        let grid_nearest = (beats / r).round() * r;
-        let mut best = grid_nearest;
-        let mut best_dist = (beats - grid_nearest).abs();
-
-        // Also check all candidate clip-edge points
-        for &c in candidates {
-            let d = (beats - c).abs();
-            if d < best_dist {
-                best_dist = d;
-                best = c;
-            }
-        }
-
-        if best_dist <= threshold_beats {
-            best
-        } else {
-            beats
-        }
-    }
 }
 
 impl Default for SnapSettings {
@@ -286,6 +257,33 @@ pub struct MeterState {
     pub track_effect_gr: Vec<Vec<f32>>,
     /// Gain reduction in dB for each master rack effect slot.
     pub master_effect_gr: Vec<f32>,
+    // ── Stereo metering (L/R per track) ──
+    /// Per-track left-channel RMS (0.0–1.0).
+    pub track_rms_l: Vec<f32>,
+    /// Per-track right-channel RMS (0.0–1.0).
+    pub track_rms_r: Vec<f32>,
+    /// Per-track left-channel peak hold (slow decay).
+    pub track_peak_hold_l: Vec<f32>,
+    /// Per-track right-channel peak hold (slow decay).
+    pub track_peak_hold_r: Vec<f32>,
+    /// Per-track left-channel clip flag.
+    pub track_clipping_l: Vec<bool>,
+    /// Per-track right-channel clip flag.
+    pub track_clipping_r: Vec<bool>,
+    // ── VU ballistic state (GUI-side, per track) ──
+    /// VU needle position per track (0.0–1.0, with ballistic smoothing).
+    pub vu_needle: Vec<f32>,
+    // ── Master stereo metering ──
+    pub master_rms_l: f32,
+    pub master_rms_r: f32,
+    pub master_peak_l: f32,
+    pub master_peak_r: f32,
+    pub master_peak_hold_l: f32,
+    pub master_peak_hold_r: f32,
+    pub master_lufs_short: f32,
+    pub master_lufs_momentary: f32,
+    pub master_clipping_l: bool,
+    pub master_clipping_r: bool,
 }
 
 /// Viewport / scroll state for the arrangement timeline.
@@ -362,6 +360,8 @@ pub struct AppState {
     pub bottom_panel_click_type: Option<crate::input::ClickType>,
     // ── Audio metering ───────────────────────────────────────────────
     pub meters: MeterState,
+    /// Master output volume (UI-side, synced to audio thread each frame)
+    pub master_volume_ui: f32,
     // ── UI Scaling ───────────────────────────────────────────────────
     /// Global UI scale factor (1.0 = 100%, 1.5 = 150%, 2.0 = 200%)
     pub ui_scale: f32,
@@ -810,6 +810,7 @@ impl AppState {
             bottom_panel_dragging: false,
             bottom_panel_click_type: None,
             meters: MeterState::default(),
+            master_volume_ui: 0.8,
             ui_scale: 1.0,
             ui_scale_pending: 1.0,
             font_scale: 2,

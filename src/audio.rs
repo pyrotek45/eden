@@ -70,6 +70,12 @@ pub struct AudioShared {
     pub track_rms: Vec<f32>,
     /// Pre-effect RMS per track — used by the compressor GR meter visual.
     pub track_rms_pre_effect: Vec<f32>,
+    // ── Stereo per-track metering ──
+    pub track_rms_l: Vec<f32>,
+    pub track_rms_r: Vec<f32>,
+    // ── Master stereo metering ──
+    pub master_rms_l: f32,
+    pub master_rms_r: f32,
     /// Ring buffer of recent output samples for the oscilloscope (512 samples).
     pub oscilloscope: Vec<f32>,
     /// Write head into the oscilloscope ring.
@@ -202,6 +208,10 @@ impl Default for AudioShared {
             tracks: Vec::new(),
             track_rms: Vec::new(),
             track_rms_pre_effect: Vec::new(),
+            track_rms_l: Vec::new(),
+            track_rms_r: Vec::new(),
+            master_rms_l: 0.0,
+            master_rms_r: 0.0,
             oscilloscope: vec![0.0; 512],
             osc_write: 0,
             master_rms: 0.0,
@@ -564,6 +574,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         let mut cb_per_track_voices: Vec<usize> = Vec::with_capacity(64);
         let mut cb_track_rms: Vec<f32> = Vec::with_capacity(64);
         let mut cb_track_rms_pre: Vec<f32> = Vec::with_capacity(64);
+        let mut cb_track_rms_l: Vec<f32> = Vec::with_capacity(64);
+        let mut cb_track_rms_r: Vec<f32> = Vec::with_capacity(64);
         let mut cb_preview_rms: Vec<f32> = Vec::with_capacity(64);
         let mut cb_preview_rms_pre: Vec<f32> = Vec::with_capacity(64);
         // Arp scratch — reused per-track per-sample.
@@ -1305,8 +1317,20 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     for v in &mut cb_track_rms_pre[..num_tracks_total] { *v = 0.0; }
                     &mut cb_track_rms_pre
                 };
+                let track_rms_l_accum = {
+                    cb_track_rms_l.resize(num_tracks_total, 0.0_f32);
+                    for v in &mut cb_track_rms_l[..num_tracks_total] { *v = 0.0; }
+                    &mut cb_track_rms_l
+                };
+                let track_rms_r_accum = {
+                    cb_track_rms_r.resize(num_tracks_total, 0.0_f32);
+                    for v in &mut cb_track_rms_r[..num_tracks_total] { *v = 0.0; }
+                    &mut cb_track_rms_r
+                };
                 let mut master_rms_accum = 0.0_f32;
                 let mut master_rms_pre_accum = 0.0_f32;
+                let mut master_rms_l_accum = 0.0_f32;
+                let mut master_rms_r_accum = 0.0_f32;
                 let mut rms_frame_count = 0usize;
 
                 // ── Sync instrument/effect instances ONCE per callback (not per sample) ──
@@ -2123,12 +2147,20 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     frame_samples_l[frame_idx] = mix_l.clamp(-1.0, 1.0) as f32;
                     frame_samples_r[frame_idx] = mix_r.clamp(-1.0, 1.0) as f32;
 
-                    // Accumulate per-track squared samples for RMS
+                    // Accumulate per-track squared samples for RMS (mono + stereo)
                     for ti in 0..num_tracks {
                         let (tl, tr) = per_track_sample[ti];
-                        let ts = (tl + tr) * 0.5 * snap.master_volume as f64;
+                        let vol = smooth_vol.get(ti).copied().unwrap_or(1.0);
+                        let sl = tl * vol;
+                        let sr = tr * vol;
+                        let ts = (sl + sr) * 0.5;
                         track_rms_accum[ti] += (ts * ts) as f32;
+                        track_rms_l_accum[ti] += (sl * sl) as f32;
+                        track_rms_r_accum[ti] += (sr * sr) as f32;
                     }
+                    // Master stereo accumulation
+                    master_rms_l_accum += (mix_l * mix_l) as f32;
+                    master_rms_r_accum += (mix_r * mix_r) as f32;
                     rms_frame_count += 1;
 
                     // Advance position
@@ -2273,9 +2305,41 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         if s.master_rms_pre < 0.0005 {
                             s.master_rms_pre = 0.0;
                         }
+                        // Master stereo RMS
+                        let ml = (master_rms_l_accum / rms_frame_count as f32).sqrt();
+                        s.master_rms_l = s.master_rms_l * 0.85 + ml * 0.15;
+                        if s.master_rms_l < 0.0005 { s.master_rms_l = 0.0; }
+                        let mr = (master_rms_r_accum / rms_frame_count as f32).sqrt();
+                        s.master_rms_r = s.master_rms_r * 0.85 + mr * 0.15;
+                        if s.master_rms_r < 0.0005 { s.master_rms_r = 0.0; }
                     } else {
                         s.master_rms *= 0.85;
                         s.master_rms_pre *= 0.85;
+                        s.master_rms_l *= 0.85;
+                        s.master_rms_r *= 0.85;
+                    }
+
+                    // Per-track stereo RMS
+                    if s.track_rms_l.len() != n { s.track_rms_l.resize(n, 0.0); }
+                    if s.track_rms_r.len() != n { s.track_rms_r.resize(n, 0.0); }
+                    if rms_frame_count > 0 {
+                        for (i, v) in s.track_rms_l.iter_mut().enumerate() {
+                            let r = if i < track_rms_l_accum.len() {
+                                (track_rms_l_accum[i] / rms_frame_count as f32).sqrt()
+                            } else { 0.0 };
+                            *v = *v * 0.85 + r * 0.15;
+                            if *v < 0.0005 { *v = 0.0; }
+                        }
+                        for (i, v) in s.track_rms_r.iter_mut().enumerate() {
+                            let r = if i < track_rms_r_accum.len() {
+                                (track_rms_r_accum[i] / rms_frame_count as f32).sqrt()
+                            } else { 0.0 };
+                            *v = *v * 0.85 + r * 0.15;
+                            if *v < 0.0005 { *v = 0.0; }
+                        }
+                    } else {
+                        for v in s.track_rms_l.iter_mut() { *v *= 0.85; if *v < 0.0005 { *v = 0.0; } }
+                        for v in s.track_rms_r.iter_mut() { *v *= 0.85; if *v < 0.0005 { *v = 0.0; } }
                     }
 
                     // Per-effect gain reduction for master rack
