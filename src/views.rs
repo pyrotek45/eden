@@ -5572,7 +5572,7 @@ fn draw_bottom_mixer(
                 id: mvol_id, x: m_fader_x, y: m_fader_top,
                 width: m_fader_w, height: m_fader_h,
                 min: 0.0, max: 1.0, orientation: SliderOrientation::Vertical,
-                label: None, default_value: Some(vol_gain_to_pos(0.8)),
+                label: None, default_value: Some(vol_gain_to_pos(1.0)),
             },
             &mut mvol_pos,
         );

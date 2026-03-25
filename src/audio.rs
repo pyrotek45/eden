@@ -201,7 +201,7 @@ impl Default for AudioShared {
             position_beats: 0.0,
             bpm: 120.0,
             sample_rate: 44100.0,
-            master_volume: 0.8,
+            master_volume: 1.0,
             loop_enabled: false,
             loop_start: 0.0,
             loop_end: 8.0,
@@ -522,13 +522,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         let mut dc_hp_y_l: f64 = 0.0; // prev output — L
         let mut dc_hp_x_r: f64 = 0.0;
         let mut dc_hp_y_r: f64 = 0.0;
-
-        // Slew rate limiter state: tracks previous master output sample.
-        // Caps the per-sample change to SLEW_MAX, catching runaway spikes
-        // that slip through all other protections. Threshold is set high
-        // enough to never affect legitimate transients (e.g. snare drums).
-        let mut slew_prev_l: f64 = 0.0;
-        let mut slew_prev_r: f64 = 0.0;
 
         // Per-track smoothed pan + volume (one-pole, ~5 ms time constant).
         // Eliminates zipper noise from pan/volume automation without audible lag.
@@ -2128,23 +2121,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // never enters denormal-number slow-path. Completely inaudible.
                     mix_l += 1.0e-24;
                     mix_r += 1.0e-24;
-
-                    // Slew rate limiter: caps the per-sample change to ±SLEW_MAX.
-                    // This is a generous last-resort net — legitimate transients
-                    // (snare hits, plucks) change by at most ~0.3/sample at 44.1kHz;
-                    // runaway spikes are much larger.
-                    const SLEW_MAX: f64 = 0.8;
-                    mix_l = slew_prev_l + (mix_l - slew_prev_l).clamp(-SLEW_MAX, SLEW_MAX);
-                    mix_r = slew_prev_r + (mix_r - slew_prev_r).clamp(-SLEW_MAX, SLEW_MAX);
-                    slew_prev_l = mix_l;
-                    slew_prev_r = mix_r;
-
-                    // Soft clipper: tanh saturator at drive=1.0.
-                    // Below ±0.7 it is perfectly linear; above ±1.0 it curves gently
-                    // toward ±1.0 instead of hard-clipping. Completely transparent
-                    // at normal mix levels; only activates on occasional hot peaks.
-                    mix_l = mix_l.tanh();
-                    mix_r = mix_r.tanh();
 
                     frame_samples_l[frame_idx] = mix_l.clamp(-1.0, 1.0) as f32;
                     frame_samples_r[frame_idx] = mix_r.clamp(-1.0, 1.0) as f32;

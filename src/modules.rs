@@ -4451,7 +4451,7 @@ impl EffectModule for FxAutoduck {
 
 // ═══════════════════════════════════════════════════════════════════
 // CStrip2 — Airwindows-style channel strip
-// 3-band EQ (Triplet) + ButterComp + Spiral output saturation
+// 3-band EQ (Triplet) + ButterComp + Trim output gain
 // ═══════════════════════════════════════════════════════════════════
 
 /// Per-channel IIR filter state for the 6-pole hi-pass and lo-pass caps.
@@ -4580,16 +4580,6 @@ impl CStrip2 {
         let gain_clamped = gain.clamp(0.0, 2.0);
         inp * (1.0 - compress) + inp * gain_clamped * compress
     }
-
-    /// Airwindows Spiral saturation (smooth soft-clipper).
-    #[inline]
-    fn spiral(x: f64) -> f64 {
-        if x.abs() > 1.0 {
-            x.signum()
-        } else {
-            x - (x * x * x) / 3.0
-        }
-    }
 }
 
 static CSTRIP2_PARAMS: &[ParamDesc] = &[
@@ -4683,12 +4673,12 @@ impl EffectModule for CStrip2 {
             r = Self::butter_comp(&mut self.cr, r, spd, compress);
         }
 
-        // ── Output gain + Spiral saturation ─────────────────────────────
+        // ── Output gain (trim) ──────────────────────────────────────
         // output 0..1 → -50..+50 dB trim (0.5 = unity)
-        let trim_db = (output - 0.5) * 100.0; // -50..+50 dB
+        let trim_db = (output - 0.5) * 100.0;
         let out_gain = 10.0_f64.powf(trim_db / 20.0);
-        l = Self::spiral(l * out_gain);
-        r = Self::spiral(r * out_gain);
+        l *= out_gain;
+        r *= out_gain;
 
         (l, r)
     }

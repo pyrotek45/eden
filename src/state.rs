@@ -810,7 +810,7 @@ impl AppState {
             bottom_panel_dragging: false,
             bottom_panel_click_type: None,
             meters: MeterState::default(),
-            master_volume_ui: 0.8,
+            master_volume_ui: 1.0,
             ui_scale: 1.0,
             ui_scale_pending: 1.0,
             font_scale: 2,
