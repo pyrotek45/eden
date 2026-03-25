@@ -1,6 +1,6 @@
 # Eden Audio Engine — Click-Free Audio Reference Guide
 
-> Last updated: 2026-03-24  
+> Last updated: 2026-06-16  
 > Source: `src/audio.rs`, `src/render.rs`, `src/modules.rs`
 
 This document is the definitive internal reference for how Eden prevents audio
@@ -572,7 +572,256 @@ result.copy_to_slice(&mut output[i..]);
 
 ---
 
-## Quick Reference: "The Pro DAW Stack" for Eden
+## 16. Effect Parameter Smoothing (Knob Moves)
+
+### ✅ Per-Callback One-Pole Smoothing for All Effect Params
+
+Moving any knob (filter cutoff, reverb size, delay time, etc.) while audio
+is playing causes a discontinuity in the DSP signal — heard as a click or
+zipper noise.  The same one-pole smoothing used for pan/volume is applied to
+**every effect parameter** on every audio callback.
+
+**Root cause:**  
+Each callback calls `shared_cb.try_lock()` to get the latest snapshot.  The
+new knob value arrives in full on the very next callback, producing an instant
+jump in the DSP signal.
+
+**Fix:**  
+A `smooth_track_fx_params[track][slot][param_idx]: Vec<Vec<Vec<f32>>>` cache
+is maintained outside the closure.  Per callback, each cached value is
+one-pole-filtered toward its snapshot target.  DSP calls receive the smoothed
+values, not the raw snapshot values.  The same pattern covers master rack
+effects (`smooth_master_fx_params[slot][param_idx]`).
+
+```rust
+// audio.rs — outside closure (allocated once)
+let mut smooth_track_fx_params: Vec<Vec<Vec<f32>>> = Vec::new();
+let mut smooth_master_fx_params: Vec<Vec<f32>> = Vec::new();
+const FX_SMOOTH_COEFF: f32 = 0.002;  // same time constant as pan/vol
+
+// Per callback — before DSP loop:
+let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
+for (ti, track) in snap.tracks.iter().enumerate() {
+    for (si, (_, params)) in track.effect_slots.iter().enumerate() {
+        let cache = &mut smooth_track_fx_params[ti][si];
+        for (pi, (_, v)) in params.iter().enumerate() {
+            cache[pi] += (v - cache[pi]) * coeff;  // one-pole low-pass
+        }
+    }
+}
+```
+
+A pre-allocated `scratch_fx_params: Vec<(String, f32)>` (32-element capacity,
+never grows after warm-up) carries the smoothed values to each DSP call
+without heap allocation.
+
+### ✅ Master Volume Smoothing
+
+The master fader is also smoothed with the same one-pole filter, using a
+sentinel (`smooth_master_vol = -1.0`) to initialise on first use without
+a pop:
+
+```rust
+// audio.rs — outside closure
+let mut smooth_master_vol: f64 = -1.0;  // -1 = uninitialized
+
+// Per callback:
+if smooth_master_vol < 0.0 { smooth_master_vol = snap.master_volume as f64; }
+smooth_master_vol += (snap.master_volume as f64 - smooth_master_vol)
+    * (FX_SMOOTH_COEFF as f64 * frames as f64).min(1.0);
+
+// Use smoothed value in DSP:
+mix_l *= smooth_master_vol;
+mix_r *= smooth_master_vol;
+```
+
+---
+
+## 17. Control Rate vs Audio Rate
+
+Audio engines operate at two distinct rates:
+
+| Rate         | Typical update | Examples                                |
+|-------------|----------------|------------------------------------------|
+| **Audio rate** | Every sample (e.g. 44100/s) | Oscillator phase, filter state, envelope |
+| **Control rate** | Every buffer (e.g. 44100/512 = 86/s) | UI knobs, automation reads, tempo sync |
+
+**The danger:** If a control-rate parameter is applied directly to audio-rate
+DSP without conversion, the step between buffers is heard as zipper noise or
+a click.
+
+**Eden's solution:** One-pole interpolation bridges the two rates.  The UI
+writes a new target; the audio thread smooths toward it over one or more
+callbacks.
+
+```
+UI event ──► snapshot ──► one-pole smooth ──► DSP audio-rate computation
+(any rate)   (per-callback)  (per-callback)    (per-sample)
+```
+
+The smoothing coefficient determines how fast the control catches up:
+
+```
+τ (time constant) = -1 / ln(1 - coeff)  samples
+                  ≈ 1/coeff              samples  (for small coeff)
+
+coeff = 0.002:  τ ≈ 500 samples ≈ 11.3 ms @ 44.1 kHz
+```
+
+For 512-sample buffers, `coeff_per_buffer = (0.002 × 512).min(1.0) = 1.0`
+— meaning one buffer is all it takes to fully catch up.  This makes knob
+moves feel instant while still smoothing out any mid-buffer jump.
+
+---
+
+## 18. Sample-Accurate Event Scheduling
+
+### Current: Buffer-Boundary Scheduling
+
+Eden currently triggers MIDI note-on/off at the first sample of the buffer
+in which the note's beat position falls.  At 512 samples / buffer, this gives
+worst-case timing jitter of ~11.6 ms — adequate for most uses but not for
+tight percussion.
+
+```rust
+// audio.rs — current approach (per-buffer beat check)
+for note in &clip.notes {
+    let note_start_beats = note.start_beats;
+    if pos >= clip_start + note_start_beats && prev_pos < clip_start + note_start_beats {
+        // Trigger note — fires on first sample of this buffer
+        voices.push(new_voice(...));
+    }
+}
+```
+
+### Future: Sample-Accurate Scheduling
+
+For sub-millisecond timing accuracy, events should be timestamped at their
+exact sample offset within the buffer and processed per-sample:
+
+```rust
+// Future: event queue with sample-level timestamps
+struct ScheduledEvent {
+    sample_offset: usize,  // 0..buffer_size
+    event: MidiEvent,
+}
+
+// Per-sample in the loop:
+for (frame_idx, sample_offset) in events.iter() {
+    if *sample_offset == frame_idx {
+        process_event(event);
+    }
+}
+```
+
+This is especially important for:
+- Tight snare/kick alignment in sample-accurate sequencers
+- Note-off exactly at clip boundary (no sustain bleed)
+- Arpeggiator tempo sync at BPM > 200
+
+---
+
+## 19. Metering Ballistics
+
+Accurate meters require separate logic from the DSP path — they measure the
+signal without affecting it.
+
+### Peak Meter
+
+- **Attack:** Instant (capture single-sample max)
+- **Release (fallback):** Slow decay, typically `release_coeff ≈ 0.9997` per sample (≈ 300 ms @ 44.1kHz)
+
+```rust
+// Per sample:
+peak_hold = peak_hold.max(sample.abs());
+
+// Per callback (apply release):
+let release = 0.9997_f32.powi(frames as i32);
+peak_hold *= release;
+```
+
+### RMS Meter
+
+- Window: ~300 ms = 13230 samples @ 44.1kHz
+- Computation: `rms = sqrt(mean(x²))` over window
+
+Eden currently accumulates `sum_sq += sample * sample` per buffer and reports
+`sqrt(sum_sq / frame_count)`.  A proper 300 ms running window requires a
+circular buffer or exponential moving average:
+
+```rust
+// Exponential RMS (approximation of 300 ms window):
+const RMS_COEFF: f32 = 1.0 - (1.0 / (0.3 * 44100.0));  // ≈ 0.999924
+rms_sq = rms_sq * RMS_COEFF + sample * sample * (1.0 - RMS_COEFF);
+let rms = rms_sq.sqrt();
+```
+
+### True Peak Meter
+
+For compliance with broadcast loudness standards (EBU R128, ITU-R BS.1770),
+true peak detection oversamples the signal 4× to catch inter-sample peaks:
+
+```rust
+// Oversample 4× with linear interpolation, measure peak on all 4 sub-samples
+// Full implementation requires a polyphase FIR — future work.
+```
+
+### Thread Safety
+
+Meters must not block the audio thread.  Eden uses `AtomicU32` to pass peak/
+RMS values to the UI thread (reinterpreted as `f32` bits):
+
+```rust
+// audio callback (non-blocking write):
+peak_atomic.store(f32::to_bits(peak), Ordering::Relaxed);
+
+// UI thread (non-blocking read):
+let peak = f32::from_bits(peak_atomic.load(Ordering::Relaxed));
+```
+
+---
+
+## 20. Offline / Export Rendering Mode
+
+Export rendering runs the same DSP code path as real-time playback, with
+three key differences:
+
+| Property         | Real-time                    | Offline (export)               |
+|-----------------|------------------------------|--------------------------------|
+| Buffer size      | Device-driven (e.g. 512)    | Fixed (e.g. 1024)              |
+| Timing deadline  | Hard (RT audio callback)     | None — runs as fast as CPU allows |
+| Determinism      | Non-deterministic seek/jitter | 100% deterministic per run     |
+| Sample rate      | Device sample rate           | User-selectable (44.1/48/96kHz) |
+
+Eden's `render.rs` uses the same `process()` / `process_sidechain()` trait
+calls as `audio.rs`, ensuring export audio is bit-identical to what you hear
+during playback.
+
+### Key considerations
+
+1. **No real-time constraint** — the render loop can run as fast as the CPU
+   allows (`cargo run --release` renders a 3-min song in ~1 s)
+2. **Deterministic block size** — use a fixed 1024-sample block for
+   cache-efficient processing
+3. **Same smoothing state** — parameter smoothers must be reset to their
+   initial values at render start (not inherited from the live playback state)
+4. **Tail rendering** — always add a tail (e.g. 2 s) beyond the last clip to
+   capture reverb/delay decay
+
+```rust
+// render.rs — export loop (simplified)
+let block = 1024usize;
+let total = arrangement_samples + tail_samples;
+let mut render_pos = 0usize;
+
+while render_pos < total {
+    let frames = block.min(total - render_pos);
+    // ... same DSP code as audio.rs callback ...
+    render_pos += frames;
+}
+```
+
+---
 
 Minimum set needed for professional-quality audio output:
 
@@ -581,6 +830,8 @@ Minimum set needed for professional-quality audio output:
 | Micro-fades at clip edges | ✅ Done | audio.rs, render.rs | 220 samples, equal-power sine |
 | Parameter smoothing (pan) | ✅ Done | audio.rs     | One-pole, coeff=0.002             |
 | Parameter smoothing (vol) | ✅ Done | audio.rs     | One-pole, coeff=0.002             |
+| Parameter smoothing (all FX knobs) | ✅ Done | audio.rs | One-pole per-callback, scratch scratch_fx_params |
+| Master volume smoothing   | ✅ Done | audio.rs     | One-pole, sentinel init           |
 | Lock-free audio thread    | ✅ Done | audio.rs     | ArcSwap snapshot                  |
 | Double-buffered DSP graph | ✅ Done | audio.rs     | AudioSnapshot pattern             |
 | Continuous oscillator phase | ✅ Done | modules.rs  | `next - next.floor()`             |
@@ -597,6 +848,8 @@ Minimum set needed for professional-quality audio output:
 | **Lookahead limiter**       | ⬜ TODO | render.rs  | 5 ms lookahead on master bus      |
 | **Crossfades between clips** | ⬜ TODO | render.rs | Overlap-add crossfade engine      |
 | **SIMD mix loop**           | ⬜ TODO | audio.rs   | 4× throughput with f64x4/f32x8    |
+| **Sample-accurate scheduling** | ⬜ TODO | audio.rs | Per-sample event timestamp queue |
+| **True peak metering**      | ⬜ TODO | audio.rs   | 4× oversample polyphase FIR       |
 
 ---
 

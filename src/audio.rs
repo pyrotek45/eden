@@ -521,6 +521,19 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         let mut smooth_pan: Vec<f64> = Vec::new();
         let mut smooth_vol: Vec<f64> = Vec::new();
 
+        // Smoothed master volume (one-pole) — prevents clicks when master fader moves.
+        let mut smooth_master_vol: f64 = -1.0; // -1 sentinel → initialise on first use
+
+        // Smoothed effect parameter cache: [track][slot][param_idx] → smoothed f32 value.
+        // One-pole-filters each knob value so moving a knob during playback can't
+        // cause a discontinuity in the DSP signal. Updated every callback before the
+        // per-sample loop; the DSP reads these instead of the raw snapshot values.
+        // Also covers master rack: smooth_master_fx_params[slot][param_idx].
+        let mut smooth_track_fx_params: Vec<Vec<Vec<f32>>> = Vec::new();
+        let mut smooth_master_fx_params: Vec<Vec<f32>> = Vec::new();
+        // Coefficient: ~1 ms @ 44.1kHz (same as pan/vol smoothing)
+        const FX_SMOOTH_COEFF: f32 = 0.002;
+
         // Per-track arp state: (step_index, last_step_beat, held_pitches)
         let mut track_arp_state: Vec<(usize, f64, Vec<u8>)> = Vec::new();
         // Independent beat clock for keyboard/preview arp (always advances at BPM speed,
@@ -549,6 +562,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         // Arp scratch — reused per-track per-sample.
         let mut cb_arp_active_pitches: Vec<u8> = Vec::with_capacity(32);
         let mut cb_arp_pool: Vec<u8> = Vec::with_capacity(64);
+        // Smoothed-param scratch: holds (name, smoothed_value) tuples for one effect slot.
+        // Reused every DSP call — clear() + extend() with no heap allocation after warm-up.
+        let mut scratch_fx_params: Vec<(String, f32)> = Vec::with_capacity(32);
 
         let stream = match device.build_output_stream(
             &config.into(),
@@ -1055,10 +1071,23 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 for (fi2, (_, fx_params)) in track.effect_slots.iter().enumerate() {
                                     if fi2 < track_effects[ti].len() {
                                         track_effects[ti][fi2].1.set_bpm(snap.bpm);
+                                        // Build smoothed param slice for this slot (no allocation)
+                                        scratch_fx_params.clear();
+                                        let smoothed_vals = if ti < smooth_track_fx_params.len()
+                                            && fi2 < smooth_track_fx_params[ti].len()
+                                        {
+                                            &smooth_track_fx_params[ti][fi2]
+                                        } else {
+                                            &[] as &[f32]
+                                        };
+                                        for (pi, (name, _)) in fx_params.iter().enumerate() {
+                                            let sv = smoothed_vals.get(pi).copied().unwrap_or(fx_params[pi].1);
+                                            scratch_fx_params.push((name.clone(), sv));
+                                        }
                                         let (ol, or2) = track_effects[ti][fi2].1.process(
                                             cb_per_track_sample[ti].0,
                                             cb_per_track_sample[ti].1,
-                                            fx_params,
+                                            &scratch_fx_params,
                                             sample_rate,
                                         );
                                         cb_per_track_sample[ti] = (ol, or2);
@@ -1090,19 +1119,30 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         for (fi2, (_, fx_params)) in snap.master_effects.iter().enumerate() {
                             if fi2 < master_effects.len() {
                                 master_effects[fi2].1.set_bpm(snap.bpm);
+                                // Build smoothed param slice (no allocation)
+                                scratch_fx_params.clear();
+                                let smoothed_vals = if fi2 < smooth_master_fx_params.len() {
+                                    &smooth_master_fx_params[fi2]
+                                } else {
+                                    &[] as &[f32]
+                                };
+                                for (pi, (name, _)) in fx_params.iter().enumerate() {
+                                    let sv = smoothed_vals.get(pi).copied().unwrap_or(fx_params[pi].1);
+                                    scratch_fx_params.push((name.clone(), sv));
+                                }
                                 let (ml, mr) = master_effects[fi2].1.process_sidechain(
                                     mix_l,
                                     mix_r,
                                     mix_l,
                                     mix_r,
-                                    fx_params,
+                                    &scratch_fx_params,
                                     sample_rate,
                                 );
                                 mix_l = ml;
                                 mix_r = mr;
                             }
                         }
-                        let mv = snap.master_volume as f64;
+                        let mv = smooth_master_vol;
                         frame_samples_l[fi] =
                             (frame_samples_l[fi] as f64 + mix_l * mv).clamp(-1.0, 1.0) as f32;
                         frame_samples_r[fi] =
@@ -1355,6 +1395,63 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 };
                 // Hoist constant conversions out of the per-sample loop
                 let beats_per_sec = snap.bpm / 60.0;
+
+                // ── Per-callback parameter smoothing ──────────────────────────────
+                // Smooth every effect parameter and master volume toward their
+                // snapshot target values.  This runs once per audio callback
+                // (not once per sample) so it's O(params) not O(params×samples).
+                // Parameters are passed to DSP as references to these smoothed slices.
+                // FX_SMOOTH_COEFF is deliberately applied per-buffer, which at
+                // 512 samples/buffer @ 44.1kHz gives ~11.6 ms time constant —
+                // fast enough that knobs feel instant but slow enough to prevent
+                // any discontinuity.
+
+                // Initialise master volume smoother on first use
+                if smooth_master_vol < 0.0 {
+                    smooth_master_vol = snap.master_volume as f64;
+                }
+                smooth_master_vol += (snap.master_volume as f64 - smooth_master_vol) * (FX_SMOOTH_COEFF as f64 * frames as f64).min(1.0);
+
+                // Grow track fx param cache to match current layout
+                while smooth_track_fx_params.len() < snap.tracks.len() {
+                    smooth_track_fx_params.push(Vec::new());
+                }
+                for (ti, track) in snap.tracks.iter().enumerate() {
+                    let slot_cache = &mut smooth_track_fx_params[ti];
+                    while slot_cache.len() < track.effect_slots.len() {
+                        slot_cache.push(Vec::new());
+                    }
+                    for (si, (_, params)) in track.effect_slots.iter().enumerate() {
+                        let param_cache = &mut slot_cache[si];
+                        // Initialise missing entries to the snapshot value (no initial pop)
+                        if param_cache.len() < params.len() {
+                            for pi in param_cache.len()..params.len() {
+                                param_cache.push(params[pi].1);
+                            }
+                        }
+                        // One-pole smooth every param toward its target
+                        let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
+                        for (pi, p) in params.iter().enumerate() {
+                            param_cache[pi] += (p.1 - param_cache[pi]) * coeff;
+                        }
+                    }
+                }
+                // Grow master fx param cache
+                while smooth_master_fx_params.len() < snap.master_effects.len() {
+                    smooth_master_fx_params.push(Vec::new());
+                }
+                for (si, (_, params)) in snap.master_effects.iter().enumerate() {
+                    let param_cache = &mut smooth_master_fx_params[si];
+                    if param_cache.len() < params.len() {
+                        for pi in param_cache.len()..params.len() {
+                            param_cache.push(params[pi].1);
+                        }
+                    }
+                    let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
+                    for (pi, p) in params.iter().enumerate() {
+                        param_cache[pi] += (p.1 - param_cache[pi]) * coeff;
+                    }
+                }
 
                 for frame_idx in 0..frames {
                     // ── Loop wraparound (sample-accurate) ──
@@ -1810,12 +1907,25 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 } else {
                                     per_track_sample[ti]
                                 };
+                                // Build smoothed param slice for this slot (no allocation)
+                                scratch_fx_params.clear();
+                                let smoothed_vals = if ti < smooth_track_fx_params.len()
+                                    && fi < smooth_track_fx_params[ti].len()
+                                {
+                                    &smooth_track_fx_params[ti][fi]
+                                } else {
+                                    &[] as &[f32]
+                                };
+                                for (pi, (name, _)) in fx_params.iter().enumerate() {
+                                    let sv = smoothed_vals.get(pi).copied().unwrap_or(fx_params[pi].1);
+                                    scratch_fx_params.push((name.clone(), sv));
+                                }
                                 let (ol, or2) = track_effects[ti][fi].1.process_sidechain(
                                     per_track_sample[ti].0,
                                     per_track_sample[ti].1,
                                     key_l,
                                     key_r,
-                                    fx_params,
+                                    &scratch_fx_params,
                                     sample_rate,
                                 );
                                 per_track_sample[ti] = (ol, or2);
@@ -1876,12 +1986,23 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     for (fi, (_, fx_params)) in snap.master_effects.iter().enumerate() {
                         if fi < master_effects.len() {
                             master_effects[fi].1.set_bpm(snap.bpm);
+                            // Build smoothed param slice (no allocation)
+                            scratch_fx_params.clear();
+                            let smoothed_vals = if fi < smooth_master_fx_params.len() {
+                                &smooth_master_fx_params[fi]
+                            } else {
+                                &[] as &[f32]
+                            };
+                            for (pi, (name, _)) in fx_params.iter().enumerate() {
+                                let sv = smoothed_vals.get(pi).copied().unwrap_or(fx_params[pi].1);
+                                scratch_fx_params.push((name.clone(), sv));
+                            }
                             let (ml, mr) = master_effects[fi].1.process_sidechain(
                                 mix_l,
                                 mix_r,
                                 mix_l,
                                 mix_r,
-                                fx_params,
+                                &scratch_fx_params,
                                 sample_rate,
                             );
                             mix_l = ml;
@@ -1894,8 +2015,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         master_rms_accum += (ms * ms) as f32;
                     }
 
-                    mix_l *= snap.master_volume as f64;
-                    mix_r *= snap.master_volume as f64;
+                    mix_l *= smooth_master_vol;
+                    mix_r *= smooth_master_vol;
 
                     // Anti-click fade: equal-power sine ramp up from 0 after seek/loop boundary
                     if anti_click_remaining > 0 {

@@ -5177,6 +5177,23 @@ fn draw_bottom_mixer(
             .min(max_scroll);
     }
 
+    // Middle-click drag: pan the bottom mixer horizontally
+    if needs_scroll {
+        let bottom_mixer_drag_id = WidgetId::Auto(87004);
+        if input.middle_mouse_down
+            && input.mouse_y >= top
+            && input.mouse_y < top + h
+            && input.mouse_x < content_w
+            && input.middle_drag_widget == WidgetId::None
+        {
+            input.middle_drag_widget = bottom_mixer_drag_id;
+        }
+        if input.middle_mouse_down && input.middle_drag_widget == bottom_mixer_drag_id {
+            state.bottom_mixer_scroll_x = (state.bottom_mixer_scroll_x - input.mouse_dx as f32)
+                .clamp(0.0, max_scroll);
+        }
+    }
+
     // Master output strip (drawn outside clip rect, always visible on the right)
     let mx = w - strip_w - 8;
     let mh = (h - 12).max(4);
@@ -7291,7 +7308,18 @@ fn draw_instrument_rack(
         state.rack_scroll_x = (state.rack_scroll_x - delta).clamp(0.0, max_scroll);
     }
 
-    // ── Sidechain dropdown popup (triggered by middle-click) ────────
+    // Middle-click drag: pan the instrument rack horizontally (same gesture as arranger)
+    let rack_instr_drag_id = WidgetId::Auto(87001);
+    if input.middle_mouse_down
+        && input.mouse_in_rect(0, top, w, h - scrollbar_h)
+        && input.middle_drag_widget == WidgetId::None
+    {
+        input.middle_drag_widget = rack_instr_drag_id;
+    }
+    if input.middle_mouse_down && input.middle_drag_widget == rack_instr_drag_id {
+        let max_scroll = ((total_content_w - w) as f32).max(0.0);
+        state.rack_scroll_x = (state.rack_scroll_x - input.mouse_dx as f32).clamp(0.0, max_scroll);
+    }
     if state.sc_popup_open {
         let popup_ti = state.sc_popup_track_idx;
         let popup_si = state.sc_popup_slot_idx;
@@ -8601,9 +8629,20 @@ fn draw_master_rack(
         let max_scroll = ((total_content_w - w) as f32).max(0.0);
         state.rack_scroll_x = (state.rack_scroll_x - delta).clamp(0.0, max_scroll);
     }
-}
 
-// ── Full arrangement draw ─────────────────────────────────────────────
+    // Middle-click drag: pan the master rack horizontally
+    let rack_master_drag_id = WidgetId::Auto(87002);
+    if input.middle_mouse_down
+        && input.mouse_in_rect(0, top, w, h - scrollbar_h)
+        && input.middle_drag_widget == WidgetId::None
+    {
+        input.middle_drag_widget = rack_master_drag_id;
+    }
+    if input.middle_mouse_down && input.middle_drag_widget == rack_master_drag_id {
+        let max_scroll = ((total_content_w - w) as f32).max(0.0);
+        state.rack_scroll_x = (state.rack_scroll_x - input.mouse_dx as f32).clamp(0.0, max_scroll);
+    }
+}
 // ── Sample Browser (left panel) ─────────────────────────────────────
 
 /// Draw the left-side sample browser panel.
@@ -15264,6 +15303,20 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
             state.mixer_scroll_x = (state.mixer_scroll_x - input.scroll_y as f32 * 30.0)
                 .max(0.0)
                 .min(max_scroll);
+        }
+
+        // Middle-click drag: pan the mixer horizontally
+        let mixer_drag_id = WidgetId::Auto(87003);
+        if input.middle_mouse_down
+            && input.mouse_y >= top
+            && input.mouse_y < top + h
+            && input.middle_drag_widget == WidgetId::None
+        {
+            input.middle_drag_widget = mixer_drag_id;
+        }
+        if input.middle_mouse_down && input.middle_drag_widget == mixer_drag_id {
+            state.mixer_scroll_x = (state.mixer_scroll_x - input.mouse_dx as f32)
+                .clamp(0.0, max_scroll);
         }
     } else {
         state.mixer_scroll_x = 0.0;
