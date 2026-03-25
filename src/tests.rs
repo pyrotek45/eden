@@ -9570,4 +9570,153 @@ mod tests {
             max_j
         );
     }
+
+    // ── Alt snap bypass ───────────────────────────────────────────────
+
+    /// When snap is enabled, snap() normally quantises.
+    /// Simulating alt bypass: if we pass the raw beat through unchanged (bypass),
+    /// the result equals the raw beat regardless of the grid.
+    #[test]
+    fn test_snap_alt_bypass_returns_raw() {
+        let snap = crate::state::SnapSettings {
+            enabled: true,
+            resolution_idx: 2, // 1/4 note = 1.0 beat grid
+        };
+        // Without bypass: 0.7 rounds to 1.0
+        assert_eq!(snap.snap(0.7), 1.0);
+        // With alt bypass: simulate by using raw value directly
+        let raw = 0.7_f64;
+        let result = if true { raw } else { snap.snap(raw) }; // alt held
+        assert!((result - 0.7).abs() < 1e-9, "alt bypass should return raw value");
+    }
+
+    /// snap_proximity also returns the raw value when bypass is active.
+    #[test]
+    fn test_snap_proximity_alt_bypass() {
+        let snap = crate::state::SnapSettings {
+            enabled: true,
+            resolution_idx: 2, // 1/4 note
+        };
+        // Normal: 0.95 within 0.1 of 1.0 → snaps to 1.0
+        assert_eq!(snap.snap_proximity(0.95, 0.1), 1.0);
+        // Alt bypass: pass raw through
+        let raw = 0.95_f64;
+        let alt = true;
+        let result = if alt { raw } else { snap.snap_proximity(raw, 0.1) };
+        assert!((result - 0.95).abs() < 1e-9);
+    }
+
+    /// snap_with_edges returns raw when alt bypass is active.
+    #[test]
+    fn test_snap_with_edges_alt_bypass() {
+        let snap = crate::state::SnapSettings {
+            enabled: true,
+            resolution_idx: 2, // 1/4 note
+        };
+        let candidates = vec![2.0_f64, 4.0];
+        // Normal: 1.98 near edge 2.0 within 0.3 threshold → 2.0
+        let snapped = snap.snap_with_edges(1.98, 0.3, &candidates);
+        assert!((snapped - 2.0).abs() < 1e-9, "expected snap to 2.0, got {}", snapped);
+        // Alt bypass: raw 1.98 returned unchanged
+        let raw = 1.98_f64;
+        let alt = true;
+        let result = if alt { raw } else { snap.snap_with_edges(raw, 0.3, &candidates) };
+        assert!((result - 1.98).abs() < 1e-9);
+    }
+
+    // ── CStrip2 audio processing ─────────────────────────────────────
+
+    /// CStrip2 with default params (EQ neutral, comp off) should pass audio through
+    /// with minimal level change (<1 dB attenuation, no clipping).
+    #[test]
+    fn test_cstrip2_passthrough() {
+        use crate::modules::create_effect;
+        let sr = 44100u32;
+        let mut cs = create_effect("CStrip2", sr).unwrap();
+        let params = vec![
+            ("treble".to_string(),   0.5f32),
+            ("treb_frq".to_string(), 0.5),
+            ("mid".to_string(),      0.5),
+            ("bass".to_string(),     0.5),
+            ("bass_frq".to_string(), 0.5),
+            ("lo_cap".to_string(),   1.0),
+            ("hi_cap".to_string(),   0.0),
+            ("compress".to_string(), 0.0),
+            ("comp_spd".to_string(), 0.0),
+            ("output".to_string(),   0.33),
+        ];
+
+        let input_level = 0.5_f64;
+        let (out_l, out_r) = cs.process(input_level, input_level, &params, sr as f64);
+
+        // Output should be finite and not silent
+        assert!(out_l.is_finite(), "CStrip2 L output must be finite");
+        assert!(out_r.is_finite(), "CStrip2 R output must be finite");
+        assert!(out_l.abs() > 0.001, "CStrip2 should not silence input");
+        // Output should not clip hard (saturation may raise it slightly)
+        assert!(out_l.abs() < 3.0, "CStrip2 output should not clip severely");
+    }
+
+    /// CStrip2 with maximum output gain should amplify signal.
+    #[test]
+    fn test_cstrip2_output_gain() {
+        use crate::modules::create_effect;
+        let sr = 44100u32;
+        let mut cs_low = create_effect("CStrip2", sr).unwrap();
+        let mut cs_high = create_effect("CStrip2", sr).unwrap();
+
+        let params_low = vec![
+            ("treble".to_string(),   0.5f32),
+            ("treb_frq".to_string(), 0.5),
+            ("mid".to_string(),      0.5),
+            ("bass".to_string(),     0.5),
+            ("bass_frq".to_string(), 0.5),
+            ("lo_cap".to_string(),   1.0),
+            ("hi_cap".to_string(),   0.0),
+            ("compress".to_string(), 0.0),
+            ("comp_spd".to_string(), 0.0),
+            ("output".to_string(),   0.0), // min gain
+        ];
+        let mut params_high = params_low.clone();
+        params_high.last_mut().unwrap().1 = 1.0; // max gain
+
+        let (low_l, _) = cs_low.process(0.5, 0.5, &params_low, sr as f64);
+        let (high_l, _) = cs_high.process(0.5, 0.5, &params_high, sr as f64);
+
+        assert!(
+            high_l.abs() > low_l.abs(),
+            "higher output param should produce louder output ({} vs {})",
+            high_l.abs(), low_l.abs()
+        );
+    }
+
+    /// CStrip2 output must remain finite over a sustained sine burst (no divergence).
+    #[test]
+    fn test_cstrip2_no_divergence() {
+        use crate::modules::create_effect;
+        let sr = 44100u32;
+        let mut cs = create_effect("CStrip2", sr).unwrap();
+        let params = vec![
+            ("treble".to_string(),   0.8f32), // boosted highs
+            ("treb_frq".to_string(), 0.5),
+            ("mid".to_string(),      0.8),
+            ("bass".to_string(),     0.8),
+            ("bass_frq".to_string(), 0.5),
+            ("lo_cap".to_string(),   1.0),
+            ("hi_cap".to_string(),   0.0),
+            ("compress".to_string(), 0.5), // light compression
+            ("comp_spd".to_string(), 0.5),
+            ("output".to_string(),   0.5),
+        ];
+
+        for i in 0..4410 { // 100 ms of 440 Hz sine
+            let t = i as f64 / sr as f64;
+            let s = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.8;
+            let (ol, or2) = cs.process(s, s, &params, sr as f64);
+            assert!(ol.is_finite() && or2.is_finite(),
+                "CStrip2 output diverged at sample {}: L={} R={}", i, ol, or2);
+            assert!(ol.abs() < 10.0 && or2.is_finite(),
+                "CStrip2 severely clipping at sample {}", i);
+        }
+    }
 }

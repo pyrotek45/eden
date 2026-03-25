@@ -119,6 +119,18 @@ pub struct InputState {
     /// Per-frame widget ID counter. Resets to 0 in begin_frame().
     /// Use next_id() to get a unique WidgetId::Auto(N) each call.
     pub widget_counter: u32,
+
+    /// When true, the main loop should enable SDL2 relative mouse mode so that
+    /// mouse-motion events keep firing even when the cursor leaves the window.
+    /// Set to true by any widget that begins a drag; cleared when no drag is active.
+    /// The main loop applies `sdl.mouse().set_relative_mouse_mode(relative_mouse_active)`
+    /// each frame after processing events.
+    pub relative_mouse_active: bool,
+
+    /// Raw (unscaled) relative mouse deltas accumulated from SDL MouseMotion xrel/yrel
+    /// while relative mouse mode is active. Consumed and reset by apply_scale().
+    pub relative_dx_raw: i32,
+    pub relative_dy_raw: i32,
 }
 
 impl Default for InputState {
@@ -167,6 +179,9 @@ impl Default for InputState {
             hover_hint_widget: WidgetId::None,
             dropped_file: None,
             widget_counter: 0,
+            relative_mouse_active: false,
+            relative_dx_raw: 0,
+            relative_dy_raw: 0,
         }
     }
 }
@@ -299,6 +314,19 @@ impl InputState {
         self.raw_mouse_y = y;
     }
 
+    /// Called instead of on_mouse_move when SDL2 relative mouse mode is active.
+    /// In relative mode the absolute x/y reported by SDL wrap at the screen centre,
+    /// so we keep the last known logical position and only accumulate the relative delta.
+    /// `xrel`/`yrel` are raw physical pixels — they are scaled inside apply_scale.
+    pub fn on_mouse_move_relative(&mut self, x: i32, y: i32, xrel: i32, yrel: i32) {
+        // Keep raw coords updated so hover detection still works via apply_scale.
+        self.raw_mouse_x = x;
+        self.raw_mouse_y = y;
+        // Stash the unscaled relative deltas; apply_scale will pick them up.
+        self.relative_dx_raw = xrel;
+        self.relative_dy_raw = yrel;
+    }
+
     /// Call once per frame, before drawing, to convert raw physical coords → logical.
     /// This is the ONLY place division by scale happens.
     pub fn apply_scale(&mut self, scale: f32) {
@@ -309,8 +337,17 @@ impl InputState {
         self.mouse_prev_y = self.mouse_y;
         self.mouse_x = lx;
         self.mouse_y = ly;
-        self.mouse_dx = lx - self.mouse_prev_x;
-        self.mouse_dy = ly - self.mouse_prev_y;
+
+        if self.relative_mouse_active {
+            // Use the accumulated relative deltas — these keep firing even outside window.
+            self.mouse_dx = (self.relative_dx_raw as f32 / scale) as i32;
+            self.mouse_dy = (self.relative_dy_raw as f32 / scale) as i32;
+            self.relative_dx_raw = 0;
+            self.relative_dy_raw = 0;
+        } else {
+            self.mouse_dx = lx - self.mouse_prev_x;
+            self.mouse_dy = ly - self.mouse_prev_y;
+        }
 
         // Set drag start in logical coords the moment the press happens
         if self.mouse_pressed {
@@ -334,6 +371,9 @@ impl InputState {
             // that widgets can detect click completion (pressed + released on same widget).
             // active_widget is cleared at the START of the next frame in begin_frame().
         }
+
+        // Recompute after dragging may have just changed above.
+        self.relative_mouse_active = self.mouse_down && self.dragging;
     }
 
     pub fn on_key_down(&mut self, key: sdl2::keyboard::Keycode) {
