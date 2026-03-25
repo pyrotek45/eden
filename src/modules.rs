@@ -4662,8 +4662,8 @@ impl EffectModule for CStrip2 {
         let mid_g    = (mid    * 2.0 - 1.0) * 0.5 + 1.0;
         let treble_g = (treble * 2.0 - 1.0) * 0.5 + 1.0;
 
-        l = self.tri_la * bass_g + self.tri_lb * mid_g + (l - self.tri_lc) * treble_g + self.tri_lc;
-        r = self.tri_ra * bass_g + self.tri_rb * mid_g + (r - self.tri_rc) * treble_g + self.tri_rc;
+        l = self.tri_la * bass_g + self.tri_lb * mid_g + (l - self.tri_lc) * treble_g ;
+        r = self.tri_ra * bass_g + self.tri_rb * mid_g + (r - self.tri_rc) * treble_g ;
 
         // ── ButterComp ───────────────────────────────────────────────────
         if compress > 0.001 {

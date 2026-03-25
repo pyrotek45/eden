@@ -4859,6 +4859,25 @@ fn draw_bottom_mixer(
             sdl2::rect::Point::new(x, zero_y),
             sdl2::rect::Point::new(x + w_px as i32 - 1, zero_y),
         );
+        // dB tick marks every 5 dB
+        {
+            let mut db_tick = -55.0_f64;
+            while db_tick <= DB_CEIL {
+                if (db_tick - 0.0).abs() < 0.1 { db_tick += 5.0; continue; } // skip 0dB (already drawn)
+                let frac = ((db_tick - DB_FLOOR) / DB_RANGE) as f32;
+                let ty = y + h_px - (frac * h_px as f32) as i32;
+                if ty > y && ty < y + h_px {
+                    let alpha = if db_tick % 10.0 == 0.0 { 70u8 } else { 40u8 };
+                    let tick_w = if db_tick % 10.0 == 0.0 { w_px } else { (w_px / 2).max(1) };
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(180, 190, 200, alpha));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(x, ty),
+                        sdl2::rect::Point::new(x + tick_w as i32 - 1, ty),
+                    );
+                }
+                db_tick += 5.0;
+            }
+        }
     }
 
     // Helper: draw peak hold line on a meter
@@ -5032,7 +5051,21 @@ fn draw_bottom_mixer(
             &mut vol_pos,
         );
         if vol_changed {
-            state.project.tracks[i].volume = vol_pos_to_gain(vol_pos);
+            let new_vol = vol_pos_to_gain(vol_pos);
+            let old_vol = state.project.tracks[i].volume;
+            let delta = new_vol - old_vol;
+            state.project.tracks[i].volume = new_vol;
+            // Propagate volume delta to all other selected tracks
+            if state.selected_tracks.contains(&track_id) {
+                for j in 0..state.project.tracks.len() {
+                    if j == i { continue; }
+                    let other_id = state.project.tracks[j].id;
+                    if state.selected_tracks.contains(&other_id) {
+                        state.project.tracks[j].volume =
+                            (state.project.tracks[j].volume + delta).clamp(0.0, 2.0);
+                    }
+                }
+            }
         }
         if input.mouse_released && input.drag_widget == mixer_vol_id {
             let old_gain = vol_pos_to_gain(input.drag_start_value as f32);
@@ -5156,9 +5189,24 @@ fn draw_bottom_mixer(
                         sdl2::pixels::Color::RGBA(160, 170, 180, 200), 1);
                 }
                 if changed {
+                    let delta = val - cur_val;
                     if let Some(entry) = state.project.tracks[i]
                         .cstrip2_params.iter_mut().find(|(id, _)| id == desc.id)
                     { entry.1 = val; }
+                    // Propagate to all other selected tracks
+                    if state.selected_tracks.contains(&track_id) {
+                        for j in 0..state.project.tracks.len() {
+                            if j == i { continue; }
+                            let other_id = state.project.tracks[j].id;
+                            if state.selected_tracks.contains(&other_id) {
+                                if let Some(entry) = state.project.tracks[j]
+                                    .cstrip2_params.iter_mut().find(|(id, _)| id == desc.id)
+                                {
+                                    entry.1 = (entry.1 + delta).clamp(desc.min, desc.max);
+                                }
+                            }
+                        }
+                    }
                     state.dirty = true;
                 }
             }
@@ -5280,14 +5328,13 @@ fn draw_bottom_mixer(
                     // low_band = LP_bass * input
                     // high_band = (1 - LP_treb) * input
                     // mid_band = LP_treb - LP_bass (the band between)
-                    // output = low*bass_g + mid*mid_g + high*treb_g + LP_treb
-                    // = LP_bass*bass_g + (LP_treb - LP_bass)*mid_g + (1-LP_treb)*treb_g + LP_treb
-                    // = LP_bass*(bass_g - mid_g) + LP_treb*(mid_g - treb_g + 1) + treb_g
+                    // output = low*bass_g + mid*mid_g + high*treb_g
+                    // = LP_bass*(bass_g - mid_g) + LP_treb*(mid_g - treb_g) + treb_g
                     let eq_re = lp_bass_re * (bass_g - mid_g)
-                        + lp_treb_re * (mid_g - treb_g + 1.0)
+                        + lp_treb_re * (mid_g - treb_g)
                         + treb_g;
                     let eq_im = lp_bass_im * (bass_g - mid_g)
-                        + lp_treb_im * (mid_g - treb_g + 1.0);
+                        + lp_treb_im * (mid_g - treb_g);
                     let eq_mag = (eq_re * eq_re + eq_im * eq_im).sqrt();
 
                     // Total magnitude
@@ -5343,8 +5390,8 @@ fn draw_bottom_mixer(
                         };
                         let (lbr,lbi) = lp_c2(bass_coef);
                         let (ltr,lti) = lp_c2(treb_coef);
-                        let er = lbr*(bass_g-mid_g)+ltr*(mid_g-treb_g+1.0)+treb_g;
-                        let ei = lbi*(bass_g-mid_g)+lti*(mid_g-treb_g+1.0);
+                        let er = lbr*(bass_g-mid_g)+ltr*(mid_g-treb_g)+treb_g;
+                        let ei = lbi*(bass_g-mid_g)+lti*(mid_g-treb_g);
                         let em = (er*er+ei*ei).sqrt();
                         let tm = hp_mag2*lp_mag2*em;
                         let db2 = if tm>1e-10 { 20.0*tm.log10() } else { -db_range };
@@ -5407,7 +5454,22 @@ fn draw_bottom_mixer(
                 },
                 &mut pan_val,
             );
-            if pan_changed { state.project.tracks[i].pan = pan_val; }
+            if pan_changed {
+                let old_pan = state.project.tracks[i].pan;
+                let delta = pan_val - old_pan;
+                state.project.tracks[i].pan = pan_val;
+                // Propagate pan delta to all other selected tracks
+                if state.selected_tracks.contains(&track_id) {
+                    for j in 0..state.project.tracks.len() {
+                        if j == i { continue; }
+                        let other_id = state.project.tracks[j].id;
+                        if state.selected_tracks.contains(&other_id) {
+                            state.project.tracks[j].pan =
+                                (state.project.tracks[j].pan + delta).clamp(-1.0, 1.0);
+                        }
+                    }
+                }
+            }
             if input.mouse_released && input.drag_widget == mixer_pan_id {
                 let old_pan = input.drag_start_value as f32;
                 if (old_pan - pan_val).abs() > 1e-4 {
@@ -5433,12 +5495,23 @@ fn draw_bottom_mixer(
                 state.theme.mute_on, mute_on, mix_mute_id, "M", Some("Mute track"),
             );
             if mute_clicked {
+                let new_mute = !mute_on;
                 state.commands.execute(
                     Box::new(crate::commands::SetTrackMute {
-                        track_id, new_value: !mute_on, old_value: mute_on,
+                        track_id, new_value: new_mute, old_value: mute_on,
                     }),
                     &mut state.project,
                 );
+                // Propagate to all other selected tracks
+                if state.selected_tracks.contains(&track_id) {
+                    for j in 0..state.project.tracks.len() {
+                        if j == i { continue; }
+                        let other_id = state.project.tracks[j].id;
+                        if state.selected_tracks.contains(&other_id) {
+                            state.project.tracks[j].mute = new_mute;
+                        }
+                    }
+                }
             }
             let mix_solo_id = input.next_id();
             let solo_clicked = toggle_button(
@@ -5453,12 +5526,23 @@ fn draw_bottom_mixer(
                     state.commands.push_undo_snapshot(snapshot, "Unsolo All");
                     state.dirty = true;
                 } else {
+                    let new_solo = !solo_on;
                     state.commands.execute(
                         Box::new(crate::commands::SetTrackSolo {
-                            track_id, new_value: !solo_on, old_value: solo_on,
+                            track_id, new_value: new_solo, old_value: solo_on,
                         }),
                         &mut state.project,
                     );
+                    // Propagate to all other selected tracks
+                    if state.selected_tracks.contains(&track_id) {
+                        for j in 0..state.project.tracks.len() {
+                            if j == i { continue; }
+                            let other_id = state.project.tracks[j].id;
+                            if state.selected_tracks.contains(&other_id) {
+                                state.project.tracks[j].solo = new_solo;
+                            }
+                        }
+                    }
                 }
             }
         }

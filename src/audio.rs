@@ -2126,11 +2126,17 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     frame_samples_r[frame_idx] = mix_r.clamp(-1.0, 1.0) as f32;
 
                     // Accumulate per-track squared samples for RMS (mono + stereo)
+                    // Use post-pan levels so track meters match what goes into master bus
                     for ti in 0..num_tracks {
+                        if ti >= snap.tracks.len() { break; }
                         let (tl, tr) = per_track_sample[ti];
                         let vol = smooth_vol.get(ti).copied().unwrap_or(1.0);
-                        let sl = tl * vol;
-                        let sr = tr * vol;
+                        let pan = smooth_pan.get(ti).copied().unwrap_or(0.0);
+                        let theta = (pan + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
+                        let pan_l = crate::modules::fast_cos(theta);
+                        let pan_r = crate::modules::fast_sin(theta);
+                        let sl = tl * pan_l * vol;
+                        let sr = tr * pan_r * vol;
                         let ts = (sl + sr) * 0.5;
                         track_rms_accum[ti] += (ts * ts) as f32;
                         track_rms_l_accum[ti] += (sl * sl) as f32;
