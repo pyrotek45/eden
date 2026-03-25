@@ -4828,27 +4828,33 @@ fn draw_bottom_mixer(
     fn draw_meter_bar(
         canvas: &mut Canvas<Window>, rms: f32, x: i32, y: i32, w_px: u32, h_px: i32,
     ) {
+        // Meter scale: -60 dB to +12 dB.  0 dB sits at 60/72 ≈ 83 %.
+        const DB_FLOOR: f64 = -60.0;
+        const DB_CEIL:  f64 =  12.0;
+        const DB_RANGE: f64 = DB_CEIL - DB_FLOOR; // 72
+
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(16, 16, 20, 220));
         let _ = canvas.fill_rect(Rect::new(x, y, w_px, h_px as u32));
         if rms > 0.001 {
-            let db = if rms > 1e-6 { 20.0 * (rms as f64).log10() } else { -60.0 };
-            let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
+            let db = if rms > 1e-6 { 20.0 * (rms as f64).log10() } else { DB_FLOOR };
+            let frac = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0) as f32;
             let fill = (frac * h_px as f32) as i32;
             let seg_h = 2i32;
             let gap = 1i32;
             let mut py = y + h_px - fill;
             while py < y + h_px {
                 let seg_bottom = (py + seg_h).min(y + h_px);
-                let seg_top_db = -60.0 + 60.0 * (1.0 - (py - y) as f64 / h_px as f64);
+                let seg_top_db = DB_FLOOR + DB_RANGE * (1.0 - (py - y) as f64 / h_px as f64);
                 let c = meter_color(seg_top_db);
                 canvas.set_draw_color(c);
                 let _ = canvas.fill_rect(Rect::new(x, py, w_px, (seg_bottom - py) as u32));
                 py = seg_bottom + gap;
             }
         }
-        // 0dB tick (at ~100% since our scale is -60..0)
-        let zero_y = y; // 0dB = top of meter
-        canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 80, 80, 80));
+        // 0 dB reference line (red, at 83 % height)
+        let zero_frac = ((0.0 - DB_FLOOR) / DB_RANGE) as f32; // ≈ 0.833
+        let zero_y = y + h_px - (zero_frac * h_px as f32) as i32;
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 50, 40, 160));
         let _ = canvas.draw_line(
             sdl2::rect::Point::new(x, zero_y),
             sdl2::rect::Point::new(x + w_px as i32 - 1, zero_y),
@@ -4857,13 +4863,16 @@ fn draw_bottom_mixer(
 
     // Helper: draw peak hold line on a meter
     fn draw_peak_hold(canvas: &mut Canvas<Window>, ph: f32, x: i32, y: i32, w_px: u32, h_px: i32) {
+        const DB_FLOOR: f64 = -60.0;
+        const DB_CEIL:  f64 =  12.0;
+        const DB_RANGE: f64 = DB_CEIL - DB_FLOOR;
         if ph > 0.01 {
-            let pk_db = if ph > 1e-6 { 20.0 * (ph as f64).log10() } else { -60.0 };
-            let pk_frac = ((pk_db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
+            let pk_db = if ph > 1e-6 { 20.0 * (ph as f64).log10() } else { DB_FLOOR };
+            let pk_frac = ((pk_db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0) as f32;
             let ph_y = y + h_px - (pk_frac * h_px as f32) as i32;
-            let ph_col = if ph >= 0.95 {
+            let ph_col = if pk_db >= 0.0 {
                 sdl2::pixels::Color::RGBA(200, 40, 30, 255)
-            } else if ph >= 0.8 {
+            } else if pk_db >= -6.0 {
                 sdl2::pixels::Color::RGBA(220, 180, 40, 240)
             } else {
                 sdl2::pixels::Color::RGBA(100, 220, 120, 200)
@@ -4965,7 +4974,7 @@ fn draw_bottom_mixer(
         let avail_h = (content_bottom - content_top).max(10);
 
         // ── VU meter gauge (top of content area, full width) ──
-        let vu_h = 56i32.min(avail_h / 3);
+        let vu_h = 73i32.min(avail_h / 3);
         if vu_h >= 30 {
             let vu_pos = state.meters.vu_needle.get(i).copied().unwrap_or(0.0);
             vu_meter(canvas, &state.theme, x + 6, content_top, strip_w - 12, vu_h, vu_pos);
@@ -5094,7 +5103,7 @@ fn draw_bottom_mixer(
             let knob_r = 13i32;
             let cell_w = (right_w / 2).max(30);
             let cell_h = 42i32;
-            let knob_base_y = below_vu;
+            let knob_base_y = below_vu + 20;
 
             for (pi, desc) in cs_descs.iter().enumerate() {
                 let col = (pi / 5) as i32;
@@ -5109,12 +5118,14 @@ fn draw_bottom_mixer(
                     .map(|(_, v)| *v).unwrap_or(desc.default);
                 let mut val = cur_val;
                 let cs_knob_id = input.next_id();
+                let is_bipolar = desc.id == "output" || desc.id == "treble"
+                    || desc.id == "mid" || desc.id == "bass";
                 let changed = knob(
                     canvas, input, &state.theme,
                     &KnobParams {
                         id: cs_knob_id, x: kx, y: ky, radius: knob_r,
                         min: desc.min, max: desc.max, sensitivity: 0.005,
-                        label: None, bipolar: false,
+                        label: None, bipolar: is_bipolar,
                         default_value: Some(desc.default),
                         hint: Some(desc.name.into()), snap_points: vec![],
                     },
@@ -5124,6 +5135,26 @@ fn draw_bottom_mixer(
                 draw_pixel_label(canvas, &state.theme, desc.name,
                     kx - cell_w / 2, ky - knob_r - 9, cell_w,
                     sdl2::pixels::Color::RGBA(130, 135, 145, 170));
+                // dB value below gain knobs
+                let db_text: Option<String> = match desc.id {
+                    "treble" | "mid" | "bass" => {
+                        let gain = (val * 2.0 - 1.0) * 0.5 + 1.0;
+                        let db = 20.0 * gain.log10();
+                        if db.abs() < 0.05 { Some("0.0dB".into()) }
+                        else { Some(format!("{:+.1}dB", db)) }
+                    }
+                    "output" => {
+                        let db = (val - 0.5) * 100.0;
+                        if db.abs() < 0.05 { Some("0.0dB".into()) }
+                        else { Some(format!("{:+.1}dB", db)) }
+                    }
+                    _ => None,
+                };
+                if let Some(ref txt) = db_text {
+                    draw_pixel_label_scaled(canvas, &state.theme, txt,
+                        kx - cell_w / 2, ky + knob_r + 2, cell_w,
+                        sdl2::pixels::Color::RGBA(160, 170, 180, 200), 1);
+                }
                 if changed {
                     if let Some(entry) = state.project.tracks[i]
                         .cstrip2_params.iter_mut().find(|(id, _)| id == desc.id)
@@ -5134,42 +5165,205 @@ fn draw_bottom_mixer(
 
             // ── EQ curve visual (below knobs) ──
             let eq_y = knob_base_y + 12 + 5 * cell_h + 4;
-            let eq_h = 26i32;
+            let eq_h = 36i32;
             let eq_w = right_w.min(cell_w * 2);
             if eq_y + eq_h < content_bottom && eq_w > 20 {
+                // Background
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(18, 20, 26, 200));
                 let _ = canvas.fill_rect(Rect::new(right_x, eq_y, eq_w as u32, eq_h as u32));
+                // 0 dB center line
+                let mid_line = eq_y + eq_h / 2;
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 100));
+                let _ = canvas.draw_line(
+                    sdl2::rect::Point::new(right_x, mid_line),
+                    sdl2::rect::Point::new(right_x + eq_w, mid_line));
+
+                // Read all relevant params
                 let treble = state.project.tracks[i].cstrip2_params.iter()
                     .find(|(id, _)| id == "treble").map(|(_, v)| *v).unwrap_or(0.5);
                 let mid = state.project.tracks[i].cstrip2_params.iter()
                     .find(|(id, _)| id == "mid").map(|(_, v)| *v).unwrap_or(0.5);
                 let bass = state.project.tracks[i].cstrip2_params.iter()
                     .find(|(id, _)| id == "bass").map(|(_, v)| *v).unwrap_or(0.5);
-                let mid_line = eq_y + eq_h / 2;
-                canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 100));
-                let _ = canvas.draw_line(
-                    sdl2::rect::Point::new(right_x, mid_line),
-                    sdl2::rect::Point::new(right_x + eq_w, mid_line));
-                let scale = eq_h as f32 * 0.4;
-                let third = eq_w / 3;
-                let bass_off = -((bass - 0.5) * 2.0 * scale) as i32;
-                let mid_off = -((mid - 0.5) * 2.0 * scale) as i32;
-                let treb_off = -((treble - 0.5) * 2.0 * scale) as i32;
-                let pts = [
-                    (right_x, mid_line),
-                    (right_x + third / 2, mid_line + bass_off),
-                    (right_x + third, mid_line + (bass_off + mid_off) / 2),
-                    (right_x + third + third / 2, mid_line + mid_off),
-                    (right_x + third * 2, mid_line + (mid_off + treb_off) / 2),
-                    (right_x + third * 2 + third / 2, mid_line + treb_off),
-                    (right_x + eq_w, mid_line),
-                ];
-                for pair in pts.windows(2) {
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 200, 140, 200));
-                    let _ = canvas.draw_line(
-                        sdl2::rect::Point::new(pair[0].0, pair[0].1),
-                        sdl2::rect::Point::new(pair[1].0, pair[1].1));
+                let treb_frq = state.project.tracks[i].cstrip2_params.iter()
+                    .find(|(id, _)| id == "treb_frq").map(|(_, v)| *v).unwrap_or(0.5);
+                let bass_frq = state.project.tracks[i].cstrip2_params.iter()
+                    .find(|(id, _)| id == "bass_frq").map(|(_, v)| *v).unwrap_or(0.5);
+                let lo_cap = state.project.tracks[i].cstrip2_params.iter()
+                    .find(|(id, _)| id == "lo_cap").map(|(_, v)| *v).unwrap_or(1.0);
+                let hi_cap = state.project.tracks[i].cstrip2_params.iter()
+                    .find(|(id, _)| id == "hi_cap").map(|(_, v)| *v).unwrap_or(0.0);
+
+                // Compute frequency response at each pixel column
+                // X axis: log frequency from 20 Hz to 20 kHz
+                // Y axis: dB, scaled to fit eq_h (±12 dB range)
+                let db_range = 14.0_f64; // ±7 dB visible range (enough for ±3.5 dB EQ + HP/LP)
+                let log_min = (20.0_f64).ln();
+                let log_max = (20000.0_f64).ln();
+                let sr = 44100.0_f64;
+
+                // Filter coefficients (matching DSP)
+                let hp_coef = if lo_cap < 1.0 {
+                    (1.0 - lo_cap as f64).powf(2.0) * 0.4995 + 0.0001
+                } else { 0.0 };
+                let lp_coef = if hi_cap > 0.0 {
+                    (hi_cap as f64).powf(2.0) * 0.4995 + 0.0001
+                } else { 0.0 };
+                let bass_coef = (bass_frq as f64) * (bass_frq as f64) * 0.499 + 0.001;
+                let treb_coef = (1.0 - treb_frq as f64) * (1.0 - treb_frq as f64) * 0.499 + 0.001;
+                let bass_g  = ((bass as f64)   * 2.0 - 1.0) * 0.5 + 1.0;
+                let mid_g   = ((mid as f64)    * 2.0 - 1.0) * 0.5 + 1.0;
+                let treb_g  = ((treble as f64) * 2.0 - 1.0) * 0.5 + 1.0;
+
+                let n_pts = eq_w.max(2) as usize;
+                let mut prev_px: Option<(i32, i32)> = None;
+                for px_i in 0..=n_pts {
+                    let t = px_i as f64 / n_pts as f64;
+                    let freq = (log_min + t * (log_max - log_min)).exp();
+                    let omega = 2.0 * std::f64::consts::PI * freq / sr;
+
+                    // First-order IIR magnitude response: H(z) = c / (1 - (1-c)*z^-1)
+                    // |H(e^jω)|² = c² / (1 - 2(1-c)cos(ω) + (1-c)²)
+                    let iir_mag = |c: f64| -> f64 {
+                        if c < 1e-8 { return 1.0; }
+                        let one_minus_c = 1.0 - c;
+                        let num = c * c;
+                        let den = 1.0 - 2.0 * one_minus_c * omega.cos() + one_minus_c * one_minus_c;
+                        if den > 1e-12 { (num / den).sqrt() } else { 1.0 }
+                    };
+
+                    // HP cap: HP = 1 - LP  (one-pole HP complement)
+                    let hp_mag = if hp_coef > 1e-8 {
+                        let _lp = iir_mag(hp_coef);
+                        // HP response of complement filter
+                        let one_minus_c = 1.0 - hp_coef;
+                        let cos_w = omega.cos();
+                        let sin_w = omega.sin();
+                        // HP = input - LP(input) → H_hp(z) = 1 - H_lp(z)
+                        // H_lp = c / (1 - (1-c)z^-1)
+                        // H_hp = (1 - (1-c)z^-1 - c) / (1 - (1-c)z^-1)
+                        //      = -(1-c)(1 - z^-1) / (1 - (1-c)z^-1 )  -- NOT right for this DSP
+                        // Actually the DSP does: hp_state += (input - hp_state) * coef; output = input - hp_state
+                        // hp_state = LP(input) → output = input - LP(input) = (1 - H_lp) * input
+                        let re_lp = hp_coef * (1.0 - one_minus_c * cos_w)
+                            / (1.0 - 2.0 * one_minus_c * cos_w + one_minus_c * one_minus_c);
+                        let im_lp = hp_coef * (one_minus_c * sin_w)
+                            / (1.0 - 2.0 * one_minus_c * cos_w + one_minus_c * one_minus_c);
+                        let re_hp = 1.0 - re_lp;
+                        let im_hp = -im_lp;
+                        (re_hp * re_hp + im_hp * im_hp).sqrt()
+                    } else { 1.0 };
+
+                    // LP cap
+                    let lp_mag = if lp_coef > 1e-8 { iir_mag(lp_coef) } else { 1.0 };
+
+                    // 3-band EQ response:
+                    // low_band = LP(bass_coef)
+                    // high_residual = input - LP(treb_coef)
+                    // mid_band = input - low_band - high_residual = LP(treb_coef) - LP(bass_coef)
+                    // output = low * bass_g + mid * mid_g + high * treb_g + LP(treb_coef)
+                    //        = LP(bass_coef)*(bass_g - mid_g) + LP(treb_coef)*(1 - treb_g + mid_g) + input*(treb_g - mid_g) + input*mid_g
+                    // Let's compute properly with complex phasors
+                    let lp_complex = |c: f64| -> (f64, f64) {
+                        if c < 1e-8 { return (1.0, 0.0); }
+                        let omc = 1.0 - c;
+                        let den_re = 1.0 - omc * omega.cos();
+                        let den_im = omc * omega.sin();
+                        let den_sq = den_re * den_re + den_im * den_im;
+                        if den_sq < 1e-15 { return (1.0, 0.0); }
+                        (c * den_re / den_sq, c * den_im / den_sq)
+                    };
+
+                    let (lp_bass_re, lp_bass_im) = lp_complex(bass_coef);
+                    let (lp_treb_re, lp_treb_im) = lp_complex(treb_coef);
+
+                    // low_band = LP_bass * input
+                    // high_band = (1 - LP_treb) * input
+                    // mid_band = LP_treb - LP_bass (the band between)
+                    // output = low*bass_g + mid*mid_g + high*treb_g + LP_treb
+                    // = LP_bass*bass_g + (LP_treb - LP_bass)*mid_g + (1-LP_treb)*treb_g + LP_treb
+                    // = LP_bass*(bass_g - mid_g) + LP_treb*(mid_g - treb_g + 1) + treb_g
+                    let eq_re = lp_bass_re * (bass_g - mid_g)
+                        + lp_treb_re * (mid_g - treb_g + 1.0)
+                        + treb_g;
+                    let eq_im = lp_bass_im * (bass_g - mid_g)
+                        + lp_treb_im * (mid_g - treb_g + 1.0);
+                    let eq_mag = (eq_re * eq_re + eq_im * eq_im).sqrt();
+
+                    // Total magnitude
+                    let total_mag = hp_mag * lp_mag * eq_mag;
+                    let db = if total_mag > 1e-10 { 20.0 * total_mag.log10() } else { -db_range };
+                    let db_clamped = db.clamp(-db_range, db_range);
+
+                    // Map dB to pixel Y: 0dB = mid_line, +db_range = top, -db_range = bottom
+                    let py = mid_line - (db_clamped / db_range * (eq_h as f64 / 2.0)) as i32;
+                    let px = right_x + (t * eq_w as f64) as i32;
+
+                    if let Some((ppx, ppy)) = prev_px {
+                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 200, 140, 200));
+                        let _ = canvas.draw_line(
+                            sdl2::rect::Point::new(ppx, ppy),
+                            sdl2::rect::Point::new(px, py));
+                    }
+                    prev_px = Some((px, py));
                 }
+
+                // Filled area under curve (subtle)
+                {
+                    let mut _prev_fill: Option<(i32, i32)> = None;
+                    for px_i in 0..=n_pts {
+                        let t = px_i as f64 / n_pts as f64;
+                        let freq = (log_min + t * (log_max - log_min)).exp();
+                        let omega2 = 2.0 * std::f64::consts::PI * freq / sr;
+
+                        let iir_mag2 = |c: f64| -> f64 {
+                            if c < 1e-8 { return 1.0; }
+                            let omc = 1.0 - c;
+                            let num = c * c;
+                            let den = 1.0 - 2.0 * omc * omega2.cos() + omc * omc;
+                            if den > 1e-12 { (num / den).sqrt() } else { 1.0 }
+                        };
+                        let hp_mag2 = if hp_coef > 1e-8 {
+                            let omc = 1.0 - hp_coef;
+                            let cos_w = omega2.cos();
+                            let sin_w = omega2.sin();
+                            let den_sq = 1.0 - 2.0*omc*cos_w + omc*omc;
+                            let re_lp = hp_coef*(1.0-omc*cos_w)/den_sq;
+                            let im_lp = hp_coef*(omc*sin_w)/den_sq;
+                            ((1.0-re_lp)*(1.0-re_lp)+im_lp*im_lp).sqrt()
+                        } else { 1.0 };
+                        let lp_mag2 = if lp_coef > 1e-8 { iir_mag2(lp_coef) } else { 1.0 };
+                        let lp_c2 = |c: f64| -> (f64,f64) {
+                            if c < 1e-8 { return (1.0, 0.0); }
+                            let omc = 1.0 - c;
+                            let dr = 1.0 - omc*omega2.cos();
+                            let di = omc*omega2.sin();
+                            let ds = dr*dr+di*di;
+                            if ds<1e-15 { (1.0,0.0) } else { (c*dr/ds, c*di/ds) }
+                        };
+                        let (lbr,lbi) = lp_c2(bass_coef);
+                        let (ltr,lti) = lp_c2(treb_coef);
+                        let er = lbr*(bass_g-mid_g)+ltr*(mid_g-treb_g+1.0)+treb_g;
+                        let ei = lbi*(bass_g-mid_g)+lti*(mid_g-treb_g+1.0);
+                        let em = (er*er+ei*ei).sqrt();
+                        let tm = hp_mag2*lp_mag2*em;
+                        let db2 = if tm>1e-10 { 20.0*tm.log10() } else { -db_range };
+                        let dc = db2.clamp(-db_range, db_range);
+                        let py2 = mid_line - (dc/db_range*(eq_h as f64/2.0)) as i32;
+                        let px2 = right_x + (t*eq_w as f64) as i32;
+                        // Draw vertical line from curve to mid_line
+                        if py2 != mid_line {
+                            let (ya, yb) = if py2 < mid_line { (py2, mid_line) } else { (mid_line, py2) };
+                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 200, 140, 30));
+                            let _ = canvas.draw_line(
+                                sdl2::rect::Point::new(px2, ya),
+                                sdl2::rect::Point::new(px2, yb));
+                        }
+                        _prev_fill = Some((px2, py2));
+                    }
+                }
+
+                // Label and border
                 draw_pixel_label(canvas, &state.theme, "EQ",
                     right_x + 2, eq_y + 1, 16,
                     sdl2::pixels::Color::RGBA(80, 200, 140, 110));
@@ -5213,10 +5407,6 @@ fn draw_bottom_mixer(
                 },
                 &mut pan_val,
             );
-            // "Pan" label above knob
-            draw_pixel_label_scaled(canvas, &state.theme, "Pan",
-                x + 10, bottom_y + 2, 24,
-                sdl2::pixels::Color::RGBA(120, 125, 135, 160), 1);
             if pan_changed { state.project.tracks[i].pan = pan_val; }
             if input.mouse_released && input.drag_widget == mixer_pan_id {
                 let old_pan = input.drag_start_value as f32;

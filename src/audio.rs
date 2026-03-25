@@ -2090,10 +2090,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             mix_r = mr;
                         }
                     }
-                    // Capture post-effect master level
+                    // Capture post-effect master level (before master volume)
                     {
                         let ms = (mix_l + mix_r) * 0.5;
                         master_rms_accum += (ms * ms) as f32;
+                        master_rms_l_accum += (mix_l * mix_l) as f32;
+                        master_rms_r_accum += (mix_r * mix_r) as f32;
                     }
 
                     mix_l *= smooth_master_vol;
@@ -2158,9 +2160,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         track_rms_l_accum[ti] += (sl * sl) as f32;
                         track_rms_r_accum[ti] += (sr * sr) as f32;
                     }
-                    // Master stereo accumulation
-                    master_rms_l_accum += (mix_l * mix_l) as f32;
-                    master_rms_r_accum += (mix_r * mix_r) as f32;
                     rms_frame_count += 1;
 
                     // Advance position

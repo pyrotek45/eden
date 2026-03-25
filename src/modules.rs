@@ -4602,7 +4602,7 @@ static CSTRIP2_PARAMS: &[ParamDesc] = &[
     ParamDesc { id: "hi_cap",   name: "HiCap",    default: 0.0, min: 0.0, max: 1.0, options: None },
     ParamDesc { id: "compress", name: "Compress", default: 0.0, min: 0.0, max: 1.0, options: None },
     ParamDesc { id: "comp_spd", name: "CompSpd",  default: 0.0, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "output",   name: "Output",   default: 0.33, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "output",   name: "Trim",     default: 0.5,  min: 0.0, max: 1.0, options: None },
 ];
 
 impl EffectModule for CStrip2 {
@@ -4619,7 +4619,7 @@ impl EffectModule for CStrip2 {
         let hi_cap   = param_val(params, "hi_cap",   0.0) as f64;
         let compress = param_val(params, "compress", 0.0) as f64;
         let comp_spd = param_val(params, "comp_spd", 0.0) as f64;
-        let output   = param_val(params, "output",   0.33) as f64;
+        let output   = param_val(params, "output",   0.5) as f64;
 
         // ── Hi-pass cap (lo_cap) ─────────────────────────────────────────
         // lo_cap=1.0 → no HP filter; 0.0 → aggressive cut
@@ -4684,8 +4684,9 @@ impl EffectModule for CStrip2 {
         }
 
         // ── Output gain + Spiral saturation ─────────────────────────────
-        // output 0..1 → 0..2 linear gain, through spiral
-        let out_gain = output * output * 2.0;
+        // output 0..1 → -50..+50 dB trim (0.5 = unity)
+        let trim_db = (output - 0.5) * 100.0; // -50..+50 dB
+        let out_gain = 10.0_f64.powf(trim_db / 20.0);
         l = Self::spiral(l * out_gain);
         r = Self::spiral(r * out_gain);
 
