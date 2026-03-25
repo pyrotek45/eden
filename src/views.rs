@@ -11079,8 +11079,22 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         }
     }
 
+    // Keep widget ID counters in lock-step between `input` and `dead_input`.
+    // Depending on mouse position, different draw calls receive one or the
+    // other InputState.  If we don't sync after every draw, the bottom-panel
+    // widget IDs shift when the mouse crosses the panel divider — breaking
+    // drag_widget / active_widget comparisons mid-drag.
+    macro_rules! sync_counters {
+        () => {{
+            let m = input.widget_counter.max(dead_input.widget_counter);
+            input.widget_counter = m;
+            dead_input.widget_counter = m;
+        }};
+    }
+
     // Layer 0 — background elements (blocked when any overlay is active)
     draw_transport(canvas, bg!(input), state);
+    sync_counters!();
     // Block loop/timeline ruler input if the mouse is over the bottom panel handle,
     // so the handle intercepts clicks before the ruler does.
     {
@@ -11092,27 +11106,37 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         let over_handle = input.mouse_in_rect(0, panel_y, w, handle_h + 4);
         if over_handle {
             draw_loop_ruler(canvas, &mut dead_input, state);
+            sync_counters!();
             draw_timeline_ruler(canvas, &mut dead_input, state);
+            sync_counters!();
         } else {
             draw_loop_ruler(canvas, bg_track!(input), state);
+            sync_counters!();
             draw_timeline_ruler(canvas, bg_track!(input), state);
+            sync_counters!();
         }
     }
     draw_mode_tabs(canvas, bg!(input), state);
+    sync_counters!();
     if state.sample_browser_open {
         draw_left_panel(canvas, bg!(input), state);
+        sync_counters!();
     }
     // Reset viewport/clip_rect before track rendering
     canvas.set_viewport(None);
     canvas.set_clip_rect(None);
     draw_track_headers(canvas, bg_track!(input), state);
+    sync_counters!();
     draw_track_lanes(canvas, bg_track!(input), state);
+    sync_counters!();
 
     // Re-draw rulers on top so they layer over the scrollbar that extends upward
     canvas.set_viewport(None);
     canvas.set_clip_rect(None);
     draw_loop_ruler(canvas, &mut dead_input, state);
+    sync_counters!();
     draw_timeline_ruler(canvas, &mut dead_input, state);
+    sync_counters!();
 
     // ── Drag-drop handlers (background layer only) ────────────────────────────
     if layer == crate::state::UiLayer::Base {
@@ -11558,17 +11582,10 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     // Reset viewport/clip_rect before bottom panel
     canvas.set_viewport(None);
     canvas.set_clip_rect(None);
-    // Sync widget counters: when bg_track! routed to dead_input, its counter
-    // advanced independently.  Merge the two so the bottom panel (and any
-    // later draws) starts from a counter that accounts for *all* IDs that
-    // were consumed — regardless of which InputState was used.  This keeps
-    // knob IDs stable across frames even when the mouse crosses between
-    // the top (arrangement) and bottom panels.
-    {
-        let merged = input.widget_counter.max(dead_input.widget_counter);
-        input.widget_counter = merged;
-        dead_input.widget_counter = merged;
-    }
+    // Final counter sync before bottom panel (counters have been synced after
+    // every draw call above, but drag-drop handlers may have called next_id
+    // on one InputState only).
+    sync_counters!();
     // Layer 1 — bottom panel (sits above track area)
     draw_bottom_panel(canvas, bg!(input), state);
     // Reset viewport/clip_rect after bottom panel

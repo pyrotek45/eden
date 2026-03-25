@@ -281,8 +281,8 @@ fn main() {
                     // Don't set them here to avoid scale mismatch on HiDPI.
                 }
                 Event::Window { .. } => {}
-                Event::MouseMotion { x, y, xrel, yrel, .. } => {
-                    input.on_mouse_move(x, y, xrel, yrel);
+                Event::MouseMotion { x, y, .. } => {
+                    input.on_mouse_move(x, y);
                 }
                 Event::MouseButtonDown {
                     x, y, mouse_btn, ..
