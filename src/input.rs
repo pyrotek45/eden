@@ -338,16 +338,8 @@ impl InputState {
         self.mouse_x = lx;
         self.mouse_y = ly;
 
-        if self.relative_mouse_active {
-            // Use the accumulated relative deltas — these keep firing even outside window.
-            self.mouse_dx = (self.relative_dx_raw as f32 / scale) as i32;
-            self.mouse_dy = (self.relative_dy_raw as f32 / scale) as i32;
-            self.relative_dx_raw = 0;
-            self.relative_dy_raw = 0;
-        } else {
-            self.mouse_dx = lx - self.mouse_prev_x;
-            self.mouse_dy = ly - self.mouse_prev_y;
-        }
+        self.mouse_dx = lx - self.mouse_prev_x;
+        self.mouse_dy = ly - self.mouse_prev_y;
 
         // Set drag start in logical coords the moment the press happens
         if self.mouse_pressed {
@@ -372,8 +364,7 @@ impl InputState {
             // active_widget is cleared at the START of the next frame in begin_frame().
         }
 
-        // Recompute after dragging may have just changed above.
-        self.relative_mouse_active = self.mouse_down && self.dragging;
+
     }
 
     pub fn on_key_down(&mut self, key: sdl2::keyboard::Keycode) {
