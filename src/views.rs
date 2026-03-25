@@ -3530,7 +3530,9 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         state.focused_panel = crate::state::FocusedPanel::Arrangement;
 
         // Click on empty background (no clip or widget hit) deselects everything
-        // unless shift or ctrl is held, or the bottom panel is showing a clip editor
+        // unless shift or ctrl is held, or the bottom panel is showing a clip editor.
+        // Preserve the currently-focused editor clip (MIDI, Audio, or Automation)
+        // so clicking the arranger background doesn't close the active editor.
         let preserve_clip = state.bottom_panel_open
             && state.selected_clip.map_or(false, |(tid, ci)| {
                 state
@@ -3539,7 +3541,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     .iter()
                     .find(|t| t.id == tid)
                     .and_then(|t| t.clips.get(ci))
-                    .map_or(false, |c| matches!(c, crate::models::Clip::Audio(_)))
+                    .is_some()
             });
         if input.drag_widget == WidgetId::None
             && input.active_widget == WidgetId::None
@@ -4777,7 +4779,7 @@ fn draw_bottom_mixer(
         return;
     }
 
-    let strip_w = 72i32;
+    let strip_w = 120i32;
     let track_count = state.project.tracks.len();
     let scrollbar_h = 14i32;
     let master_strip_w = strip_w + 16; // master strip reserved on right
@@ -4854,7 +4856,7 @@ fn draw_bottom_mixer(
                 &state.theme,
                 &SliderParams {
                     id: mixer_vol_id,
-                    x: x + strip_w / 2 - 8,
+                    x: x + 12,
                     y: sy + 20,
                     width: 16,
                     height: fader_h,
@@ -4887,7 +4889,7 @@ fn draw_bottom_mixer(
 
             // VU meter next to fader
             let rms = state.meters.track_rms.get(i).copied().unwrap_or(0.0);
-            let meter_x = x + strip_w / 2 + 10;
+            let meter_x = x + 32;
             let meter_y = sy + 20;
             let meter_w = 6u32;
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 20, 200));
@@ -5029,7 +5031,7 @@ fn draw_bottom_mixer(
                 &state.theme,
                 &KnobParams {
                     id: mixer_pan_id,
-                    x: x + strip_w / 2,
+                    x: x + 20,
                     y: sy + sh - 46,
                     radius: 10,
                     min: -1.0,
@@ -5124,6 +5126,78 @@ fn draw_bottom_mixer(
                         }),
                         &mut state.project,
                     );
+                }
+            }
+        }
+
+        // ── CStrip2 channel strip knobs (2 columns × 5 rows) ──
+        if sh > 80 {
+            let cs_descs = crate::modules::get_param_descs("CStrip2");
+
+            // Ensure cstrip2_params is populated with defaults
+            if state.project.tracks[i].cstrip2_params.is_empty() && !cs_descs.is_empty() {
+                state.project.tracks[i].cstrip2_params = cs_descs
+                    .iter()
+                    .map(|d| (d.id.to_string(), d.default))
+                    .collect();
+            }
+
+            let knob_r = 8i32;
+            let knob_spacing_x = 24i32;
+            let knob_spacing_y = 22i32;
+            let col0_x = x + 50;
+            let knob_base_y = sy + 22;
+
+            for (pi, desc) in cs_descs.iter().enumerate() {
+                let col = (pi / 5) as i32;
+                let row = (pi % 5) as i32;
+                let kx = col0_x + col * knob_spacing_x;
+                let ky = knob_base_y + row * knob_spacing_y;
+
+                if ky + knob_r > sy + sh - 30 {
+                    break; // not enough vertical space
+                }
+
+                // Find current value in cstrip2_params
+                let cur_val = state.project.tracks[i]
+                    .cstrip2_params
+                    .iter()
+                    .find(|(id, _)| id == desc.id)
+                    .map(|(_, v)| *v)
+                    .unwrap_or(desc.default);
+                let mut val = cur_val;
+
+                let cs_knob_id = input.next_id();
+                let changed = knob(
+                    canvas,
+                    input,
+                    &state.theme,
+                    &KnobParams {
+                        id: cs_knob_id,
+                        x: kx,
+                        y: ky,
+                        radius: knob_r,
+                        min: desc.min,
+                        max: desc.max,
+                        sensitivity: 0.005,
+                        label: None,
+                        bipolar: false,
+                        default_value: Some(desc.default),
+                        hint: Some(desc.name.into()),
+                        snap_points: vec![],
+                    },
+                    &mut val,
+                );
+
+                if changed {
+                    if let Some(entry) = state.project.tracks[i]
+                        .cstrip2_params
+                        .iter_mut()
+                        .find(|(id, _)| id == desc.id)
+                    {
+                        entry.1 = val;
+                    }
+                    state.dirty = true;
                 }
             }
         }
@@ -21551,6 +21625,19 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 "Toggle mute or solo per track",
                 false,
             ),
+            ("", "", false),
+            ("── CStrip2 (per-track) ──", "", true),
+            ("Treble", "High-frequency EQ gain (0.5 = unity)", false),
+            ("Mid", "Mid-frequency EQ gain (0.5 = unity)", false),
+            ("Bass", "Low-frequency EQ gain (0.5 = unity)", false),
+            ("TrebFreq", "Treble band crossover frequency", false),
+            ("BassFreq", "Bass band crossover frequency", false),
+            ("LoCap", "Hi-pass filter (1.0 = off, 0.0 = full cut)", false),
+            ("HiCap", "Lo-pass filter (0.0 = off, 1.0 = full cut)", false),
+            ("Compress", "Compressor amount (0.0 = off)", false),
+            ("CompSpd", "Compressor speed / attack", false),
+            ("Output", "Output gain + soft saturation (0.33 = unity)", false),
+            ("  Shift+Click knob", "Reset to default (neutral)", false),
             ("", "", false),
             ("── Effect Rack ──", "", true),
             (

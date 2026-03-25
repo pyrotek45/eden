@@ -536,6 +536,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         // Also covers master rack: smooth_master_fx_params[slot].
         let mut smooth_track_fx_params: Vec<Vec<Vec<(String, f32)>>> = Vec::new();
         let mut smooth_master_fx_params: Vec<Vec<(String, f32)>> = Vec::new();
+        // Per-track CStrip2 param smoothing cache: [track] → Vec<(param_name, smoothed_value)>
+        let mut smooth_cstrip_params: Vec<Vec<(String, f32)>> = Vec::new();
         // Coefficient: ~1 ms @ 44.1kHz (same as pan/vol smoothing)
         const FX_SMOOTH_COEFF: f32 = 0.002;
 
@@ -1097,8 +1099,16 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             }
                             // ── CStrip2 channel strip ──
                             if ti < track_cstrip.len() {
-                                let cs_params = &snap.tracks[ti].cstrip2_params;
-                                if !cs_params.is_empty() {
+                                let cs_raw = &snap.tracks[ti].cstrip2_params;
+                                if !cs_raw.is_empty() {
+                                    let cs_params: &[(String, f32)] =
+                                        if ti < smooth_cstrip_params.len()
+                                            && smooth_cstrip_params[ti].len() == cs_raw.len()
+                                        {
+                                            &smooth_cstrip_params[ti]
+                                        } else {
+                                            cs_raw
+                                        };
                                     let (cl, cr) = track_cstrip[ti].process(
                                         cb_per_track_sample[ti].0,
                                         cb_per_track_sample[ti].1,
@@ -1464,6 +1474,26 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
                     for (pi, p) in params.iter().enumerate() {
                         param_cache[pi].1 += (p.1 - param_cache[pi].1) * coeff;
+                    }
+                }
+
+                // Smooth CStrip2 channel-strip params per track
+                while smooth_cstrip_params.len() < snap.tracks.len() {
+                    smooth_cstrip_params.push(Vec::new());
+                }
+                for (ti, track) in snap.tracks.iter().enumerate() {
+                    let cs_raw = &track.cstrip2_params;
+                    if !cs_raw.is_empty() {
+                        let cache = &mut smooth_cstrip_params[ti];
+                        if cache.len() < cs_raw.len() {
+                            for pi in cache.len()..cs_raw.len() {
+                                cache.push(cs_raw[pi].clone());
+                            }
+                        }
+                        let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
+                        for (pi, p) in cs_raw.iter().enumerate() {
+                            cache[pi].1 += (p.1 - cache[pi].1) * coeff;
+                        }
                     }
                 }
 
@@ -1943,8 +1973,16 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                         // ── CStrip2 channel strip ──
                         if ti < track_cstrip.len() {
-                            let cs_params = &track.cstrip2_params;
-                            if !cs_params.is_empty() {
+                            let cs_raw = &track.cstrip2_params;
+                            if !cs_raw.is_empty() {
+                                let cs_params: &[(String, f32)] =
+                                    if ti < smooth_cstrip_params.len()
+                                        && smooth_cstrip_params[ti].len() == cs_raw.len()
+                                    {
+                                        &smooth_cstrip_params[ti]
+                                    } else {
+                                        cs_raw
+                                    };
                                 let (cl, cr) = track_cstrip[ti].process(
                                     per_track_sample[ti].0,
                                     per_track_sample[ti].1,

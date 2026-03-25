@@ -1,87 +1,171 @@
-# DSP Optimization Guide
+# DSP Notes# DSP Optimization Guide
+
 ## (Oscillators + Filters, real-time audio focus)
+
+## Per-Sample Cost
 
 ## ⚙️ 1. General Performance Principles
 
-### 🔹 Minimize per-sample work
-Audio runs at 44.1k–192k samples/sec. Even tiny inefficiencies explode.
+- 44.1 kHz–192 kHz sample rates
+
+- Hoist invariants out of sample loops### 🔹 Minimize per-sample work
+
+- Recompute filter coefficients only on parameter changeAudio runs at 44.1k–192k samples/sec. Even tiny inefficiencies explode.
+
 - Prefer block processing over per-sample when possible
-- Hoist invariant calculations out of loops
+
+## Expensive Operations- Hoist invariant calculations out of loops
+
 - Avoid recalculating coefficients unless parameters change
 
-### 🔹 Avoid expensive operations
+- `sin`, `cos`, `tan`, `pow`, `log`, division
+
+- Replace with: lookup tables, polynomial approximations, precomputed constants### 🔹 Avoid expensive operations
+
 These are slow:
-- `sin`, `cos`, `tan`
+
+## Oscillators- `sin`, `cos`, `tan`
+
 - division (`/`)
-- `pow`/`log`
 
-Replace with:
-- Lookup tables
-- Polynomial approximations
-- Precomputed constants
+- Phase accumulator: `phase += inc; phase -= phase.floor();`- `pow`/`log`
 
-### 🔹 Use cache-friendly memory
+- Wavetable with linear interpolation (power-of-two size, bitmask index)
+
+- PolyBLEP for saw/square/pulse (branchless variant preferred)Replace with:
+
+- Triangle is continuous — no BLEP needed- Lookup tables
+
+- Cache phase increment — only update on frequency change- Polynomial approximations
+
+- `mul_add` for FMA on supported CPUs- Precomputed constants
+
+
+
+## Filters### 🔹 Use cache-friendly memory
+
 - Keep data contiguous
-- Avoid pointer chasing
-- Align buffers (SIMD friendly)
 
-### 🔹 Branching is expensive
+- Transposed Direct Form II: `y = b0*x + z1; z1 = b1*x - a1*y + z2; z2 = b2*x - a2*y;`- Avoid pointer chasing
+
+- State Variable Filter (SVF): flexible, stable- Align buffers (SIMD friendly)
+
+- Precompute coefficients outside sample loop
+
+- `tan()` approximation for small x: `x + 0.333*x³`### 🔹 Branching is expensive
+
 Avoid: `if (x > 0) ...`
-Use: branchless math, lookup or masks
 
----
+## DenormalsUse: branchless math, lookup or masks
+
+
+
+- Add `1e-18` to filter states, or enable FTZ+DAZ: `_mm_setcsr(_mm_getcsr() | 0x8040)`---
+
+- Subnormal floats cause 10–100x slowdown in IIR feedback paths
 
 ## 🎚️ 2. Oscillator Optimization
 
+## Parameter Smoothing
+
 ### ✅ Use Phase Accumulators
+
+- One-pole: `param += coeff * (target - param)````
+
+- `coeff = 1 - e^(-2π·fc/sr)` — typical fc = 70–200 Hzphase += phaseIncrement;
+
+- Eden uses `coeff = 0.002` (~0.7 ms @ 44.1 kHz)if phase >= 1.0 { phase -= 1.0; }
+
 ```
-phase += phaseIncrement;
-if phase >= 1.0 { phase -= 1.0; }
-```
-- Use fixed-point or float wrapping
+
+## Memory- Use fixed-point or float wrapping
+
 - Avoid fmod (slow)
 
-### ✅ Replace sin() with lookup tables
-Basic: `output = table[(phase * tableSize) as usize]`
-Better (interpolated):
+- Stack arrays over heap: `let buf = [0.0f64; 64];`
+
+- Pre-allocate all buffers before audio callback### ✅ Replace sin() with lookup tables
+
+- Never `Vec::push`, `String`, `Box::new` in hot pathBasic: `output = table[(phase * tableSize) as usize]`
+
+- Contiguous, cache-friendly layouts (SoA over AoS for SIMD)Better (interpolated):
+
 ```
-let i = phase as usize;
+
+## Branchinglet i = phase as usize;
+
 let frac = phase - i as f64;
-output = table[i] + frac * (table[i+1] - table[i]);
-```
 
-### ✅ Use Polynomial Approximations
+- Branchless: `let mask = (x > 0.0) as i32 as f32; out = mask * a + (1.0 - mask) * b;`output = table[i] + frac * (table[i+1] - table[i]);
+
+- Iterators often optimize better than manual indexing```
+
+
+
+## Rust-Specific### ✅ Use Polynomial Approximations
+
 For sine: 3rd–5th order polynomials are often enough
-```rust
-fn fast_sin(x: f64) -> f64 {
-    // Bhaskara I approximation or similar
-}
+
+- `#[inline(always)]` on hot DSP functions```rust
+
+- `unsafe { get_unchecked }` to remove bounds checks (profile first)fn fast_sin(x: f64) -> f64 {
+
+- `f64` for inner DSP accumulation, `f32` only at final output    // Bhaskara I approximation or similar
+
+- `cargo build --release` — debug builds are 10–50x slower for DSP}
+
 ```
-Tradeoff: faster, less accurate — great for modulation, good enough for audio
 
-### ✅ Bandlimited Oscillators (efficiently)
-Naive waveforms → aliasing. Efficient solutions:
-- **PolyBLEP / PolyBLAMP** ← sweet spot
+## SIMDTradeoff: faster, less accurate — great for modulation, good enough for audio
+
+
+
+- `std::simd::f32x4` / `f64x4` for block processing### ✅ Bandlimited Oscillators (efficiently)
+
+- `#[repr(align(16))]` on buffersNaive waveforms → aliasing. Efficient solutions:
+
+- Process in blocks of 4–8 samples- **PolyBLEP / PolyBLAMP** ← sweet spot
+
 - Wavetable with mipmaps
-- MinBLEP (higher quality, more CPU)
 
-**Pro tip:** Precompute phase increment + BLEP corrections. Only update when frequency changes.
+## Profiling- MinBLEP (higher quality, more CPU)
 
----
+
+
+- `cargo flamegraph`**Pro tip:** Precompute phase increment + BLEP corrections. Only update when frequency changes.
+
+- `perf stat` / `perf record`
+
+- `criterion` for micro-benchmarks---
+
+- PGO: `RUSTFLAGS="-Cprofile-generate"` then `"-Cprofile-use"`
 
 ## 🔊 3. Filter Optimization
 
+## Checklist
+
 ### ✅ Use the Right Structure
-- Direct Form I/II → simple but less stable
-- **Transposed Direct Form II → best balance (recommended)**
-- **State Variable Filter (SVF) → flexible + stable** ← we use this
 
-### ✅ Precompute coefficients
-**Bad:** compute cutoff, resonance, coefficients for each sample
-**Good:** if paramsChanged: update coefficients once
+- [ ] Phase accumulator (no `fmod`)- Direct Form I/II → simple but less stable
 
-### ✅ Avoid tan() in real-time
-Common in SVF: `g = tan(π * cutoff / sampleRate)`
+- [ ] Wavetable or PolyBLEP oscillators- **Transposed Direct Form II → best balance (recommended)**
+
+- [ ] Transposed DF2 / SVF filters- **State Variable Filter (SVF) → flexible + stable** ← we use this
+
+- [ ] Coefficients updated only on change
+
+- [ ] No trig/division in inner loop### ✅ Precompute coefficients
+
+- [ ] Denormal protection**Bad:** compute cutoff, resonance, coefficients for each sample
+
+- [ ] Block processing where possible**Good:** if paramsChanged: update coefficients once
+
+- [ ] Index-based parameter lookup (no string search per sample)
+
+- [ ] No heap allocations in audio callback### ✅ Avoid tan() in real-time
+
+- [ ] Precomputed dB→linear, frequency→Hz tablesCommon in SVF: `g = tan(π * cutoff / sampleRate)`
+
 Instead:
 - Compute once per parameter change
 - Or approximate tan() with polynomial
