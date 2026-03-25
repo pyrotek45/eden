@@ -146,6 +146,8 @@ pub struct AudioTrack {
     /// Sidechain source track index per effect slot (parallel to effect_slots).
     /// None = use own signal as key (normal). Some(ti) = use track ti's pre-effect output.
     pub effect_sidechain_track: Vec<Option<usize>>,
+    /// Channel strip (CStrip2) params — applied after the effect chain, before pan/vol.
+    pub cstrip2_params: Vec<(String, f32)>,
     // ── Extra data for instruments (e.g. sampler buffers) ──
     pub extra: ModuleExtra,
 }
@@ -481,6 +483,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         // Keyed by track index.  Rebuilt when module names change.
         let mut track_instruments: Vec<Option<(String, Box<dyn InstrumentModule>)>> = Vec::new();
         let mut track_effects: Vec<Vec<(String, Box<dyn EffectModule>)>> = Vec::new();
+        // Per-track CStrip2 channel-strip instances (always-present, one per track).
+        let mut track_cstrip: Vec<Box<dyn EffectModule>> = Vec::new();
         // Persistent per-track MIDI effect instances (one Vec per track).
         // Rebuilt when midi_effect_slots change, like track_effects above.
         let mut track_midi_effects: Vec<Vec<Box<dyn MidiEffect>>> = Vec::new();
@@ -857,6 +861,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     while track_effects.len() < num_tracks {
                         track_effects.push(Vec::new());
                     }
+                    while track_cstrip.len() < num_tracks {
+                        track_cstrip.push(create_effect("CStrip2", sample_rate as u32).unwrap());
+                    }
                     for (ti, track) in snap.tracks.iter().enumerate() {
                         if ti >= track_instruments.len() {
                             break;
@@ -1094,6 +1101,19 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     }
                                 }
                             }
+                            // ── CStrip2 channel strip ──
+                            if ti < track_cstrip.len() {
+                                let cs_params = &snap.tracks[ti].cstrip2_params;
+                                if !cs_params.is_empty() {
+                                    let (cl, cr) = track_cstrip[ti].process(
+                                        cb_per_track_sample[ti].0,
+                                        cb_per_track_sample[ti].1,
+                                        cs_params,
+                                        sample_rate,
+                                    );
+                                    cb_per_track_sample[ti] = (cl, cr);
+                                }
+                            }
                             let post_mono =
                                 ((cb_per_track_sample[ti].0 + cb_per_track_sample[ti].1) * 0.5) as f32;
                             if ti < preview_rms_accum.len() {
@@ -1297,6 +1317,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
                     while track_effects.len() < num_tracks {
                         track_effects.push(Vec::new());
+                    }
+                    while track_cstrip.len() < num_tracks {
+                        track_cstrip.push(create_effect("CStrip2", sample_rate as u32).unwrap());
                     }
                     while track_midi_effects.len() < num_tracks {
                         track_midi_effects.push(Vec::new());
@@ -1929,6 +1952,19 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     sample_rate,
                                 );
                                 per_track_sample[ti] = (ol, or2);
+                            }
+                        }
+                        // ── CStrip2 channel strip ──
+                        if ti < track_cstrip.len() {
+                            let cs_params = &track.cstrip2_params;
+                            if !cs_params.is_empty() {
+                                let (cl, cr) = track_cstrip[ti].process(
+                                    per_track_sample[ti].0,
+                                    per_track_sample[ti].1,
+                                    cs_params,
+                                    sample_rate,
+                                );
+                                per_track_sample[ti] = (cl, cr);
                             }
                         }
                     }

@@ -3903,7 +3903,37 @@ fn handle_clip_drag(
             let total_dx_px = input.mouse_x - input.drag_start_x;
             let raw_delta = total_dx_px as f64 / zoom;
             let raw = (input.drag_start_value + raw_delta).max(0.0);
-            let snapped = state.snap.snap_proximity(raw, snap_threshold);
+            // Collect clip-edge candidates on the same track (excluding the dragged clip)
+            // so that snap also "clicks" onto neighbour clip ends, allowing gap-free placement.
+            let clip_len = state
+                .project
+                .tracks
+                .iter()
+                .find(|t| t.id == tid)
+                .and_then(|t| t.clips.get(ci))
+                .map(|c| c.length())
+                .unwrap_or(0.0);
+            let edge_candidates: Vec<f64> = state
+                .project
+                .tracks
+                .iter()
+                .find(|t| t.id == tid)
+                .map(|t| {
+                    t.clips
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, _)| *idx != ci)
+                        .flat_map(|(_, c)| {
+                            let s = c.start_time();
+                            let e = s + c.length();
+                            // snap our start to their end, or our end (raw+clip_len) to their start
+                            [e, s - clip_len]
+                        })
+                        .filter(|&v| v >= 0.0)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let snapped = state.snap.snap_with_edges(raw, snap_threshold, &edge_candidates);
             let actual_delta = snapped - input.drag_start_value;
 
             let top = state.track_area_top();
@@ -4225,9 +4255,24 @@ fn handle_clip_drag(
             let orig_start = input.drag_start_value2; // original left edge (for undo)
             let orig_len = orig_end - orig_start;
             let raw_start = cursor_beat.max(0.0).min(orig_end - min_clip_len);
+            // Edge candidates: other clips' end positions that our left edge can snap to
+            let left_edge_candidates: Vec<f64> = state
+                .project
+                .tracks
+                .iter()
+                .find(|t| t.id == tid)
+                .map(|t| {
+                    t.clips
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, _)| *idx != ci)
+                        .map(|(_, c)| c.start_time() + c.length())
+                        .collect()
+                })
+                .unwrap_or_default();
             let snapped_start = state
                 .snap
-                .snap_proximity(raw_start, snap_threshold)
+                .snap_with_edges(raw_start, snap_threshold, &left_edge_candidates)
                 .clamp(0.0, orig_end - min_clip_len);
             let new_len = orig_end - snapped_start;
             let delta_start = snapped_start - orig_start;
@@ -4432,17 +4477,34 @@ fn handle_clip_drag(
                         }
                     });
 
+                // Edge candidates: lengths that place our right edge at another clip's start
+                let right_edge_candidates: Vec<f64> = state
+                    .project
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .map(|t| {
+                        t.clips
+                            .iter()
+                            .enumerate()
+                            .filter(|(idx, _)| *idx != ci)
+                            .map(|(_, c)| c.start_time() - orig_start)
+                            .filter(|&v| v > min_clip_len)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
                 if let Some(max_len) = audio_max_len {
                     state
                         .snap
-                        .snap_proximity(raw_len, snap_threshold)
+                        .snap_with_edges(raw_len, snap_threshold, &right_edge_candidates)
                         .max(min_clip_len)
                         .min(max_len)
                 } else {
                     // MIDI clip or no waveform info — allow free resize
                     state
                         .snap
-                        .snap_proximity(raw_len, snap_threshold)
+                        .snap_with_edges(raw_len, snap_threshold, &right_edge_candidates)
                         .max(min_clip_len)
                 }
             };
@@ -14917,7 +14979,7 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
     canvas.set_draw_color(Theme::c(state.theme.bg_dark));
     let _ = canvas.fill_rect(Rect::new(0, top, w as u32, h as u32));
 
-    let strip_w = 80;
+    let strip_w = 160; // 80 for fader/pan/mute, 80 for CStrip2 knobs
     let track_count = state.project.tracks.len();
     let scrollbar_h = 18i32;
     let mixer_scroll = state.mixer_scroll_x as i32;
@@ -15204,6 +15266,93 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
                 state.dirty = true;
             }
         } // end non-automation mute/solo
+
+        // ── CStrip2 channel strip knobs ──────────────────────────────
+        // Divider between fader section and channel strip section
+        canvas.set_draw_color(Theme::c(state.theme.panel_border));
+        let _ = canvas.draw_line(
+            sdl2::rect::Point::new(x + 82, sy + 6),
+            sdl2::rect::Point::new(x + 82, sy + sh - 1),
+        );
+
+        // Label
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            "Strip",
+            x + 84,
+            sy + 8,
+            74,
+            sdl2::pixels::Color::RGBA(160, 160, 180, 200),
+        );
+
+        // Helper: 10 CStrip2 params arranged 2 columns × 5 rows
+        // Col 0: x+96, Col 1: x+136. Row spacing: (sh-40)/5 per row.
+        let cs_knob_row_h = ((sh - 40) / 5).max(24);
+        let cs_knob_y0 = sy + 24;
+        let cs_col0 = x + 96;
+        let cs_col1 = x + 136;
+        let cstrip2_param_descs: &[(&str, &str, f32, bool)] = &[
+            ("treble",   "Treb",  0.5,  false),
+            ("treb_frq", "TrFrq", 0.5,  false),
+            ("mid",      "Mid",   0.5,  false),
+            ("bass",     "Bass",  0.5,  false),
+            ("bass_frq", "BsFrq", 0.5,  false),
+            ("lo_cap",   "LoCap", 1.0,  false),
+            ("hi_cap",   "HiCap", 0.0,  false),
+            ("compress", "Comp",  0.0,  false),
+            ("comp_spd", "CSpd",  0.0,  false),
+            ("output",   "Out",   0.33, false),
+        ];
+
+        // Ensure cstrip2_params has all 10 entries for this track
+        {
+            let track = &mut state.project.tracks[i];
+            for &(id, _, def, _) in cstrip2_param_descs {
+                if !track.cstrip2_params.iter().any(|(k, _)| k == id) {
+                    track.cstrip2_params.push((id.to_string(), def));
+                }
+            }
+        }
+
+        for (ki, &(pid, plabel, pdef, _)) in cstrip2_param_descs.iter().enumerate() {
+            let col = ki / 5;
+            let row = ki % 5;
+            let kx = if col == 0 { cs_col0 } else { cs_col1 };
+            let ky = cs_knob_y0 + row as i32 * cs_knob_row_h + cs_knob_row_h / 2;
+
+            let cs_knob_id = input.next_id();
+            let cur_val_idx = state.project.tracks[i]
+                .cstrip2_params
+                .iter()
+                .position(|(k, _)| k == pid)
+                .unwrap_or(0);
+            let mut knob_val = state.project.tracks[i].cstrip2_params[cur_val_idx].1;
+            let knob_changed = knob(
+                canvas,
+                input,
+                &state.theme,
+                &KnobParams {
+                    id: cs_knob_id,
+                    x: kx,
+                    y: ky,
+                    radius: 10,
+                    min: 0.0,
+                    max: 1.0,
+                    sensitivity: 0.006,
+                    label: Some(plabel.to_string()),
+                    bipolar: false,
+                    default_value: Some(pdef),
+                    hint: Some(format!("CStrip2 {}", plabel)),
+                    snap_points: vec![],
+                },
+                &mut knob_val,
+            );
+            if knob_changed {
+                state.project.tracks[i].cstrip2_params[cur_val_idx].1 = knob_val;
+                state.dirty = true;
+            }
+        }
 
         // Selection border
         if selected {

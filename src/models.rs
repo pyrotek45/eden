@@ -710,6 +710,11 @@ pub struct Track {
     /// Whether automation on this track is enabled (only for Automation tracks).
     #[serde(default = "default_true")]
     pub automation_enabled: bool,
+    /// Channel strip (CStrip2) parameters. Empty = default values (strip is bypassed when
+    /// all params are at their defaults, but still applies if any are adjusted).
+    /// Stored as (param_id, value) pairs matching CStrip2's CSTRIP2_PARAMS order.
+    #[serde(default)]
+    pub cstrip2_params: Vec<(String, f32)>,
 }
 
 fn default_true() -> bool {
@@ -757,6 +762,7 @@ impl Track {
             instrument_idx: 0,
             sampler_file: None,
             automation_enabled: true,
+            cstrip2_params: Vec::new(),
         }
     }
 }

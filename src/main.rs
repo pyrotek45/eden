@@ -1662,6 +1662,7 @@ fn main() {
                     effect_slots,
                     midi_effect_slots,
                     effect_sidechain_track,
+                    cstrip2_params: track.cstrip2_params.clone(),
                     extra,
                 });
             }

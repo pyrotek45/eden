@@ -67,6 +67,35 @@ impl SnapSettings {
             beats
         }
     }
+
+    /// Proximity snap that also considers explicit candidate snap points (clip edges).
+    /// Snaps to the nearest candidate or grid line within `threshold_beats`.
+    /// `candidates` should include the ends (and optionally starts) of neighbouring clips.
+    pub fn snap_with_edges(&self, beats: f64, threshold_beats: f64, candidates: &[f64]) -> f64 {
+        if !self.enabled {
+            return beats;
+        }
+        // Best grid-line snap
+        let r = self.resolution_beats();
+        let grid_nearest = (beats / r).round() * r;
+        let mut best = grid_nearest;
+        let mut best_dist = (beats - grid_nearest).abs();
+
+        // Also check all candidate clip-edge points
+        for &c in candidates {
+            let d = (beats - c).abs();
+            if d < best_dist {
+                best_dist = d;
+                best = c;
+            }
+        }
+
+        if best_dist <= threshold_beats {
+            best
+        } else {
+            beats
+        }
+    }
 }
 
 impl Default for SnapSettings {

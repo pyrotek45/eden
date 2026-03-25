@@ -251,6 +251,7 @@ pub fn render_to_buffer(
             effect_slots,
             midi_effect_slots,
             effect_sidechain_track,
+            cstrip2_params: track.cstrip2_params.clone(),
             extra: ModuleExtra::default(),
         });
     }
@@ -276,6 +277,10 @@ pub fn render_to_buffer(
                 .filter_map(|(name, _)| create_effect(name, sample_rate))
                 .collect()
         })
+        .collect();
+    let mut track_cstrip_r: Vec<Box<dyn EffectModule>> = render_tracks
+        .iter()
+        .map(|_| create_effect("CStrip2", sample_rate).unwrap())
         .collect();
     let mut track_midi_effects: Vec<Vec<Box<dyn MidiEffect>>> = render_tracks
         .iter()
@@ -607,6 +612,19 @@ pub fn render_to_buffer(
                     per_track_sample[ti] = (ol, or2);
                 }
             }
+            // CStrip2 channel strip (first render fn)
+            if ti < track_cstrip_r.len() {
+                let cs_params = &render_tracks[ti].cstrip2_params;
+                if !cs_params.is_empty() {
+                    let (cl, cr) = track_cstrip_r[ti].process(
+                        per_track_sample[ti].0,
+                        per_track_sample[ti].1,
+                        cs_params,
+                        sample_rate as f64,
+                    );
+                    per_track_sample[ti] = (cl, cr);
+                }
+            }
         }
 
         // Stereo mix with equal-power pan
@@ -906,6 +924,7 @@ pub fn render_to_wav_with_progress(
             effect_slots,
             midi_effect_slots,
             effect_sidechain_track,
+            cstrip2_params: track.cstrip2_params.clone(),
             extra,
         });
     }
@@ -947,6 +966,10 @@ pub fn render_to_wav_with_progress(
                 .filter_map(|(name, _)| create_effect(name, sample_rate))
                 .collect()
         })
+        .collect();
+    let mut track_cstrip_r: Vec<Box<dyn EffectModule>> = render_tracks
+        .iter()
+        .map(|_| create_effect("CStrip2", sample_rate).unwrap())
         .collect();
     let mut track_midi_effects_wav: Vec<Vec<Box<dyn MidiEffect>>> = render_tracks
         .iter()
@@ -1458,6 +1481,19 @@ pub fn render_to_wav_with_progress(
                     per_track_sample[ti] = (ol, or2);
                 }
             }
+            // CStrip2 channel strip (second render fn)
+            if ti < track_cstrip_r.len() {
+                let cs_params = &render_tracks[ti].cstrip2_params;
+                if !cs_params.is_empty() {
+                    let (cl, cr) = track_cstrip_r[ti].process(
+                        per_track_sample[ti].0,
+                        per_track_sample[ti].1,
+                        cs_params,
+                        sample_rate as f64,
+                    );
+                    per_track_sample[ti] = (cl, cr);
+                }
+            }
         }
 
         // Stereo mix with equal-power pan
@@ -1647,6 +1683,19 @@ pub fn render_to_wav_with_progress(
                             sample_rate as f64,
                         );
                         per_track_sample[ti] = (ol, or2);
+                    }
+                }
+                // CStrip2 channel strip (tail render fn)
+                if ti < track_cstrip_r.len() {
+                    let cs_params = &render_tracks[ti].cstrip2_params;
+                    if !cs_params.is_empty() {
+                        let (cl, cr) = track_cstrip_r[ti].process(
+                            per_track_sample[ti].0,
+                            per_track_sample[ti].1,
+                            cs_params,
+                            sample_rate as f64,
+                        );
+                        per_track_sample[ti] = (cl, cr);
                     }
                 }
             }

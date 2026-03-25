@@ -4450,6 +4450,253 @@ impl EffectModule for FxAutoduck {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// CStrip2 — Airwindows-style channel strip
+// 3-band EQ (Triplet) + ButterComp + Spiral output saturation
+// ═══════════════════════════════════════════════════════════════════
+
+/// Per-channel IIR filter state for the 6-pole hi-pass and lo-pass caps.
+#[derive(Clone, Default)]
+struct CsHpLpState {
+    hp: [f64; 6],
+    lp: [f64; 6],
+}
+
+/// Butter-style compressor state (4-way dual-rail).
+#[derive(Clone, Default)]
+struct CsCompState {
+    avg:   f64,
+    nvg:   f64,
+    tar_pos: f64,
+    tar_neg: f64,
+    ctrl_a_pos: f64,
+    ctrl_b_pos: f64,
+    ctrl_a_neg: f64,
+    ctrl_b_neg: f64,
+}
+
+pub struct CStrip2 {
+    // 6-pole hi-pass / lo-pass filter states (L, R)
+    fl: CsHpLpState,
+    fr: CsHpLpState,
+    // Hi-shelf IIR (dual-rail, both channels)
+    iir_hl: f64,
+    iir_hr: f64,
+    // Compressor state (L, R)
+    cl: CsCompState,
+    cr: CsCompState,
+    // 3-band Triplet EQ
+    tri_la: f64, tri_lb: f64, tri_lc: f64,
+    tri_ra: f64, tri_rb: f64, tri_rc: f64,
+    last_l: f64,  last2_l: f64,
+    last_r: f64,  last2_r: f64,
+    // Dithering seeds
+    fpd_l: u32,
+    fpd_r: u32,
+    // flip / counter
+    flip: bool,
+    flip3: i32,
+    count: i32,
+}
+
+impl CStrip2 {
+    pub fn new() -> Self {
+        Self {
+            fl: CsHpLpState::default(),
+            fr: CsHpLpState::default(),
+            iir_hl: 0.0,
+            iir_hr: 0.0,
+            cl: CsCompState::default(),
+            cr: CsCompState::default(),
+            tri_la: 0.0, tri_lb: 0.0, tri_lc: 0.0,
+            tri_ra: 0.0, tri_rb: 0.0, tri_rc: 0.0,
+            last_l: 0.0, last2_l: 0.0,
+            last_r: 0.0, last2_r: 0.0,
+            fpd_l: 1,
+            fpd_r: 1,
+            flip: false,
+            flip3: 0,
+            count: 0,
+        }
+    }
+
+    /// 6-pole RC hi-pass filter — state is the 6-element slice.
+    #[inline]
+    fn apply_hpcap(hp: &mut [f64; 6], inp: f64, coef: f64) -> f64 {
+        hp[0] = (hp[0] * (1.0 - coef)) + (inp * coef);
+        hp[1] = (hp[1] * (1.0 - coef)) + (hp[0] * coef);
+        hp[2] = (hp[2] * (1.0 - coef)) + (hp[1] * coef);
+        hp[3] = (hp[3] * (1.0 - coef)) + (hp[2] * coef);
+        hp[4] = (hp[4] * (1.0 - coef)) + (hp[3] * coef);
+        hp[5] = (hp[5] * (1.0 - coef)) + (hp[4] * coef);
+        inp - hp[5]
+    }
+
+    /// 6-pole RC lo-pass filter.
+    #[inline]
+    fn apply_lpcap(lp: &mut [f64; 6], inp: f64, coef: f64) -> f64 {
+        lp[0] = (lp[0] * (1.0 - coef)) + (inp * coef);
+        lp[1] = (lp[1] * (1.0 - coef)) + (lp[0] * coef);
+        lp[2] = (lp[2] * (1.0 - coef)) + (lp[1] * coef);
+        lp[3] = (lp[3] * (1.0 - coef)) + (lp[2] * coef);
+        lp[4] = (lp[4] * (1.0 - coef)) + (lp[3] * coef);
+        lp[5] = (lp[5] * (1.0 - coef)) + (lp[4] * coef);
+        lp[5]
+    }
+
+    /// Single-channel ButterComp tick.
+    /// Returns the compressed output.
+    #[inline]
+    fn butter_comp(cs: &mut CsCompState, inp: f64, spd: f64, compress: f64) -> f64 {
+        // Running average + variance
+        cs.avg = cs.avg * (1.0 - spd) + inp * spd;
+        cs.nvg = cs.nvg * (1.0 - spd) + (cs.avg - inp).abs() * spd;
+
+        // Positive rail
+        let pos_val = inp.max(0.0);
+        cs.tar_pos = cs.tar_pos * (1.0 - spd) + pos_val * spd;
+        let pos_gain = if cs.tar_pos > 0.0 {
+            let ratio = cs.ctrl_b_pos / cs.tar_pos;
+            cs.ctrl_a_pos = cs.ctrl_a_pos * (1.0 - spd) + ratio * spd;
+            cs.ctrl_b_pos = cs.ctrl_b_pos * (1.0 - spd) + cs.ctrl_a_pos * spd;
+            cs.ctrl_b_pos
+        } else {
+            1.0
+        };
+
+        // Negative rail
+        let neg_val = (-inp).max(0.0);
+        cs.tar_neg = cs.tar_neg * (1.0 - spd) + neg_val * spd;
+        let neg_gain = if cs.tar_neg > 0.0 {
+            let ratio = cs.ctrl_b_neg / cs.tar_neg;
+            cs.ctrl_a_neg = cs.ctrl_a_neg * (1.0 - spd) + ratio * spd;
+            cs.ctrl_b_neg = cs.ctrl_b_neg * (1.0 - spd) + cs.ctrl_a_neg * spd;
+            cs.ctrl_b_neg
+        } else {
+            1.0
+        };
+
+        let gain = if inp >= 0.0 { pos_gain } else { neg_gain };
+        // Mix dry and compressed
+        let gain_clamped = gain.clamp(0.0, 2.0);
+        inp * (1.0 - compress) + inp * gain_clamped * compress
+    }
+
+    /// Airwindows Spiral saturation (smooth soft-clipper).
+    #[inline]
+    fn spiral(x: f64) -> f64 {
+        if x.abs() > 1.0 {
+            x.signum()
+        } else {
+            x - (x * x * x) / 3.0
+        }
+    }
+}
+
+static CSTRIP2_PARAMS: &[ParamDesc] = &[
+    ParamDesc { id: "treble",   name: "Treble",   default: 0.5, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "mid",      name: "Mid",      default: 0.5, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "bass",     name: "Bass",     default: 0.5, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "treb_frq", name: "TrebFreq", default: 0.5, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "bass_frq", name: "BassFreq", default: 0.5, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "lo_cap",   name: "LoCap",    default: 1.0, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "hi_cap",   name: "HiCap",    default: 0.0, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "compress", name: "Compress", default: 0.0, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "comp_spd", name: "CompSpd",  default: 0.0, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "output",   name: "Output",   default: 0.33, min: 0.0, max: 1.0, options: None },
+];
+
+impl EffectModule for CStrip2 {
+    fn name(&self) -> &'static str { "CStrip2" }
+    fn params(&self) -> &'static [ParamDesc] { CSTRIP2_PARAMS }
+
+    fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], _sr: f64) -> (f64, f64) {
+        let treble   = param_val(params, "treble",   0.5) as f64;
+        let mid      = param_val(params, "mid",      0.5) as f64;
+        let bass     = param_val(params, "bass",     0.5) as f64;
+        let treb_frq = param_val(params, "treb_frq", 0.5) as f64;
+        let bass_frq = param_val(params, "bass_frq", 0.5) as f64;
+        let lo_cap   = param_val(params, "lo_cap",   1.0) as f64;
+        let hi_cap   = param_val(params, "hi_cap",   0.0) as f64;
+        let compress = param_val(params, "compress", 0.0) as f64;
+        let comp_spd = param_val(params, "comp_spd", 0.0) as f64;
+        let output   = param_val(params, "output",   0.33) as f64;
+
+        // ── Hi-pass cap (lo_cap) ─────────────────────────────────────────
+        // lo_cap=1.0 → no HP filter; 0.0 → aggressive cut
+        let hp_coef = if lo_cap < 1.0 {
+            (1.0 - lo_cap).powf(2.0) * 0.4995 + 0.0001
+        } else {
+            0.0
+        };
+        let mut l = if hp_coef > 1e-6 {
+            Self::apply_hpcap(&mut self.fl.hp, left, hp_coef)
+        } else {
+            left
+        };
+        let mut r = if hp_coef > 1e-6 {
+            Self::apply_hpcap(&mut self.fr.hp, right, hp_coef)
+        } else {
+            right
+        };
+
+        // ── Lo-pass cap (hi_cap) ─────────────────────────────────────────
+        // hi_cap=0.0 → no LP; 1.0 → aggressive cut
+        let lp_coef = if hi_cap > 0.0 {
+            hi_cap.powf(2.0) * 0.4995 + 0.0001
+        } else {
+            0.0
+        };
+        if lp_coef > 1e-6 {
+            l = Self::apply_lpcap(&mut self.fl.lp, l, lp_coef);
+            r = Self::apply_lpcap(&mut self.fr.lp, r, lp_coef);
+        }
+
+        // ── 3-band Triplet EQ ────────────────────────────────────────────
+        // Bass: first-order IIR; treble is complementary; mid fills the gap
+        // bass_frq 0..1 → LP cutoff coeff 0.001 .. 0.499
+        let bass_coef = bass_frq * bass_frq * 0.499 + 0.001;
+        let treb_coef = (1.0 - treb_frq) * (1.0 - treb_frq) * 0.499 + 0.001;
+
+        // Low band (LP)
+        self.tri_la = self.tri_la * (1.0 - bass_coef) + l * bass_coef;
+        self.tri_ra = self.tri_ra * (1.0 - bass_coef) + r * bass_coef;
+        // High band (complement of LP at treble freq)
+        self.tri_lc = self.tri_lc * (1.0 - treb_coef) + l * treb_coef;
+        self.tri_rc = self.tri_rc * (1.0 - treb_coef) + r * treb_coef;
+        // Mid = input - low - high residual
+        self.tri_lb = l - self.tri_la - (l - self.tri_lc);
+        self.tri_rb = r - self.tri_ra - (r - self.tri_rc);
+
+        // EQ gains: 0..1 → -6..+6 dB style (0.5=unity)
+        let bass_g   = (bass   * 2.0 - 1.0) * 0.5 + 1.0; // 0.5 .. 1.5
+        let mid_g    = (mid    * 2.0 - 1.0) * 0.5 + 1.0;
+        let treble_g = (treble * 2.0 - 1.0) * 0.5 + 1.0;
+
+        l = self.tri_la * bass_g + self.tri_lb * mid_g + (l - self.tri_lc) * treble_g + self.tri_lc;
+        r = self.tri_ra * bass_g + self.tri_rb * mid_g + (r - self.tri_rc) * treble_g + self.tri_rc;
+
+        // ── ButterComp ───────────────────────────────────────────────────
+        if compress > 0.001 {
+            // comp_spd 0..1 → attack coefficient ~0.001 .. 0.3
+            let spd = comp_spd * comp_spd * 0.299 + 0.001;
+            l = Self::butter_comp(&mut self.cl, l, spd, compress);
+            r = Self::butter_comp(&mut self.cr, r, spd, compress);
+        }
+
+        // ── Output gain + Spiral saturation ─────────────────────────────
+        // output 0..1 → 0..2 linear gain, through spiral
+        let out_gain = output * output * 2.0;
+        l = Self::spiral(l * out_gain);
+        r = Self::spiral(r * out_gain);
+
+        (l, r)
+    }
+
+    fn fresh(&self) -> Box<dyn EffectModule> { Box::new(CStrip2::new()) }
+    fn reset(&mut self) { *self = CStrip2::new(); }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Registry — maps names to constructors
 // ═══════════════════════════════════════════════════════════════════
 
@@ -4477,6 +4724,7 @@ pub fn create_effect(name: &str, sr: u32) -> Option<Box<dyn EffectModule>> {
         "Utility" => Some(Box::new(FxUtility::new())),
         "Limiter" => Some(Box::new(FxLimiter::new())),
         "Autoduck" => Some(Box::new(FxAutoduck::new())),
+        "CStrip2" => Some(Box::new(CStrip2::new())),
         _ => None,
     }
 }
@@ -4500,6 +4748,7 @@ pub fn is_effect(name: &str) -> bool {
             | "Utility"
             | "Limiter"
             | "Autoduck"
+            | "CStrip2"
     )
 }
 
@@ -4525,6 +4774,7 @@ pub fn get_param_descs(name: &str) -> &'static [ParamDesc] {
         "Utility" => UTILITY_PARAMS,
         "Limiter" => LIMITER_PARAMS,
         "Autoduck" => AUTODUCK_PARAMS,
+        "CStrip2" => CSTRIP2_PARAMS,
         _ => &[],
     }
 }
