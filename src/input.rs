@@ -46,6 +46,11 @@ pub struct InputState {
     pub mouse_prev_y: i32,
     pub mouse_dx: i32,
     pub mouse_dy: i32,
+    /// Accumulated raw (unscaled) relative deltas from SDL2 MouseMotion xrel/yrel.
+    /// These keep reporting even when the cursor hits the window edge.
+    /// Consumed and reset by apply_scale().
+    pub raw_mouse_dx: i32,
+    pub raw_mouse_dy: i32,
     pub mouse_down: bool,
     pub mouse_pressed: bool,
     pub mouse_released: bool,
@@ -144,6 +149,8 @@ impl Default for InputState {
             mouse_prev_y: 0,
             mouse_dx: 0,
             mouse_dy: 0,
+            raw_mouse_dx: 0,
+            raw_mouse_dy: 0,
             mouse_down: false,
             mouse_pressed: false,
             mouse_released: false,
@@ -309,9 +316,12 @@ impl InputState {
         }
     }
 
-    pub fn on_mouse_move(&mut self, x: i32, y: i32) {
+    pub fn on_mouse_move(&mut self, x: i32, y: i32, xrel: i32, yrel: i32) {
         self.raw_mouse_x = x;
         self.raw_mouse_y = y;
+        // Accumulate raw deltas (may receive multiple events per frame).
+        self.raw_mouse_dx += xrel;
+        self.raw_mouse_dy += yrel;
     }
 
     /// Called instead of on_mouse_move when SDL2 relative mouse mode is active.
@@ -338,8 +348,11 @@ impl InputState {
         self.mouse_x = lx;
         self.mouse_y = ly;
 
-        self.mouse_dx = lx - self.mouse_prev_x;
-        self.mouse_dy = ly - self.mouse_prev_y;
+        // Use raw relative deltas from SDL2 (these keep reporting even at window edges)
+        self.mouse_dx = (self.raw_mouse_dx as f32 / scale) as i32;
+        self.mouse_dy = (self.raw_mouse_dy as f32 / scale) as i32;
+        self.raw_mouse_dx = 0;
+        self.raw_mouse_dy = 0;
 
         // Set drag start in logical coords the moment the press happens
         if self.mouse_pressed {

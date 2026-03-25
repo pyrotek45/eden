@@ -7153,13 +7153,17 @@ mod tests {
         // Press at start
         sim_click(input, x1, y1);
         // Move through intermediate positions
+        let mut prev_x = x1;
+        let mut prev_y = y1;
         for i in 1..=steps {
             let t = i as f32 / steps as f32;
             let cx = x1 + ((x2 - x1) as f32 * t) as i32;
             let cy = y1 + ((y2 - y1) as f32 * t) as i32;
             input.begin_frame();
-            input.on_mouse_move(cx, cy);
+            input.on_mouse_move(cx, cy, cx - prev_x, cy - prev_y);
             input.apply_scale(1.0);
+            prev_x = cx;
+            prev_y = cy;
         }
     }
 
@@ -7304,7 +7308,7 @@ mod tests {
         sim_click(&mut input, 100, 100);
         // Move only 2px — below threshold
         input.begin_frame();
-        input.on_mouse_move(102, 101);
+        input.on_mouse_move(102, 101, 2, 1);
         input.apply_scale(1.0);
 
         assert!(
@@ -7513,11 +7517,11 @@ mod tests {
         let mut input = make_input();
         // Frame 1: mouse at (100, 100)
         input.begin_frame();
-        input.on_mouse_move(100, 100);
+        input.on_mouse_move(100, 100, 100, 100);
         input.apply_scale(1.0);
         // Frame 2: mouse at (120, 115)
         input.begin_frame();
-        input.on_mouse_move(120, 115);
+        input.on_mouse_move(120, 115, 20, 15);
         input.apply_scale(1.0);
 
         assert_eq!(input.mouse_dx, 20);
