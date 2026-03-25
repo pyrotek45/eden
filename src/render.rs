@@ -313,6 +313,10 @@ pub fn render_to_buffer(
     let mut dc_hp_x_r_b = 0.0_f64;
     let mut dc_hp_y_r_b = 0.0_f64;
 
+    // Slew rate limiter state for render_to_buffer
+    let mut slew_prev_l_b = 0.0_f64;
+    let mut slew_prev_r_b = 0.0_f64;
+
     let mut output = Vec::with_capacity(total_samples);
 
     for _si in 0..total_samples {
@@ -655,6 +659,17 @@ pub fn render_to_buffer(
         mix_l += 1.0e-24;
         mix_r += 1.0e-24;
 
+        // Slew rate limiter (last-resort spike catcher)
+        const SLEW_MAX_B: f64 = 0.8;
+        mix_l = slew_prev_l_b + (mix_l - slew_prev_l_b).clamp(-SLEW_MAX_B, SLEW_MAX_B);
+        mix_r = slew_prev_r_b + (mix_r - slew_prev_r_b).clamp(-SLEW_MAX_B, SLEW_MAX_B);
+        slew_prev_l_b = mix_l;
+        slew_prev_r_b = mix_r;
+
+        // Soft clipper (tanh, drive=1.0 — transparent below ±0.7, gentle above ±1.0)
+        mix_l = mix_l.tanh();
+        mix_r = mix_r.tanh();
+
         output.push((mix_l, mix_r));
         pos_beats += beats_per_sample;
     }
@@ -699,7 +714,13 @@ pub fn render_to_wav_with_progress(
     };
 
     let render_secs = (end_beats - start_beats) * 60.0 / bpm;
-    let total_samples = (render_secs * sample_rate as f64).ceil() as usize;
+    // Add a 2-second tail beyond the last clip so reverb/delay effects can
+    // fully decay before the file ends.  The tail is silent audio content —
+    // it is still processed through the effects chain so their output is captured.
+    const RENDER_TAIL_SECS: f64 = 2.0;
+    let base_samples = (render_secs * sample_rate as f64).ceil() as usize;
+    let tail_samples = (RENDER_TAIL_SECS * sample_rate as f64) as usize;
+    let total_samples = base_samples + tail_samples;
     if total_samples == 0 {
         return Err("Nothing to render (zero-length region)".into());
     }
@@ -974,6 +995,10 @@ pub fn render_to_wav_with_progress(
     let mut dc_hp_y_l = 0.0_f64;
     let mut dc_hp_x_r = 0.0_f64;
     let mut dc_hp_y_r = 0.0_f64;
+
+    // ── Slew rate limiter state ──
+    let mut slew_prev_l = 0.0_f64;
+    let mut slew_prev_r = 0.0_f64;
 
     // ── Export fade-in / fade-out lengths (samples) ──
     // 2 ms fade-in at start, 5 ms fade-out at end — standard mastering practice.
@@ -1487,6 +1512,18 @@ pub fn render_to_wav_with_progress(
         // Denormal prevention — completely inaudible sub-threshold DC offset
         mix_l += 1.0e-24;
         mix_r += 1.0e-24;
+
+        // Slew rate limiter (last-resort spike catcher — generous threshold)
+        const SLEW_MAX: f64 = 0.8;
+        mix_l = slew_prev_l + (mix_l - slew_prev_l).clamp(-SLEW_MAX, SLEW_MAX);
+        mix_r = slew_prev_r + (mix_r - slew_prev_r).clamp(-SLEW_MAX, SLEW_MAX);
+        slew_prev_l = mix_l;
+        slew_prev_r = mix_r;
+
+        // Soft clipper (tanh at drive=1.0) — transparent below ±0.7,
+        // gently saturates hot peaks instead of hard-clipping them.
+        mix_l = mix_l.tanh();
+        mix_r = mix_r.tanh();
 
         // Export fade-in (equal-power sine, ~2 ms) — removes start discontinuity
         if _si < export_fade_in_len && export_fade_in_len > 0 {

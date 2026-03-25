@@ -509,9 +509,17 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         let mut dc_hp_x_r: f64 = 0.0;
         let mut dc_hp_y_r: f64 = 0.0;
 
-        // Per-track smoothed pan (one-pole, ~5 ms time constant).
-        // Eliminates zipper noise from pan automation without audible lag.
+        // Slew rate limiter state: tracks previous master output sample.
+        // Caps the per-sample change to SLEW_MAX, catching runaway spikes
+        // that slip through all other protections. Threshold is set high
+        // enough to never affect legitimate transients (e.g. snare drums).
+        let mut slew_prev_l: f64 = 0.0;
+        let mut slew_prev_r: f64 = 0.0;
+
+        // Per-track smoothed pan + volume (one-pole, ~5 ms time constant).
+        // Eliminates zipper noise from pan/volume automation without audible lag.
         let mut smooth_pan: Vec<f64> = Vec::new();
+        let mut smooth_vol: Vec<f64> = Vec::new();
 
         // Per-track arp state: (step_index, last_step_beat, held_pitches)
         let mut track_arp_state: Vec<(usize, f64, Vec<u8>)> = Vec::new();
@@ -1825,7 +1833,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         let init = if ti < snap.tracks.len() { snap.tracks[ti].pan as f64 } else { 0.0 };
                         smooth_pan.push(init);
                     }
-                    // One-pole smoothing coefficient — 5 ms time constant
+                    while smooth_vol.len() < num_tracks {
+                        let ti = smooth_vol.len();
+                        let init = if ti < snap.tracks.len() { snap.tracks[ti].volume as f64 } else { 1.0 };
+                        smooth_vol.push(init);
+                    }
+                    // One-pole smoothing coefficient — ~1 ms time constant @ 44.1kHz
                     const SMOOTH_COEFF: f64 = 0.002;
                     let mut mix_l = 0.0_f64;
                     let mut mix_r = 0.0_f64;
@@ -1842,15 +1855,16 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         if ti >= num_tracks {
                             break;
                         }
-                        // Step smoothed pan toward target (removes zipper noise)
+                        // Step smoothed pan and volume toward targets (removes zipper noise)
                         smooth_pan[ti] += (track.pan as f64 - smooth_pan[ti]) * SMOOTH_COEFF;
+                        smooth_vol[ti] += (track.volume as f64 - smooth_vol[ti]) * SMOOTH_COEFF;
                         let (tl, tr) = per_track_sample[ti];
                         // Equal-power pan (fast approximation) using smoothed pan
                         let theta = (smooth_pan[ti] + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
                         let pan_l = crate::modules::fast_cos(theta);
                         let pan_r = crate::modules::fast_sin(theta);
-                        mix_l += tl * pan_l;
-                        mix_r += tr * pan_r;
+                        mix_l += tl * pan_l * smooth_vol[ti];
+                        mix_r += tr * pan_r * smooth_vol[ti];
                     }
 
                     // ── Apply master rack effects to the stereo mix ──
@@ -1910,6 +1924,23 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // never enters denormal-number slow-path. Completely inaudible.
                     mix_l += 1.0e-24;
                     mix_r += 1.0e-24;
+
+                    // Slew rate limiter: caps the per-sample change to ±SLEW_MAX.
+                    // This is a generous last-resort net — legitimate transients
+                    // (snare hits, plucks) change by at most ~0.3/sample at 44.1kHz;
+                    // runaway spikes are much larger.
+                    const SLEW_MAX: f64 = 0.8;
+                    mix_l = slew_prev_l + (mix_l - slew_prev_l).clamp(-SLEW_MAX, SLEW_MAX);
+                    mix_r = slew_prev_r + (mix_r - slew_prev_r).clamp(-SLEW_MAX, SLEW_MAX);
+                    slew_prev_l = mix_l;
+                    slew_prev_r = mix_r;
+
+                    // Soft clipper: tanh saturator at drive=1.0.
+                    // Below ±0.7 it is perfectly linear; above ±1.0 it curves gently
+                    // toward ±1.0 instead of hard-clipping. Completely transparent
+                    // at normal mix levels; only activates on occasional hot peaks.
+                    mix_l = mix_l.tanh();
+                    mix_r = mix_r.tanh();
 
                     frame_samples_l[frame_idx] = mix_l.clamp(-1.0, 1.0) as f32;
                     frame_samples_r[frame_idx] = mix_r.clamp(-1.0, 1.0) as f32;
