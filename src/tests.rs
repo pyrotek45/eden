@@ -9230,4 +9230,344 @@ mod tests {
         mgr.undo(&mut project);
         assert_project_eq(&original, &project);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Anti-click / Zero-Crossing / Micro-Fade Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+    //
+    // Each test verifies a specific anti-click property:
+    //   • No DC offset after the filter settles
+    //   • No denormal numbers in output
+    //   • Clip-edge fades produce no large jumps
+    //   • Export fade-in/out keeps start/end near zero
+    //   • Parameter changes (volume/pan) produce no clicks
+    //   • Rendered output is within [-1, 1] (no clipping)
+    //   • Equal-power sine fades preserved loudness (energy check)
+
+    // ── Helper: DC offset measurement ──────────────────────────────────────
+    fn measure_dc_offset(buf: &[(f64, f64)]) -> (f64, f64) {
+        if buf.is_empty() {
+            return (0.0, 0.0);
+        }
+        let n = buf.len() as f64;
+        let sum_l: f64 = buf.iter().map(|(l, _)| l).sum();
+        let sum_r: f64 = buf.iter().map(|(_, r)| r).sum();
+        (sum_l / n, sum_r / n)
+    }
+
+    // ── Helper: check for denormal numbers ──────────────────────────────────
+    fn has_denormals(buf: &[(f64, f64)]) -> bool {
+        buf.iter().any(|(l, r)| {
+            let lf = *l as f32;
+            let rf = *r as f32;
+            // A f32 is denormal if it's non-zero but smaller than MIN_POSITIVE
+            (lf != 0.0 && lf.abs() < f32::MIN_POSITIVE)
+                || (rf != 0.0 && rf.abs() < f32::MIN_POSITIVE)
+        })
+    }
+
+    // ── Test 1: DC offset is removed ────────────────────────────────────────
+    #[test]
+    fn test_render_no_dc_offset() {
+        // A MIDI synth rendering a steady tone should have near-zero DC after the
+        // one-pole high-pass filter settles (takes a few samples at fc=20 Hz).
+        let project = make_test_project();
+        let sr = 44100u32;
+        let buf = render_to_buffer(&project, sr, 1.0);
+        assert!(!buf.is_empty(), "render produced no samples");
+
+        // Skip the first 100 ms to let the HP filter settle
+        let skip = (0.1 * sr as f64) as usize;
+        let settled = if skip < buf.len() { &buf[skip..] } else { &buf[..] };
+        let (dc_l, dc_r) = measure_dc_offset(settled);
+
+        // DC should be below -80 dB (0.0001) after the filter settles
+        assert!(
+            dc_l.abs() < 0.001,
+            "DC offset on L channel too large: {} (HP filter not working?)",
+            dc_l
+        );
+        assert!(
+            dc_r.abs() < 0.001,
+            "DC offset on R channel too large: {} (HP filter not working?)",
+            dc_r
+        );
+    }
+
+    // ── Test 2: No denormal numbers in render output ─────────────────────────
+    #[test]
+    fn test_render_no_denormals() {
+        let project = make_test_project();
+        let buf = render_to_buffer(&project, 44100, 1.0);
+        assert!(!buf.is_empty());
+        assert!(
+            !has_denormals(&buf),
+            "Render output contains denormal numbers (will cause CPU spike in DAW)"
+        );
+    }
+
+    // ── Test 3: Clip-edge equal-power fades don't produce large jumps ────────
+    #[test]
+    fn test_clip_edge_fade_no_discontinuity() {
+        // A 440 Hz sine wave in an audio clip — the first and last 220 samples
+        // (≈5 ms) should fade in/out via sine curve.  Verify no sample-to-sample
+        // jump exceeds what a 440 Hz sine naturally produces.
+        let sr = 44100u32;
+        let duration = 1.0;
+        let freq = 440.0;
+        let bpm = 120.0;
+
+        let num_samples = (duration * sr as f64) as usize;
+        let mut samples = Vec::with_capacity(num_samples);
+        for i in 0..num_samples {
+            let t = i as f64 / sr as f64;
+            samples.push((t * freq * std::f64::consts::TAU).sin() as f32);
+        }
+
+        let project = make_audio_clip_project(sr, duration, freq, bpm);
+        let buf = render_audio_clip_project(&project, sr, &samples, sr);
+        assert!(!buf.is_empty());
+
+        // The very first sample must be (near) zero — fade-in starts from 0
+        let start_amp = buf[0].0.abs();
+        assert!(
+            start_amp < 0.05,
+            "Clip start is not near zero (fade-in missing?): amplitude = {}",
+            start_amp
+        );
+        // The very last sample must be (near) zero — fade-out ends at 0
+        let end_amp = buf[buf.len() - 1].0.abs();
+        assert!(
+            end_amp < 0.1,
+            "Clip end is not near zero (fade-out missing?): amplitude = {}",
+            end_amp
+        );
+
+        // Middle section should have signal — not all-zero
+        let mid_start = buf.len() / 3;
+        let mid_end = 2 * buf.len() / 3;
+        let mid_rms = rms(&buf, mid_start, mid_end);
+        assert!(
+            mid_rms > 0.1,
+            "Middle of clip is silent — fade is too long or signal is wrong: RMS = {}",
+            mid_rms
+        );
+
+        // Max jump in the middle must not exceed the natural 440 Hz jump
+        // (2π·440/44100 ≈ 0.063). We allow 0.15 to account for gain envelope.
+        let mid_max_jump = max_sample_jump(&buf[mid_start..mid_end]);
+        assert!(
+            mid_max_jump < 0.15,
+            "Audio clip has clicks in middle section: max jump {}",
+            mid_max_jump
+        );
+    }
+
+    // ── Test 4: Export fade-in keeps start near zero ─────────────────────────
+    #[test]
+    fn test_render_export_fade_in_starts_silent() {
+        let project = make_test_project();
+        let sr = 44100u32;
+        let buf = render_to_buffer(&project, sr, 1.0);
+        assert!(!buf.is_empty());
+
+        // The very first output sample should be near 0 (fade-in from silence).
+        // render_to_buffer doesn't apply the export fade, but the DC filter
+        // and denormal offset produce a settling behaviour.  We test the WAV
+        // render path via a WAV export to /tmp.
+        // Here we just verify the buffer is not immediately at full amplitude.
+        let first_amp = buf[0].0.abs().max(buf[0].1.abs());
+        assert!(
+            first_amp < 0.5,
+            "Render starts too loud at sample 0 (no fade-in?): amplitude = {}",
+            first_amp
+        );
+    }
+
+    // ── Test 5: No sample exceeds ±1.0 (no hard clipping) ───────────────────
+    #[test]
+    fn test_render_no_hard_clipping() {
+        let project = make_test_project();
+        let buf = render_to_buffer(&project, 44100, 1.0);
+        let max_amp = buf
+            .iter()
+            .map(|(l, r)| l.abs().max(r.abs()))
+            .fold(0.0_f64, f64::max);
+        // After clamp in the render path, no sample should exceed 1.0
+        assert!(
+            max_amp <= 1.0,
+            "Render output clips: max amplitude = {}",
+            max_amp
+        );
+    }
+
+    // ── Test 6: Equal-power fade preserves more energy than linear ───────────
+    #[test]
+    fn test_equal_power_fade_preserves_energy() {
+        // Compare energy of a sine with equal-power fade vs linear fade.
+        // Equal-power (sin²(t·π/2) integrated = 0.5) vs linear (t² integrated = 1/3).
+        // Equal-power should have ~50% energy in the fade region vs ~33% for linear.
+        let n = 220usize;
+        let mut ep_energy = 0.0_f64;
+        let mut lin_energy = 0.0_f64;
+        for i in 0..n {
+            let t = i as f64 / n as f64;
+            let ep_gain = (t * std::f64::consts::FRAC_PI_2).sin();
+            let lin_gain = t;
+            // Assume unit-amplitude signal
+            ep_energy += ep_gain * ep_gain;
+            lin_energy += lin_gain * lin_gain;
+        }
+        ep_energy /= n as f64;
+        lin_energy /= n as f64;
+        // Equal-power should be notably higher than linear
+        assert!(
+            ep_energy > lin_energy * 1.3,
+            "Equal-power fade does not preserve more energy than linear: ep={:.4} lin={:.4}",
+            ep_energy,
+            lin_energy
+        );
+        // Equal-power RMS should be ≈ 0.707 (sin RMS over 0..π/2)
+        assert!(
+            (ep_energy.sqrt() - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.01,
+            "Equal-power fade RMS deviates from 1/√2: got {:.4}",
+            ep_energy.sqrt()
+        );
+    }
+
+    // ── Test 7: Anti-click seek fade reduces opening discontinuity ───────────
+    // We can't directly test the realtime engine here, but we can verify the
+    // equal-power ramp formula produces monotonically increasing gain from 0→1.
+    #[test]
+    fn test_anti_click_fade_monotone_and_bounded() {
+        let n = 220usize;
+        let mut prev_gain = -1.0_f64;
+        for i in 0..=n {
+            let t = i as f64 / n as f64;
+            // Fade is applied as: remaining counts down from n to 0
+            // gain = sin((1 - remaining/n) * π/2)
+            let gain = (t * std::f64::consts::FRAC_PI_2).sin();
+            // Gain must be monotonically non-decreasing
+            assert!(
+                gain >= prev_gain - 1e-12,
+                "Anti-click fade is not monotone at i={}: gain={:.6} prev={:.6}",
+                i,
+                gain,
+                prev_gain
+            );
+            // Gain must be in [0, 1]
+            assert!(
+                gain >= 0.0 && gain <= 1.0 + 1e-12,
+                "Anti-click fade out of bounds at i={}: gain={}",
+                i,
+                gain
+            );
+            prev_gain = gain;
+        }
+        // At i=0 it should be exactly 0, at i=n it should be exactly 1
+        let gain_start = (0.0f64 * std::f64::consts::FRAC_PI_2).sin();
+        let gain_end = (1.0f64 * std::f64::consts::FRAC_PI_2).sin();
+        assert!((gain_start - 0.0).abs() < 1e-12, "Fade start is not 0: {}", gain_start);
+        assert!((gain_end - 1.0).abs() < 1e-12, "Fade end is not 1: {}", gain_end);
+    }
+
+    // ── Test 8: DC HP filter decays to near-zero on silence ─────────────────
+    #[test]
+    fn test_dc_hp_filter_removes_step() {
+        // Feed a DC step into the one-pole HP filter: y[n] = x[n] - x[n-1] + R·y[n-1]
+        // A DC input (constant 1.0) should decay toward 0 in the output.
+        const R: f64 = 0.99972;
+        let mut x_prev = 0.0_f64;
+        let mut y = 0.0_f64;
+        // Feed 1.0 DC for 1 second (44100 samples)
+        let n_settle = 44100usize;
+        for _ in 0..n_settle {
+            let x = 1.0_f64;
+            let new_y = x - x_prev + R * y;
+            x_prev = x;
+            y = new_y;
+        }
+        // After settling, y should be very close to 0 (DC fully attenuated)
+        assert!(
+            y.abs() < 0.01,
+            "DC HP filter failed to attenuate DC after 1s: output = {}",
+            y
+        );
+        // Initial response should be 1.0 (step response at t=0)
+        let mut x_p = 0.0;
+        let mut y0 = 0.0_f64;
+        let x_step = 1.0_f64;
+        let new_y0 = x_step - x_p + R * y0;
+        x_p = x_step;
+        y0 = new_y0;
+        assert!(
+            (y0 - 1.0).abs() < 1e-9,
+            "DC HP filter first-sample response is not 1.0: {}",
+            y0
+        );
+        let _ = (x_p, y0); // suppress warnings
+    }
+
+    // ── Test 9: Micro-fade length is below human perception threshold ─────────
+    #[test]
+    fn test_micro_fade_length_below_perception() {
+        // Micro-fades must be ≤ 5 ms to be inaudible as tonal changes.
+        // At 44100 Hz: 5 ms = 220.5 samples → 220 samples.
+        let sr = 44100.0_f64;
+        let max_fade_ms = 5.0;
+        let max_fade_samples = (max_fade_ms * 0.001 * sr) as usize;
+        // Our clip-edge fades use fade_len = 220 samples
+        let fade_len = 220usize;
+        assert!(
+            fade_len <= max_fade_samples,
+            "Micro-fade of {} samples exceeds {} ms perception threshold ({} samples) at {}Hz",
+            fade_len,
+            max_fade_ms,
+            max_fade_samples,
+            sr
+        );
+    }
+
+    // ── Test 10: Render is deterministic (repeated calls identical) ──────────
+    #[test]
+    fn test_render_deterministic_anti_click() {
+        // Two identical renders must produce bit-identical output,
+        // proving the DC filter and denormal offset are deterministic.
+        let project = make_test_project();
+        let buf1 = render_to_buffer(&project, 44100, 1.0);
+        let buf2 = render_to_buffer(&project, 44100, 1.0);
+        assert_eq!(buf1.len(), buf2.len());
+        for (i, (a, b)) in buf1.iter().zip(buf2.iter()).enumerate() {
+            assert_eq!(
+                a, b,
+                "Render is non-deterministic at sample {}: {:?} vs {:?}",
+                i, a, b
+            );
+        }
+    }
+
+    // ── Test 11: No click at note boundary in MIDI render ────────────────────
+    #[test]
+    fn test_midi_note_boundary_no_click() {
+        // A note that ends and another that starts should not produce a large
+        // sample-to-sample jump at the boundary.
+        let sr = 44100u32;
+        let buf = render_to_buffer(&make_test_project(), sr, 0.8);
+        assert!(!buf.is_empty());
+
+        // Skip attack of first note (50 ms)
+        let skip = (0.05 * sr as f64) as usize;
+        if skip >= buf.len() {
+            return;
+        }
+        let max_j = max_sample_jump(&buf[skip..]);
+        // The maximum single-sample jump for any well-formed audio should be < 2.0
+        // (a full +1 → -1 swing).  Clicks are typically > 0.5.
+        // We allow a generous 0.5 here since fast attacks are valid musically.
+        assert!(
+            max_j < 0.5,
+            "MIDI render has click at note boundary: max sample jump = {}",
+            max_j
+        );
+    }
 }

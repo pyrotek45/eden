@@ -306,6 +306,13 @@ pub fn render_to_buffer(
     let beats_per_sample = bpm / 60.0 / sample_rate as f64;
     let mut pos_beats = start_beats;
 
+    // DC-offset HP filter state (fc ≈ 20 Hz, mirrors render_to_wav_with_progress)
+    const DC_HP_R_BUF: f64 = 0.99972;
+    let mut dc_hp_x_l_b = 0.0_f64;
+    let mut dc_hp_y_l_b = 0.0_f64;
+    let mut dc_hp_x_r_b = 0.0_f64;
+    let mut dc_hp_y_r_b = 0.0_f64;
+
     let mut output = Vec::with_capacity(total_samples);
 
     for _si in 0..total_samples {
@@ -633,6 +640,21 @@ pub fn render_to_buffer(
         mix_l *= master_volume as f64;
         mix_r *= master_volume as f64;
 
+        // DC-offset removal (mirrors render_to_wav_with_progress)
+        {
+            let new_l = mix_l - dc_hp_x_l_b + DC_HP_R_BUF * dc_hp_y_l_b;
+            dc_hp_x_l_b = mix_l;
+            dc_hp_y_l_b = new_l;
+            mix_l = new_l;
+            let new_r = mix_r - dc_hp_x_r_b + DC_HP_R_BUF * dc_hp_y_r_b;
+            dc_hp_x_r_b = mix_r;
+            dc_hp_y_r_b = new_r;
+            mix_r = new_r;
+        }
+        // Denormal prevention
+        mix_l += 1.0e-24;
+        mix_r += 1.0e-24;
+
         output.push((mix_l, mix_r));
         pos_beats += beats_per_sample;
     }
@@ -945,6 +967,21 @@ pub fn render_to_wav_with_progress(
     let beats_per_sample = bpm / 60.0 / sample_rate as f64;
     let beats_per_sec = bpm / 60.0;
     let mut pos_beats = start_beats;
+
+    // ── DC-offset one-pole HP filter state (fc ≈ 20 Hz, mirrors audio.rs) ──
+    const DC_HP_R: f64 = 0.99972;
+    let mut dc_hp_x_l = 0.0_f64;
+    let mut dc_hp_y_l = 0.0_f64;
+    let mut dc_hp_x_r = 0.0_f64;
+    let mut dc_hp_y_r = 0.0_f64;
+
+    // ── Export fade-in / fade-out lengths (samples) ──
+    // 2 ms fade-in at start, 5 ms fade-out at end — standard mastering practice.
+    // Both use equal-power sine curve to preserve loudness perception.
+    let export_fade_in_len = (0.002 * sample_rate as f64) as usize; //  ~88 samples @ 44.1kHz
+    let export_fade_out_len = (0.005 * sample_rate as f64) as usize; // ~220 samples @ 44.1kHz
+    // Fade-out starts this many samples before the end of the export
+    let fade_out_start = total_samples.saturating_sub(export_fade_out_len);
 
     for _si in 0..total_samples {
         // Report progress (permille 0..1000) every 4096 samples to avoid atomic contention
@@ -1305,21 +1342,23 @@ pub fn render_to_wav_with_progress(
                     let frac = src_pos - src_pos.floor();
                     let raw = s0 + (s1 - s0) * frac;
                     let mut s = raw * aclip.gain as f64 * track.volume as f64;
-                    // Short linear fade at CLIP boundaries to prevent clicks.
-                    // Use clip-relative sample position (not source-file position)
-                    // so fades always happen at clip start/end regardless of offset.
-                    let fade_len = 64usize;
+                    // Equal-power micro-fade at CLIP boundaries (~5 ms = 220 samples).
+                    // sin(t·π/2) curve: removes click without tonal impact.
+                    // Applied only at the first/last ~5 ms — rest of clip is unaffected.
+                    let fade_len = 220usize;
                     let clip_sample = (clip_pos_secs * sample_rate as f64) as usize;
                     let clip_len_samples =
                         (aclip.length_beats / beats_per_sec * sample_rate as f64) as usize;
                     // Fade in at clip start
                     if clip_sample < fade_len {
-                        s *= clip_sample as f64 / fade_len as f64;
+                        let t = clip_sample as f64 / fade_len as f64;
+                        s *= (t * std::f64::consts::FRAC_PI_2).sin();
                     }
                     // Fade out at clip end
                     let remaining = clip_len_samples.saturating_sub(clip_sample);
-                    if remaining < fade_len {
-                        s *= remaining as f64 / fade_len as f64;
+                    if remaining < fade_len && fade_len > 0 {
+                        let t = remaining as f64 / fade_len as f64;
+                        s *= (t * std::f64::consts::FRAC_PI_2).sin();
                     }
                     // User-controlled fade-in
                     if aclip.fade_in > 0.0 {
@@ -1431,6 +1470,39 @@ pub fn render_to_wav_with_progress(
 
         mix_l *= master_volume as f64;
         mix_r *= master_volume as f64;
+
+        // DC-offset high-pass filter (fc ≈ 20 Hz) — removes slowly-drifting bias
+        // that can cause clicks with abrupt gain changes. No audible tonal effect.
+        {
+            let new_l = mix_l - dc_hp_x_l + DC_HP_R * dc_hp_y_l;
+            dc_hp_x_l = mix_l;
+            dc_hp_y_l = new_l;
+            mix_l = new_l;
+            let new_r = mix_r - dc_hp_x_r + DC_HP_R * dc_hp_y_r;
+            dc_hp_x_r = mix_r;
+            dc_hp_y_r = new_r;
+            mix_r = new_r;
+        }
+
+        // Denormal prevention — completely inaudible sub-threshold DC offset
+        mix_l += 1.0e-24;
+        mix_r += 1.0e-24;
+
+        // Export fade-in (equal-power sine, ~2 ms) — removes start discontinuity
+        if _si < export_fade_in_len && export_fade_in_len > 0 {
+            let t = _si as f64 / export_fade_in_len as f64;
+            let gain = (t * std::f64::consts::FRAC_PI_2).sin();
+            mix_l *= gain;
+            mix_r *= gain;
+        }
+        // Export fade-out (equal-power sine, ~5 ms) — removes end discontinuity
+        if _si >= fade_out_start && export_fade_out_len > 0 {
+            let elapsed = _si - fade_out_start;
+            let t = 1.0 - (elapsed as f64 / export_fade_out_len as f64);
+            let gain = (t * std::f64::consts::FRAC_PI_2).sin();
+            mix_l *= gain;
+            mix_r *= gain;
+        }
 
         match settings.bit_depth_idx {
             2 => {

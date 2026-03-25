@@ -493,11 +493,25 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         let mut tail_frames_remaining: usize = 0;
         let mut was_playing = false;
 
-        // Anti-click fade: ramps output from 0→1 after seek/loop boundary
-        // to prevent pops from abrupt waveform discontinuities.
-        const ANTI_CLICK_SAMPLES: usize = 64;
-        let mut anti_click_fade: f64 = 1.0;
+        // Anti-click fade: equal-power sine ramp 0→1 after seek/loop boundary.
+        // 220 samples ≈ 5 ms @ 44.1kHz — below human perception of envelope shape,
+        // removes discontinuity pops with zero tonal impact.
+        const ANTI_CLICK_SAMPLES: usize = 220;
         let mut anti_click_remaining: usize = 0;
+
+        // DC-offset high-pass filter state (one-pole IIR, fc ≈ 20 Hz).
+        // Removes any DC bias that can push the waveform off-centre and cause
+        // clicks when combined with abrupt gain changes.  Coefficient:
+        //   R = 1 - 2π·fc/sr ≈ 0.99997 @ 44.1kHz  (close enough for any SR)
+        const DC_HP_R: f64 = 0.99972; // fc ≈ 20 Hz @ 44.1kHz
+        let mut dc_hp_x_l: f64 = 0.0; // prev input  — L
+        let mut dc_hp_y_l: f64 = 0.0; // prev output — L
+        let mut dc_hp_x_r: f64 = 0.0;
+        let mut dc_hp_y_r: f64 = 0.0;
+
+        // Per-track smoothed pan (one-pole, ~5 ms time constant).
+        // Eliminates zipper noise from pan automation without audible lag.
+        let mut smooth_pan: Vec<f64> = Vec::new();
 
         // Per-track arp state: (step_index, last_step_beat, held_pitches)
         let mut track_arp_state: Vec<(usize, f64, Vec<u8>)> = Vec::new();
@@ -573,8 +587,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             }
                             let target = s.position_beats;
                             pos_cb.store(target.to_bits(), Ordering::Relaxed);
-                            // Start anti-click fade-in to prevent pop at new position
-                            anti_click_fade = 0.0;
+                            // Start equal-power fade-in to prevent pop at new position
                             anti_click_remaining = ANTI_CLICK_SAMPLES;
                         }
                         // Panic: kill all voices immediately
@@ -1350,8 +1363,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             arp.1 = -999.0;
                             arp.2.clear();
                         }
-                        // Start anti-click fade-in to prevent pop at loop boundary
-                        anti_click_fade = 0.0;
+                        // Start equal-power fade-in to prevent pop at loop boundary
                         anti_click_remaining = ANTI_CLICK_SAMPLES;
                     }
 
@@ -1700,22 +1712,24 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     * aclip.gain as f64
                                     * track.volume as f64;
 
-                                // Short linear fade at CLIP boundaries (64 samples)
-                                // to eliminate clicks at zero-crossing mismatches.
-                                // Use clip-relative sample position so fades always
-                                // happen at clip start/end regardless of offset.
-                                let fade_len = 64usize;
+                                // Equal-power micro-fade at CLIP boundaries (~5 ms = 220 samples).
+                                // Sine curve: gain = sin(t·π/2) removes click without tonal change.
+                                // Applied only at the first/last ~5 ms of each clip — the rest plays
+                                // at full gain, so musical content is completely unaffected.
+                                let fade_len = 220usize;
                                 let clip_sample = (clip_pos_secs * sample_rate) as usize;
                                 let clip_len_samples =
                                     (aclip.length_beats / beats_per_sec * sample_rate) as usize;
                                 // Fade in at clip start
                                 if clip_sample < fade_len {
-                                    s *= clip_sample as f64 / fade_len as f64;
+                                    let t = clip_sample as f64 / fade_len as f64;
+                                    s *= (t * std::f64::consts::FRAC_PI_2).sin();
                                 }
                                 // Fade out at clip end
                                 let remaining = clip_len_samples.saturating_sub(clip_sample);
-                                if remaining < fade_len {
-                                    s *= remaining as f64 / fade_len as f64;
+                                if remaining < fade_len && fade_len > 0 {
+                                    let t = remaining as f64 / fade_len as f64;
+                                    s *= (t * std::f64::consts::FRAC_PI_2).sin();
                                 }
 
                                 // User-controlled fade-in
@@ -1804,6 +1818,15 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // ── Apply per-track panning → stereo mix ──
                     // Equal-power panning: left = cos(θ), right = sin(θ)
                     // where θ = (pan + 1) / 2 * π/2   (pan: -1..1 → θ: 0..π/2)
+                    // Pan is smoothed (one-pole, ~1 ms) to remove zipper noise on pan changes.
+                    // Grow smoothing arrays to match track count
+                    while smooth_pan.len() < num_tracks {
+                        let ti = smooth_pan.len();
+                        let init = if ti < snap.tracks.len() { snap.tracks[ti].pan as f64 } else { 0.0 };
+                        smooth_pan.push(init);
+                    }
+                    // One-pole smoothing coefficient — 5 ms time constant
+                    const SMOOTH_COEFF: f64 = 0.002;
                     let mut mix_l = 0.0_f64;
                     let mut mix_r = 0.0_f64;
                     for (ti, track) in snap.tracks.iter().enumerate() {
@@ -1819,9 +1842,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         if ti >= num_tracks {
                             break;
                         }
+                        // Step smoothed pan toward target (removes zipper noise)
+                        smooth_pan[ti] += (track.pan as f64 - smooth_pan[ti]) * SMOOTH_COEFF;
                         let (tl, tr) = per_track_sample[ti];
-                        // Equal-power pan (fast approximation)
-                        let theta = ((track.pan as f64) + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
+                        // Equal-power pan (fast approximation) using smoothed pan
+                        let theta = (smooth_pan[ti] + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
                         let pan_l = crate::modules::fast_cos(theta);
                         let pan_r = crate::modules::fast_sin(theta);
                         mix_l += tl * pan_l;
@@ -1858,16 +1883,33 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     mix_l *= snap.master_volume as f64;
                     mix_r *= snap.master_volume as f64;
 
-                    // Anti-click fade: ramp output up from 0 after seek/loop boundary
+                    // Anti-click fade: equal-power sine ramp up from 0 after seek/loop boundary
                     if anti_click_remaining > 0 {
-                        mix_l *= anti_click_fade;
-                        mix_r *= anti_click_fade;
-                        anti_click_fade += 1.0 / ANTI_CLICK_SAMPLES as f64;
-                        if anti_click_fade > 1.0 {
-                            anti_click_fade = 1.0;
-                        }
+                        // t ∈ [0, 1] → gain = sin(t * π/2)  (equal-power, no tonal change)
+                        let t = 1.0 - (anti_click_remaining as f64 / ANTI_CLICK_SAMPLES as f64);
+                        let gain = (t * std::f64::consts::FRAC_PI_2).sin();
+                        mix_l *= gain;
+                        mix_r *= gain;
                         anti_click_remaining -= 1;
                     }
+
+                    // DC-offset removal: one-pole high-pass filter (fc ≈ 20 Hz).
+                    // Removes any slowly-drifting bias without affecting audible content.
+                    {
+                        let new_l = mix_l - dc_hp_x_l + DC_HP_R * dc_hp_y_l;
+                        dc_hp_x_l = mix_l;
+                        dc_hp_y_l = new_l;
+                        mix_l = new_l;
+                        let new_r = mix_r - dc_hp_x_r + DC_HP_R * dc_hp_y_r;
+                        dc_hp_x_r = mix_r;
+                        dc_hp_y_r = new_r;
+                        mix_r = new_r;
+                    }
+
+                    // Denormal prevention: add tiny sub-threshold offset so the CPU
+                    // never enters denormal-number slow-path. Completely inaudible.
+                    mix_l += 1.0e-24;
+                    mix_r += 1.0e-24;
 
                     frame_samples_l[frame_idx] = mix_l.clamp(-1.0, 1.0) as f32;
                     frame_samples_r[frame_idx] = mix_r.clamp(-1.0, 1.0) as f32;
