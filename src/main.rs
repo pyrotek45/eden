@@ -1834,20 +1834,29 @@ fn main() {
                     }
                     // Post-output (Out pair) peak hold — driven from true instantaneous
                     // peak so the user can verify the limiter ceiling is being honoured.
+                    // Uses the same hold-then-decay pattern as the track VU peak needles.
                     let pl = state.meters.master_true_peak_post_l;
                     let pr = state.meters.master_true_peak_post_r;
-                    state.meters.master_peak_hold_post_l =
-                        if pl > state.meters.master_peak_hold_post_l {
-                            pl
-                        } else {
-                            (state.meters.master_peak_hold_post_l - 0.002).max(0.0)
-                        };
-                    state.meters.master_peak_hold_post_r =
-                        if pr > state.meters.master_peak_hold_post_r {
-                            pr
-                        } else {
-                            (state.meters.master_peak_hold_post_r - 0.002).max(0.0)
-                        };
+                    const OUT_PEAK_HOLD_FRAMES: u32 = 90;
+                    const OUT_PEAK_DECAY: f32 = 0.002;
+                    if pl > state.meters.master_peak_hold_post_l {
+                        state.meters.master_peak_hold_post_l = pl;
+                        state.meters.master_peak_hold_post_frames_l = OUT_PEAK_HOLD_FRAMES;
+                    } else if state.meters.master_peak_hold_post_frames_l > 0 {
+                        state.meters.master_peak_hold_post_frames_l -= 1;
+                    } else {
+                        state.meters.master_peak_hold_post_l =
+                            (state.meters.master_peak_hold_post_l - OUT_PEAK_DECAY).max(0.0);
+                    }
+                    if pr > state.meters.master_peak_hold_post_r {
+                        state.meters.master_peak_hold_post_r = pr;
+                        state.meters.master_peak_hold_post_frames_r = OUT_PEAK_HOLD_FRAMES;
+                    } else if state.meters.master_peak_hold_post_frames_r > 0 {
+                        state.meters.master_peak_hold_post_frames_r -= 1;
+                    } else {
+                        state.meters.master_peak_hold_post_r =
+                            (state.meters.master_peak_hold_post_r - OUT_PEAK_DECAY).max(0.0);
+                    }
                     // Master VU ballistic needle (same logic as track VU)
                     {
                         let m_rms = state
