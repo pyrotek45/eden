@@ -1816,6 +1816,19 @@ fn main() {
                     state.meters.master_peak_r = mr.max(state.meters.master_peak_r * 0.995);
                     if ml >= 0.98 { state.meters.master_clipping_l = true; }
                     if mr >= 0.98 { state.meters.master_clipping_r = true; }
+                    // Post-output (Out pair) peak hold
+                    let pl = state.meters.master_rms_post_l;
+                    let pr = state.meters.master_rms_post_r;
+                    state.meters.master_peak_hold_post_l = if pl > state.meters.master_peak_hold_post_l {
+                        pl
+                    } else {
+                        (state.meters.master_peak_hold_post_l - 0.002).max(0.0)
+                    };
+                    state.meters.master_peak_hold_post_r = if pr > state.meters.master_peak_hold_post_r {
+                        pr
+                    } else {
+                        (state.meters.master_peak_hold_post_r - 0.002).max(0.0)
+                    };
                     // Per-track stereo peak hold + clipping
                     if state.meters.track_peak_hold_l.len() != n { state.meters.track_peak_hold_l.resize(n, 0.0); }
                     if state.meters.track_peak_hold_r.len() != n { state.meters.track_peak_hold_r.resize(n, 0.0); }

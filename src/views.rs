@@ -5705,6 +5705,11 @@ fn draw_bottom_mixer(
     draw_peak_hold(canvas, state.meters.master_peak_hold_r,
         m_meter_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
 
+    // Master peak hold (out pair)
+    draw_peak_hold(canvas, state.meters.master_peak_hold_post_l, m_out_x, m_fader_top, m_meter_bar_w, m_fader_h);
+    draw_peak_hold(canvas, state.meters.master_peak_hold_post_r,
+        m_out_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
+
     // dB labels to the right of out meters
     {
         let m_labels_x = m_out_x + m_meter_bar_w as i32 * 2 + m_meter_gap + 2;

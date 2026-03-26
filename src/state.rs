@@ -287,6 +287,9 @@ pub struct MeterState {
     pub master_peak_r: f32,
     pub master_peak_hold_l: f32,
     pub master_peak_hold_r: f32,
+    /// Peak-hold for the post-everything (Out) meter pair.
+    pub master_peak_hold_post_l: f32,
+    pub master_peak_hold_post_r: f32,
     pub master_lufs_short: f32,
     pub master_lufs_momentary: f32,
     pub master_clipping_l: bool,
