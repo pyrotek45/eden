@@ -5332,151 +5332,90 @@ fn draw_bottom_mixer(
                 let mid_g   = ((mid as f64)    * 2.0 - 1.0) * 0.5 + 1.0;
                 let treb_g  = ((treble as f64) * 2.0 - 1.0) * 0.5 + 1.0;
 
-                let n_pts = eq_w.max(2) as usize;
-                let mut prev_px: Option<(i32, i32)> = None;
-                for px_i in 0..=n_pts {
-                    let t = px_i as f64 / n_pts as f64;
-                    let freq = (log_min + t * (log_max - log_min)).exp();
-                    let omega = 2.0 * std::f64::consts::PI * freq / sr;
+                // Compute EQ response once per pixel column, then draw fill + curve in two passes.
 
-                    // First-order IIR magnitude response: H(z) = c / (1 - (1-c)*z^-1)
-                    // |H(e^jω)|² = c² / (1 - 2(1-c)cos(ω) + (1-c)²)
-                    let iir_mag = |c: f64| -> f64 {
-                        if c < 1e-8 { return 1.0; }
-                        let one_minus_c = 1.0 - c;
-                        let num = c * c;
-                        let den = 1.0 - 2.0 * one_minus_c * omega.cos() + one_minus_c * one_minus_c;
-                        if den > 1e-12 { (num / den).sqrt() } else { 1.0 }
-                    };
-
-                    // HP cap: HP = 1 - LP  (one-pole HP complement)
-                    let hp_mag = if hp_coef > 1e-8 {
-                        let _lp = iir_mag(hp_coef);
-                        // HP response of complement filter
-                        let one_minus_c = 1.0 - hp_coef;
-                        let cos_w = omega.cos();
-                        let sin_w = omega.sin();
-                        // HP = input - LP(input) → H_hp(z) = 1 - H_lp(z)
-                        // H_lp = c / (1 - (1-c)z^-1)
-                        // H_hp = (1 - (1-c)z^-1 - c) / (1 - (1-c)z^-1)
-                        //      = -(1-c)(1 - z^-1) / (1 - (1-c)z^-1 )  -- NOT right for this DSP
-                        // Actually the DSP does: hp_state += (input - hp_state) * coef; output = input - hp_state
-                        // hp_state = LP(input) → output = input - LP(input) = (1 - H_lp) * input
-                        let re_lp = hp_coef * (1.0 - one_minus_c * cos_w)
-                            / (1.0 - 2.0 * one_minus_c * cos_w + one_minus_c * one_minus_c);
-                        let im_lp = hp_coef * (one_minus_c * sin_w)
-                            / (1.0 - 2.0 * one_minus_c * cos_w + one_minus_c * one_minus_c);
-                        let re_hp = 1.0 - re_lp;
-                        let im_hp = -im_lp;
-                        (re_hp * re_hp + im_hp * im_hp).sqrt()
-                    } else { 1.0 };
-
-                    // LP cap
-                    let lp_mag = if lp_coef > 1e-8 { iir_mag(lp_coef) } else { 1.0 };
-
-                    // 3-band EQ response:
-                    // low_band = LP(bass_coef)
-                    // high_residual = input - LP(treb_coef)
-                    // mid_band = input - low_band - high_residual = LP(treb_coef) - LP(bass_coef)
-                    // output = low * bass_g + mid * mid_g + high * treb_g + LP(treb_coef)
-                    //        = LP(bass_coef)*(bass_g - mid_g) + LP(treb_coef)*(1 - treb_g + mid_g) + input*(treb_g - mid_g) + input*mid_g
-                    // Let's compute properly with complex phasors
+                // Helper: evaluate EQ magnitude (dB) at a normalised angular frequency omega.
+                let eval_eq_db = |omega: f64| -> f64 {
                     let lp_complex = |c: f64| -> (f64, f64) {
                         if c < 1e-8 { return (1.0, 0.0); }
                         let omc = 1.0 - c;
-                        let den_re = 1.0 - omc * omega.cos();
-                        let den_im = omc * omega.sin();
-                        let den_sq = den_re * den_re + den_im * den_im;
-                        if den_sq < 1e-15 { return (1.0, 0.0); }
-                        (c * den_re / den_sq, c * den_im / den_sq)
+                        let dr = 1.0 - omc * omega.cos();
+                        let di = omc * omega.sin();
+                        let ds = dr * dr + di * di;
+                        if ds < 1e-15 { (1.0, 0.0) } else { (c * dr / ds, c * di / ds) }
                     };
 
-                    let (lp_bass_re, lp_bass_im) = lp_complex(bass_coef);
-                    let (lp_treb_re, lp_treb_im) = lp_complex(treb_coef);
+                    let hp_mag = if hp_coef > 1e-8 {
+                        let omc = 1.0 - hp_coef;
+                        let cos_w = omega.cos();
+                        let sin_w = omega.sin();
+                        let den_sq = 1.0 - 2.0 * omc * cos_w + omc * omc;
+                        if den_sq < 1e-15 { 1.0 } else {
+                            let re_lp = hp_coef * (1.0 - omc * cos_w) / den_sq;
+                            let im_lp = hp_coef * omc * sin_w / den_sq;
+                            let re_hp = 1.0 - re_lp;
+                            let im_hp = -im_lp;
+                            (re_hp * re_hp + im_hp * im_hp).sqrt()
+                        }
+                    } else { 1.0 };
 
-                    // low_band = LP_bass * input
-                    // high_band = (1 - LP_treb) * input
-                    // mid_band = LP_treb - LP_bass (the band between)
-                    // output = low*bass_g + mid*mid_g + high*treb_g
-                    // = LP_bass*(bass_g - mid_g) + LP_treb*(mid_g - treb_g) + treb_g
-                    let eq_re = lp_bass_re * (bass_g - mid_g)
-                        + lp_treb_re * (mid_g - treb_g)
-                        + treb_g;
-                    let eq_im = lp_bass_im * (bass_g - mid_g)
-                        + lp_treb_im * (mid_g - treb_g);
+                    let lp_mag = if lp_coef > 1e-8 {
+                        let omc = 1.0 - lp_coef;
+                        let num = lp_coef * lp_coef;
+                        let den = 1.0 - 2.0 * omc * omega.cos() + omc * omc;
+                        if den > 1e-12 { (num / den).sqrt() } else { 1.0 }
+                    } else { 1.0 };
+
+                    let (lbr, lbi) = lp_complex(bass_coef);
+                    let (ltr, lti) = lp_complex(treb_coef);
+                    let eq_re = lbr * (bass_g - mid_g) + ltr * (mid_g - treb_g) + treb_g;
+                    let eq_im = lbi * (bass_g - mid_g) + lti * (mid_g - treb_g);
                     let eq_mag = (eq_re * eq_re + eq_im * eq_im).sqrt();
 
-                    // Total magnitude
-                    let total_mag = hp_mag * lp_mag * eq_mag;
-                    let db = if total_mag > 1e-10 { 20.0 * total_mag.log10() } else { -db_range };
-                    let db_clamped = db.clamp(-db_range, db_range);
+                    let total = hp_mag * lp_mag * eq_mag;
+                    if total > 1e-10 { 20.0 * total.log10() } else { -db_range }
+                };
 
-                    // Map dB to pixel Y: 0dB = mid_line, +db_range = top, -db_range = bottom
-                    let py = mid_line - (db_clamped / db_range * (eq_h as f64 / 2.0)) as i32;
-                    let px = right_x + (t * eq_w as f64) as i32;
-
-                    if let Some((ppx, ppy)) = prev_px {
-                        canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 200, 140, 200));
-                        let _ = canvas.draw_line(
-                            sdl2::rect::Point::new(ppx, ppy),
-                            sdl2::rect::Point::new(px, py));
-                    }
-                    prev_px = Some((px, py));
+                // Build pixel array: one Y value per screen pixel column (no gaps).
+                // We iterate over integer pixel columns [0 .. eq_w) directly so each
+                // column is covered exactly once — no aliasing / missing columns.
+                let mut curve_py: Vec<i32> = Vec::with_capacity(eq_w as usize);
+                for col in 0..eq_w {
+                    let t = col as f64 / (eq_w - 1).max(1) as f64;
+                    let freq = (log_min + t * (log_max - log_min)).exp();
+                    let omega = 2.0 * std::f64::consts::PI * freq / sr;
+                    let db = eval_eq_db(omega).clamp(-db_range, db_range);
+                    let py = mid_line - (db / db_range * (eq_h as f64 / 2.0)) as i32;
+                    // Clamp to widget bounds so fill rects never escape.
+                    curve_py.push(py.clamp(eq_y, eq_y + eq_h - 1));
                 }
 
-                // Filled area under curve (subtle)
-                {
-                    let mut _prev_fill: Option<(i32, i32)> = None;
-                    for px_i in 0..=n_pts {
-                        let t = px_i as f64 / n_pts as f64;
-                        let freq = (log_min + t * (log_max - log_min)).exp();
-                        let omega2 = 2.0 * std::f64::consts::PI * freq / sr;
+                // Pass 1: filled area between curve and centre line — use fill_rect so
+                // every pixel column is fully covered with no gaps or bleed.
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 200, 140, 30));
+                for col in 0..eq_w {
+                    let px = right_x + col;
+                    let py = curve_py[col as usize];
+                    let (ya, yb) = if py <= mid_line {
+                        (py, mid_line)
+                    } else {
+                        (mid_line, py)
+                    };
+                    let fill_h = (yb - ya + 1).max(1) as u32;
+                    let _ = canvas.fill_rect(Rect::new(px, ya, 1, fill_h));
+                }
 
-                        let iir_mag2 = |c: f64| -> f64 {
-                            if c < 1e-8 { return 1.0; }
-                            let omc = 1.0 - c;
-                            let num = c * c;
-                            let den = 1.0 - 2.0 * omc * omega2.cos() + omc * omc;
-                            if den > 1e-12 { (num / den).sqrt() } else { 1.0 }
-                        };
-                        let hp_mag2 = if hp_coef > 1e-8 {
-                            let omc = 1.0 - hp_coef;
-                            let cos_w = omega2.cos();
-                            let sin_w = omega2.sin();
-                            let den_sq = 1.0 - 2.0*omc*cos_w + omc*omc;
-                            let re_lp = hp_coef*(1.0-omc*cos_w)/den_sq;
-                            let im_lp = hp_coef*(omc*sin_w)/den_sq;
-                            ((1.0-re_lp)*(1.0-re_lp)+im_lp*im_lp).sqrt()
-                        } else { 1.0 };
-                        let lp_mag2 = if lp_coef > 1e-8 { iir_mag2(lp_coef) } else { 1.0 };
-                        let lp_c2 = |c: f64| -> (f64,f64) {
-                            if c < 1e-8 { return (1.0, 0.0); }
-                            let omc = 1.0 - c;
-                            let dr = 1.0 - omc*omega2.cos();
-                            let di = omc*omega2.sin();
-                            let ds = dr*dr+di*di;
-                            if ds<1e-15 { (1.0,0.0) } else { (c*dr/ds, c*di/ds) }
-                        };
-                        let (lbr,lbi) = lp_c2(bass_coef);
-                        let (ltr,lti) = lp_c2(treb_coef);
-                        let er = lbr*(bass_g-mid_g)+ltr*(mid_g-treb_g)+treb_g;
-                        let ei = lbi*(bass_g-mid_g)+lti*(mid_g-treb_g);
-                        let em = (er*er+ei*ei).sqrt();
-                        let tm = hp_mag2*lp_mag2*em;
-                        let db2 = if tm>1e-10 { 20.0*tm.log10() } else { -db_range };
-                        let dc = db2.clamp(-db_range, db_range);
-                        let py2 = mid_line - (dc/db_range*(eq_h as f64/2.0)) as i32;
-                        let px2 = right_x + (t*eq_w as f64) as i32;
-                        // Draw vertical line from curve to mid_line
-                        if py2 != mid_line {
-                            let (ya, yb) = if py2 < mid_line { (py2, mid_line) } else { (mid_line, py2) };
-                            canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 200, 140, 30));
-                            let _ = canvas.draw_line(
-                                sdl2::rect::Point::new(px2, ya),
-                                sdl2::rect::Point::new(px2, yb));
-                        }
-                        _prev_fill = Some((px2, py2));
-                    }
+                // Pass 2: curve line — connect adjacent columns with draw_line so
+                // steep slopes have no holes.
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 200, 140, 200));
+                for col in 1..eq_w {
+                    let ppx = right_x + col - 1;
+                    let ppy = curve_py[(col - 1) as usize];
+                    let px  = right_x + col;
+                    let py  = curve_py[col as usize];
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(ppx, ppy),
+                        sdl2::rect::Point::new(px, py));
                 }
 
                 // Label and border
