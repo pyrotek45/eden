@@ -5833,7 +5833,9 @@ fn draw_bottom_mixer(
         let mas_y = osc_y + osc_h + 6;
         let mas_bot = my + mh - 16; // leave room for border + bottom label
         let mas_avail = (mas_bot - mas_y).max(0);
-        if mas_avail >= 30 && osc_w > 20 {
+        let mas_x = info_x + 10;
+        let mas_w = (osc_w - 10).max(0);
+        if mas_avail >= 30 && mas_w > 20 {
             let mut cy = mas_y;
 
             // ── LUFS meters ──
@@ -5853,7 +5855,7 @@ fn draw_bottom_mixer(
                 sdl2::pixels::Color::RGBA(120, 200, 150, 190)
             };
             draw_pixel_label(canvas, &state.theme, &lufs_m_str,
-                info_x, cy, osc_w, lufs_col);
+                mas_x, cy, mas_w, lufs_col);
             cy += 11;
             let lufs_st_str = if lufs_st < -60.0 || lufs_st == 0.0 {
                 "S: -∞ LUFS".to_string()
@@ -5861,7 +5863,7 @@ fn draw_bottom_mixer(
                 format!("S: {:.1} LUFS", lufs_st)
             };
             draw_pixel_label(canvas, &state.theme, &lufs_st_str,
-                info_x, cy, osc_w,
+                mas_x, cy, mas_w,
                 sdl2::pixels::Color::RGBA(100, 170, 130, 170));
             cy += 13;
 
@@ -5870,21 +5872,21 @@ fn draw_bottom_mixer(
             let corr = state.meters.master_correlation.clamp(-1.0, 1.0);
             if cy + 13 < mas_bot {
                 draw_pixel_label(canvas, &state.theme, "Phase",
-                    info_x, cy, osc_w,
+                    mas_x, cy, mas_w,
                     sdl2::pixels::Color::RGBA(110, 120, 140, 160));
                 cy += 9;
                 // Background track
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(22, 24, 30, 220));
-                let _ = canvas.fill_rect(Rect::new(info_x, cy, osc_w as u32, 6));
+                let _ = canvas.fill_rect(Rect::new(mas_x, cy, mas_w as u32, 6));
                 // Centre tick (0 = mono)
-                let mid_x = info_x + osc_w / 2;
+                let mid_x = mas_x + mas_w / 2;
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(70, 75, 85, 180));
                 let _ = canvas.draw_line(
                     sdl2::rect::Point::new(mid_x, cy),
                     sdl2::rect::Point::new(mid_x, cy + 5));
                 // Fill: map corr -1..+1 to bar width
                 let fill_frac = (corr + 1.0) / 2.0; // 0..1
-                let fill_w = (fill_frac * osc_w as f32) as i32;
+                let fill_w = (fill_frac * mas_w as f32) as i32;
                 let bar_col = if corr < 0.0 {
                     sdl2::pixels::Color::RGBA(200, 70, 50, 200)
                 } else if corr < 0.5 {
@@ -5893,14 +5895,14 @@ fn draw_bottom_mixer(
                     sdl2::pixels::Color::RGBA(60, 190, 110, 200)
                 };
                 canvas.set_draw_color(bar_col);
-                let _ = canvas.fill_rect(Rect::new(info_x, cy, fill_w.max(1) as u32, 6));
+                let _ = canvas.fill_rect(Rect::new(mas_x, cy, fill_w.max(1) as u32, 6));
                 // Border
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 80));
-                let _ = canvas.draw_rect(Rect::new(info_x, cy, osc_w as u32, 6));
+                let _ = canvas.draw_rect(Rect::new(mas_x, cy, mas_w as u32, 6));
                 // Numeric label
                 let corr_str = format!("{:+.2}", corr);
                 draw_pixel_label(canvas, &state.theme, &corr_str,
-                    info_x + osc_w - 26, cy - 1, 26,
+                    mas_x + mas_w - 26, cy - 1, 26,
                     sdl2::pixels::Color::RGBA(130, 140, 155, 160));
                 cy += 10;
             }
@@ -5913,15 +5915,15 @@ fn draw_bottom_mixer(
                     (20.0 * (peak / rms2).log10()).clamp(0.0, 30.0)
                 } else { 0.0_f32 };
                 draw_pixel_label(canvas, &state.theme, "DR",
-                    info_x, cy, osc_w,
+                    mas_x, cy, mas_w,
                     sdl2::pixels::Color::RGBA(110, 120, 140, 160));
                 cy += 9;
                 // Background
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(22, 24, 30, 220));
-                let _ = canvas.fill_rect(Rect::new(info_x, cy, osc_w as u32, 6));
+                let _ = canvas.fill_rect(Rect::new(mas_x, cy, mas_w as u32, 6));
                 // Fill: 0–30 dB range
                 let dr_frac = (dr_db / 30.0).clamp(0.0, 1.0);
-                let dr_fill = (dr_frac * osc_w as f32) as i32;
+                let dr_fill = (dr_frac * mas_w as f32) as i32;
                 let dr_col = if dr_db < 6.0 {
                     // Heavy limiting / brickwall
                     sdl2::pixels::Color::RGBA(200, 60, 50, 200)
@@ -5931,12 +5933,12 @@ fn draw_bottom_mixer(
                     sdl2::pixels::Color::RGBA(60, 180, 100, 200)
                 };
                 canvas.set_draw_color(dr_col);
-                let _ = canvas.fill_rect(Rect::new(info_x, cy, dr_fill.max(1) as u32, 6));
+                let _ = canvas.fill_rect(Rect::new(mas_x, cy, dr_fill.max(1) as u32, 6));
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 80));
-                let _ = canvas.draw_rect(Rect::new(info_x, cy, osc_w as u32, 6));
+                let _ = canvas.draw_rect(Rect::new(mas_x, cy, mas_w as u32, 6));
                 let dr_str = format!("{:.0}dB", dr_db);
                 draw_pixel_label(canvas, &state.theme, &dr_str,
-                    info_x + osc_w - 22, cy - 1, 22,
+                    mas_x + mas_w - 22, cy - 1, 22,
                     sdl2::pixels::Color::RGBA(130, 140, 155, 160));
                 cy += 10;
             }
@@ -5955,7 +5957,7 @@ fn draw_bottom_mixer(
                 let tp_str = if tp > 1e-6 {
                     format!("TP: {:.1}dBFS", tp_db)
                 } else { "TP: -∞".to_string() };
-                draw_pixel_label(canvas, &state.theme, &tp_str, info_x, cy, osc_w, tp_col);
+                draw_pixel_label(canvas, &state.theme, &tp_str, mas_x, cy, mas_w, tp_col);
             }
         }
     }
