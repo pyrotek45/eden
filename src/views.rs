@@ -4857,6 +4857,68 @@ fn draw_meter_bar(canvas: &mut Canvas<Window>, rms: f32, x: i32, y: i32, w_px: u
     }
 }
 
+/// Draw dB labels to the right of a stereo meter pair.
+/// `label_x` is the x position where labels start (right edge of right meter + gap).
+fn draw_meter_db_labels(
+    canvas: &mut Canvas<Window>,
+    theme: &Theme,
+    label_x: i32,
+    y: i32,
+    h_px: i32,
+    max_label_w: i32,
+) {
+    const DB_FLOOR: f64 = -60.0;
+    const DB_CEIL: f64 = 12.0;
+    const DB_RANGE: f64 = DB_CEIL - DB_FLOOR;
+    let label_scale = 1i32; // tiny pixel font
+    let gh = 5 * label_scale; // glyph height at scale=1
+                              // Draw labels at 0, -10, -20, -30, -40, -50, +10
+    for &db in &[0.0_f64, -10.0, -20.0, -30.0, -40.0, -50.0, 10.0] {
+        let frac = ((db - DB_FLOOR) / DB_RANGE) as f32;
+        let ty = y + h_px - (frac * h_px as f32) as i32;
+        if ty > y + gh / 2 && ty < y + h_px - gh / 2 {
+            let label = if db == 0.0 {
+                " 0".to_string()
+            } else {
+                format!("{}", db as i32)
+            };
+            let lx = label_x;
+            let ly = ty - gh / 2; // vertically center on the tick
+            let col = if db >= 0.0 {
+                sdl2::pixels::Color::RGBA(220, 90, 70, 180)
+            } else {
+                sdl2::pixels::Color::RGBA(120, 130, 140, 140)
+            };
+            draw_pixel_label_scaled(canvas, theme, &label, lx, ly, max_label_w, col, label_scale);
+        }
+    }
+}
+
+/// Draw a peak hold line on a meter bar.
+fn draw_peak_hold(canvas: &mut Canvas<Window>, ph: f32, x: i32, y: i32, w_px: u32, h_px: i32) {
+    const DB_FLOOR: f64 = -60.0;
+    const DB_CEIL: f64 = 12.0;
+    const DB_RANGE: f64 = DB_CEIL - DB_FLOOR;
+    if ph > 0.01 {
+        let pk_db = if ph > 1e-6 {
+            20.0 * (ph as f64).log10()
+        } else {
+            DB_FLOOR
+        };
+        let pk_frac = ((pk_db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0) as f32;
+        let ph_y = y + h_px - (pk_frac * h_px as f32) as i32;
+        let ph_col = if pk_db >= 0.0 {
+            sdl2::pixels::Color::RGBA(200, 40, 30, 255)
+        } else if pk_db >= -6.0 {
+            sdl2::pixels::Color::RGBA(220, 180, 40, 240)
+        } else {
+            sdl2::pixels::Color::RGBA(100, 220, 120, 200)
+        };
+        canvas.set_draw_color(ph_col);
+        let _ = canvas.fill_rect(Rect::new(x, ph_y, w_px, 2));
+    }
+}
+
 fn draw_bottom_mixer(
     canvas: &mut Canvas<Window>,
     input: &mut InputState,
@@ -4910,77 +4972,6 @@ fn draw_bottom_mixer(
     let scroll_offset = state.bottom_mixer_scroll_x as i32;
     let clip_h = if needs_scroll { h - scrollbar_h } else { h };
     canvas.set_clip_rect(Rect::new(0, top, content_w as u32, clip_h as u32));
-
-    /// Draw dB labels to the right of a stereo meter pair.
-    /// `label_x` is the x position where labels start (right edge of right meter + gap).
-    fn draw_meter_db_labels(
-        canvas: &mut Canvas<Window>,
-        theme: &Theme,
-        label_x: i32,
-        y: i32,
-        h_px: i32,
-        max_label_w: i32,
-    ) {
-        const DB_FLOOR: f64 = -60.0;
-        const DB_CEIL: f64 = 12.0;
-        const DB_RANGE: f64 = DB_CEIL - DB_FLOOR;
-        let label_scale = 1i32; // tiny pixel font
-        let gh = 5 * label_scale; // glyph height at scale=1
-                                  // Draw labels at 0, -10, -20, -30, -40, -50, +10
-        for &db in &[0.0_f64, -10.0, -20.0, -30.0, -40.0, -50.0, 10.0] {
-            let frac = ((db - DB_FLOOR) / DB_RANGE) as f32;
-            let ty = y + h_px - (frac * h_px as f32) as i32;
-            if ty > y + gh / 2 && ty < y + h_px - gh / 2 {
-                let label = if db == 0.0 {
-                    " 0".to_string()
-                } else {
-                    format!("{}", db as i32)
-                };
-                let lx = label_x;
-                let ly = ty - gh / 2; // vertically center on the tick
-                let col = if db >= 0.0 {
-                    sdl2::pixels::Color::RGBA(220, 90, 70, 180)
-                } else {
-                    sdl2::pixels::Color::RGBA(120, 130, 140, 140)
-                };
-                draw_pixel_label_scaled(
-                    canvas,
-                    theme,
-                    &label,
-                    lx,
-                    ly,
-                    max_label_w,
-                    col,
-                    label_scale,
-                );
-            }
-        }
-    }
-
-    // Helper: draw peak hold line on a meter
-    fn draw_peak_hold(canvas: &mut Canvas<Window>, ph: f32, x: i32, y: i32, w_px: u32, h_px: i32) {
-        const DB_FLOOR: f64 = -60.0;
-        const DB_CEIL: f64 = 12.0;
-        const DB_RANGE: f64 = DB_CEIL - DB_FLOOR;
-        if ph > 0.01 {
-            let pk_db = if ph > 1e-6 {
-                20.0 * (ph as f64).log10()
-            } else {
-                DB_FLOOR
-            };
-            let pk_frac = ((pk_db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0) as f32;
-            let ph_y = y + h_px - (pk_frac * h_px as f32) as i32;
-            let ph_col = if pk_db >= 0.0 {
-                sdl2::pixels::Color::RGBA(200, 40, 30, 255)
-            } else if pk_db >= -6.0 {
-                sdl2::pixels::Color::RGBA(220, 180, 40, 240)
-            } else {
-                sdl2::pixels::Color::RGBA(100, 220, 120, 200)
-            };
-            canvas.set_draw_color(ph_col);
-            let _ = canvas.fill_rect(Rect::new(x, ph_y, w_px, 2));
-        }
-    }
 
     // ── Per-track strips ──
     let mut _strip_idx = 0;
@@ -5999,13 +5990,53 @@ fn draw_bottom_mixer(
             sdl2::pixels::Color::RGBA(180, 160, 220, 240),
         );
 
-        // Stereo meters
-        let prv_meter_y = py + 20;
-        let prv_meter_h = (ph - 28).max(10);
-        let bar_w = 10u32;
-        let bar_gap = 4i32;
-        let total_meter_w = bar_w as i32 * 2 + bar_gap;
-        let meter_x = px + (preview_strip_w - total_meter_w) / 2;
+        // ── Volume fader (left side of strip) ──
+        let prv_content_y = py + 20;
+        let prv_bottom_pad = 8i32;
+        let prv_fader_h = (ph - 20 - prv_bottom_pad).max(20);
+        let prv_fader_x = px + 4;
+        let prv_fader_w = 14i32;
+        {
+            // Fader groove
+            canvas.set_draw_color(sdl2::pixels::Color::RGBA(12, 12, 16, 255));
+            let _ = canvas.fill_rect(Rect::new(
+                prv_fader_x + 4,
+                prv_content_y,
+                6,
+                prv_fader_h as u32,
+            ));
+
+            let mut prv_vol_pos = vol_gain_to_pos(state.preview_volume);
+            let prv_vol_id = input.next_id();
+            let prv_vol_changed = slider(
+                canvas,
+                input,
+                &state.theme,
+                &SliderParams {
+                    id: prv_vol_id,
+                    x: prv_fader_x,
+                    y: prv_content_y,
+                    width: prv_fader_w,
+                    height: prv_fader_h,
+                    min: 0.0,
+                    max: 1.0,
+                    orientation: SliderOrientation::Vertical,
+                    label: None,
+                    default_value: Some(vol_gain_to_pos(0.8)),
+                },
+                &mut prv_vol_pos,
+            );
+            if prv_vol_changed {
+                state.preview_volume = vol_pos_to_gain(prv_vol_pos);
+            }
+        }
+
+        // Stereo meters (right of fader)
+        let prv_meter_y = prv_content_y;
+        let prv_meter_h = prv_fader_h;
+        let bar_w = 8u32;
+        let bar_gap = 2i32;
+        let meter_x = prv_fader_x + prv_fader_w + 4;
 
         let prv_rms_l = state.meters.preview_rms_l;
         let prv_rms_r = state.meters.preview_rms_r;
@@ -6149,10 +6180,10 @@ fn draw_bottom_mixer(
         m_fader_h,
     );
 
-    // Out (post-everything) pair — uses smoothed true peak so it matches the VU
+    // Out (post-everything) pair — uses post-effect RMS so it matches Pre when no FX
     let m_out_x = m_meter_x + (m_meter_bar_w as i32) * 2 + m_meter_gap + m_pair_gap;
-    let m_out_l = state.meters.master_peak_smooth_post_l;
-    let m_out_r = state.meters.master_peak_smooth_post_r;
+    let m_out_l = state.meters.master_rms_post_l;
+    let m_out_r = state.meters.master_rms_post_r;
     draw_meter_bar(
         canvas,
         m_out_l,
@@ -8860,8 +8891,8 @@ fn draw_master_rack(
     canvas.set_draw_color(Theme::c(state.theme.bg_dark));
     let _ = canvas.fill_rect(Rect::new(0, top, w as u32, h as u32));
 
-    // Reserve right side for a condensed master meter strip
-    let rack_master_w = 80i32;
+    // Reserve right side for the full master meter strip
+    let rack_master_w = 220i32;
     let rack_w = w - rack_master_w - 4;
 
     draw_pixel_label(
@@ -10102,6 +10133,8 @@ fn draw_master_rack(
 
     // ══════════════════════════════════════════════════════════════════
     // ── MASTER METER STRIP (right side of rack view) ──
+    // Full metering matching the mixer master strip: VU, fader, Pre/Out
+    // meters, peak holds, clip LEDs, dB labels, info readout.
     // ══════════════════════════════════════════════════════════════════
     {
         let rmx = rack_w + 4;
@@ -10120,30 +10153,49 @@ fn draw_master_rack(
         draw_pixel_label(
             canvas,
             &state.theme,
-            "OUT",
-            rmx + 4,
+            "MASTER",
+            rmx + 8,
             rmy + 7,
-            rack_master_w - 8,
+            rack_master_w - 16,
             sdl2::pixels::Color::RGBA(180, 200, 255, 240),
         );
 
-        // Master volume fader (slim)
-        let rm_fader_top = rmy + 20;
-        let rm_fader_h = (rmh - 28).max(20);
-        let rm_fader_x = rmx + 4;
-        let rm_fader_w = 18i32;
+        // ── VU meter (below label, full width) ──
+        let rm_vu_h = 76i32;
+        let rm_vu_y = rmy + 18;
+        vu_meter(
+            canvas,
+            &state.theme,
+            rmx + 6,
+            rm_vu_y,
+            rack_master_w - 12,
+            rm_vu_h,
+            state.meters.master_vu_needle,
+            state.meters.master_vu_peak_needle,
+        );
+
+        // ── Master volume fader ──
+        let rm_fader_top = rm_vu_y + rm_vu_h + 12;
+        let rm_bottom_bar = 14i32;
+        let rm_fader_h = (rmh - (rm_fader_top - rmy) - rm_bottom_bar - 4).max(20);
+        let rm_fader_x = rmx + 10;
+        let rm_fader_w = 20i32;
 
         // Fader groove
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(12, 12, 16, 255));
         let _ = canvas.fill_rect(Rect::new(
-            rm_fader_x + 6,
+            rm_fader_x + 7,
             rm_fader_top,
             6,
             rm_fader_h as u32,
         ));
-
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(40, 42, 50, 200));
+        let _ = canvas.draw_line(
+            sdl2::rect::Point::new(rm_fader_x + 13, rm_fader_top),
+            sdl2::rect::Point::new(rm_fader_x + 13, rm_fader_top + rm_fader_h),
+        );
         // dB tick marks
-        for &db_mark in &[-48.0_f32, -24.0, -12.0, 0.0, 6.0] {
+        for &db_mark in &[-48.0_f32, -36.0, -24.0, -12.0, -6.0, 0.0, 6.0] {
             let gain = if db_mark <= -60.0 {
                 0.0
             } else {
@@ -10189,47 +10241,210 @@ fn draw_master_rack(
             }
         }
 
-        // Stereo post meters
-        let rm_meter_x = rmx + 30;
-        let rm_bar_w = 10u32;
-        let rm_bar_gap = 4i32;
-        let rm_meter_y = rmy + 20;
-        let rm_meter_h = (rmh - 28).max(10);
+        // ── Stereo meters: Pre (pre-effect) + Out (post-effect) pairs ──
+        let rm_meter_x = rmx + 38;
+        let rm_bar_w = 7u32;
+        let rm_bar_gap = 2i32;
+        let rm_pair_gap = 4i32;
 
-        let rms_post_l = state.meters.master_peak_smooth_post_l;
-        let rms_post_r = state.meters.master_peak_smooth_post_r;
+        // Pre-effects pair
+        let rm_rms_l = state.meters.master_rms_l;
+        let rm_rms_r = state.meters.master_rms_r;
         draw_meter_bar(
-            canvas, rms_post_l, rm_meter_x, rm_meter_y, rm_bar_w, rm_meter_h,
+            canvas,
+            rm_rms_l,
+            rm_meter_x,
+            rm_fader_top,
+            rm_bar_w,
+            rm_fader_h,
         );
         draw_meter_bar(
             canvas,
-            rms_post_r,
+            rm_rms_r,
             rm_meter_x + rm_bar_w as i32 + rm_bar_gap,
-            rm_meter_y,
+            rm_fader_top,
             rm_bar_w,
-            rm_meter_h,
+            rm_fader_h,
         );
 
-        // dB value label at bottom
+        // Out (post-effects) pair
+        let rm_out_x = rm_meter_x + (rm_bar_w as i32) * 2 + rm_bar_gap + rm_pair_gap;
+        let rm_out_l = state.meters.master_rms_post_l;
+        let rm_out_r = state.meters.master_rms_post_r;
+        draw_meter_bar(
+            canvas,
+            rm_out_l,
+            rm_out_x,
+            rm_fader_top,
+            rm_bar_w,
+            rm_fader_h,
+        );
+        draw_meter_bar(
+            canvas,
+            rm_out_r,
+            rm_out_x + rm_bar_w as i32 + rm_bar_gap,
+            rm_fader_top,
+            rm_bar_w,
+            rm_fader_h,
+        );
+
+        // Peak hold (pre pair)
+        draw_peak_hold(
+            canvas,
+            state.meters.master_peak_hold_l,
+            rm_meter_x,
+            rm_fader_top,
+            rm_bar_w,
+            rm_fader_h,
+        );
+        draw_peak_hold(
+            canvas,
+            state.meters.master_peak_hold_r,
+            rm_meter_x + rm_bar_w as i32 + rm_bar_gap,
+            rm_fader_top,
+            rm_bar_w,
+            rm_fader_h,
+        );
+
+        // Peak hold (out pair)
+        draw_peak_hold(
+            canvas,
+            state.meters.master_peak_hold_post_l,
+            rm_out_x,
+            rm_fader_top,
+            rm_bar_w,
+            rm_fader_h,
+        );
+        draw_peak_hold(
+            canvas,
+            state.meters.master_peak_hold_post_r,
+            rm_out_x + rm_bar_w as i32 + rm_bar_gap,
+            rm_fader_top,
+            rm_bar_w,
+            rm_fader_h,
+        );
+
+        // dB labels to the right of out meters
         {
+            let rm_labels_x = rm_out_x + rm_bar_w as i32 * 2 + rm_bar_gap + 2;
+            let rm_label_max_w = rmx + rack_master_w - rm_labels_x - 4;
+            if rm_label_max_w > 8 {
+                draw_meter_db_labels(
+                    canvas,
+                    &state.theme,
+                    rm_labels_x,
+                    rm_fader_top,
+                    rm_fader_h,
+                    rm_label_max_w,
+                );
+            }
+        }
+
+        // Clip LEDs (on out pair)
+        for (ch, (flag, mx_off)) in [
+            (state.meters.master_clipping_l, (rm_out_x - rm_meter_x)),
+            (
+                state.meters.master_clipping_r,
+                (rm_out_x - rm_meter_x) + rm_bar_w as i32 + rm_bar_gap,
+            ),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let led_x = rm_meter_x + mx_off;
+            let led_y = rm_fader_top - 7;
+            if *flag {
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 20, 20, 255));
+                let _ = canvas.fill_rect(Rect::new(led_x, led_y, rm_bar_w, 4));
+                if input.mouse_in_rect(led_x, led_y, rm_bar_w as i32, 4) && input.mouse_pressed {
+                    if ch == 0 {
+                        state.meters.master_clipping_l = false;
+                    } else {
+                        state.meters.master_clipping_r = false;
+                    }
+                }
+            } else {
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(30, 50, 30, 160));
+                let _ = canvas.fill_rect(Rect::new(led_x, led_y, rm_bar_w, 4));
+            }
+        }
+
+        // Pre / Out labels below meter pairs
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            "Pre",
+            rm_meter_x,
+            rm_fader_top + rm_fader_h + 1,
+            rm_bar_w as i32 * 2 + rm_bar_gap,
+            sdl2::pixels::Color::RGBA(100, 110, 130, 150),
+        );
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            "Out",
+            rm_out_x,
+            rm_fader_top + rm_fader_h + 1,
+            rm_bar_w as i32 * 2 + rm_bar_gap,
+            sdl2::pixels::Color::RGBA(140, 180, 120, 180),
+        );
+
+        // ── Info readout (right of meters) ──
+        let info_x = rm_out_x + (rm_bar_w as i32) * 2 + rm_bar_gap + 10 + 10;
+        let info_w = rack_master_w - (info_x - rmx) - 8;
+        if info_w > 20 {
+            let peak = state.meters.master_peak_l.max(state.meters.master_peak_r);
+            let rms = state.meters.master_rms;
+
+            let peak_db_str = if peak > 1e-6 {
+                format!("Peak {:.1}dB", 20.0 * peak.log10())
+            } else {
+                "Peak -∞".to_string()
+            };
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                &peak_db_str,
+                info_x,
+                rm_fader_top + 2,
+                info_w,
+                sdl2::pixels::Color::RGBA(180, 190, 200, 220),
+            );
+
+            let rms_db_str = if rms > 1e-6 {
+                format!("RMS {:.1}dB", 20.0 * rms.log10())
+            } else {
+                "RMS -∞".to_string()
+            };
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                &rms_db_str,
+                info_x,
+                rm_fader_top + 16,
+                info_w,
+                sdl2::pixels::Color::RGBA(160, 170, 180, 200),
+            );
+
+            // dB label for master volume
             let db_val = if state.master_volume_ui > 1e-6 {
                 20.0 * (state.master_volume_ui as f64).log10()
             } else {
                 -60.0
             };
-            let db_str = if db_val <= -60.0 {
-                "-∞ dB".to_string()
+            let vol_str = if db_val <= -60.0 {
+                "Vol -∞".to_string()
             } else {
-                format!("{:.1}dB", db_val)
+                format!("Vol {:.1}dB", db_val)
             };
             draw_pixel_label(
                 canvas,
                 &state.theme,
-                &db_str,
-                rmx + 4,
-                rmy + rmh - 10,
-                rack_master_w - 8,
-                sdl2::pixels::Color::RGBA(160, 170, 190, 200),
+                &vol_str,
+                info_x,
+                rm_fader_top + 30,
+                info_w,
+                sdl2::pixels::Color::RGBA(140, 150, 160, 170),
             );
         }
 

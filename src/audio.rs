@@ -116,6 +116,8 @@ pub struct AudioShared {
     pub preview_loop_enabled: bool,
     /// Start position to loop back to (in output samples). Used when preview_loop_enabled is true.
     pub preview_loop_start: usize,
+    /// Preview playback volume (0.0–1.0).
+    pub preview_volume: f32,
     // ── MIDI note preview ────────────────────────────────────────────
     /// When set: list of (track_index, pitch, velocity) — audio thread spawns voices
     pub preview_notes: Vec<(usize, u8, u8)>,
@@ -246,6 +248,7 @@ impl Default for AudioShared {
             preview_end_sample: 0,
             preview_loop_enabled: false,
             preview_loop_start: 0,
+            preview_volume: 0.8,
             preview_notes: Vec::new(),
             preview_sustain: false,
             preview_note_off: Vec::new(),
@@ -872,7 +875,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     };
                                     let frac = (src_pos2 - src_pos2.floor()) as f32;
                                     let interp = s0 + (s1 - s0) * frac;
-                                    let ps = (interp * snap.master_volume).clamp(-1.0, 1.0);
+                                    let ps = (interp * snap.preview_volume).clamp(-1.0, 1.0);
                                     frame_samples_l[fi] = ps;
                                     frame_samples_r[fi] = ps;
                                     preview_pos_local += 1;
@@ -889,7 +892,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             };
                             let frac = (src_pos - src_pos.floor()) as f32;
                             let interp = s0 + (s1 - s0) * frac;
-                            let ps = (interp * snap.master_volume).clamp(-1.0, 1.0);
+                            let ps = (interp * snap.preview_volume).clamp(-1.0, 1.0);
                             // Preview samples are mono — write equally to both channels
                             frame_samples_l[fi] = ps;
                             frame_samples_r[fi] = ps;
@@ -2487,7 +2490,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 };
                                 let frac = (src_pos2 - src_pos2.floor()) as f32;
                                 let interp = s0 + (s1 - s0) * frac;
-                                let ps = (interp * snap.master_volume).clamp(-1.0, 1.0);
+                                let ps = (interp * snap.preview_volume).clamp(-1.0, 1.0);
                                 frame_samples_l[fi] += ps;
                                 frame_samples_r[fi] += ps;
                                 preview_sample_rms_accum_l += ps * ps;
@@ -2506,7 +2509,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         };
                         let frac = (src_pos - src_pos.floor()) as f32;
                         let interp = s0 + (s1 - s0) * frac;
-                        let preview_sample = interp * snap.master_volume;
+                        let preview_sample = interp * snap.preview_volume;
                         frame_samples_l[fi] += preview_sample;
                         frame_samples_r[fi] += preview_sample;
                         preview_sample_rms_accum_l += preview_sample * preview_sample;

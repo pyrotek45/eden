@@ -526,6 +526,8 @@ pub struct AppState {
     pub sample_preview_start_sample: usize,
     /// End sample boundary for preview playback (in output samples, 0 = play to file end)
     pub sample_preview_end_sample: usize,
+    /// Preview playback volume (0.0–1.0), applied in the audio callback.
+    pub preview_volume: f32,
     /// Preview notes to send to audio thread: Vec of (track_idx, pitch, velocity)
     pub preview_notes: Vec<(usize, u8, u8)>,
     /// Set to true when user triggers panic (stop all sounds)
@@ -903,6 +905,7 @@ impl AppState {
             sample_preview_trigger: false,
             sample_preview_start_sample: 0,
             sample_preview_end_sample: 0,
+            preview_volume: 0.8,
             preview_notes: Vec::new(),
             panic_triggered: false,
             sample_auto_play: true,

@@ -1722,6 +1722,7 @@ fn main() {
                 audio.loop_start = state.project.transport.loop_region.start;
                 audio.loop_end = state.project.transport.loop_region.end;
                 audio.master_volume = state.master_volume_ui;
+                audio.preview_volume = state.preview_volume;
 
                 if !state.preview_notes.is_empty() {
                     audio.preview_notes.append(&mut state.preview_notes);
@@ -1859,15 +1860,15 @@ fn main() {
                         state.meters.master_peak_hold_post_r =
                             (state.meters.master_peak_hold_post_r - OUT_PEAK_DECAY).max(0.0);
                     }
-                    // Master VU ballistic needle — driven from true peak so it
-                    // matches the output meter bars (which also use true peak).
+                    // Master VU ballistic needle — driven from post-effect RMS
+                    // so it matches the output bar meters.
                     {
-                        let m_peak = state
+                        let m_rms = state
                             .meters
-                            .master_true_peak_post_l
-                            .max(state.meters.master_true_peak_post_r);
-                        let m_vu_db = if m_peak > 1e-6 {
-                            20.0 * m_peak.log10()
+                            .master_rms_post_l
+                            .max(state.meters.master_rms_post_r);
+                        let m_vu_db = if m_rms > 1e-6 {
+                            20.0 * m_rms.log10()
                         } else {
                             -60.0_f32
                         };
