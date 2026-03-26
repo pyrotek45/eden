@@ -3909,74 +3909,34 @@ impl EffectModule for FxLimiter {
         self.gain_buf[self.write_pos] = target_gr;
 
         // Read the oldest sample from the delay line (this is our output sample).
+        // Because write_pos just received the newest sample, read_pos is exactly
+        // `la` samples behind — the lookahead delay.
         let read_pos = (self.write_pos + 1) % la;
         let dl = self.delay_buf[read_pos * 2];
         let dr = self.delay_buf[read_pos * 2 + 1];
 
-        // Backward-minimum propagation through the lookahead window.
-        //
-        // We need the output sample (at read_pos) to already have enough
-        // gain reduction applied so that when a future loud peak arrives
-        // it doesn't overshoot. The gain at read_pos must be ≤ the gain of
-        // every sample between read_pos and write_pos, taking into account
-        // the linear attack ramp from unity down to the target.
-        //
-        // Simple O(la) approach: scan backwards from write_pos to read_pos.
-        // For each position j steps before write_pos, the required gain is:
-        //   min(gain_buf[pos], prev_min)
-        // And we linearly ramp from 1.0 to that min over the lookahead window.
-        //
-        // Optimized: just find the minimum gain in the window and compute
-        // the ramp value at read_pos.
-        let mut min_gr = 1.0_f64;
-        for k in 0..la {
-            let idx = (read_pos + k) % la;
-            if self.gain_buf[idx] < min_gr {
-                min_gr = self.gain_buf[idx];
-            }
-        }
-
-        // Linear ramp: the output sample needs to start ramping down so that
-        // by the time we reach the peak, the gain is fully applied.
-        // At read_pos (distance=min_distance from the peak), the gain should be:
-        //   lerp(1.0, min_gr, 1.0) if we ARE at the peak, or
-        //   lerp(1.0, min_gr, fraction) where fraction depends on position.
-        //
-        // For a proper limiter, we want the gain at read_pos to be the minimum
-        // of all the linearly-ramped gains from each peak in the window.
-        // Each peak at distance d from read_pos creates a gain ramp:
-        //   gr_at_read = 1.0 - (1.0 - target_gr) * (la - d) / la  for d > 0
-        //   gr_at_read = target_gr                                   for d = 0
-        //
-        // We take the minimum of all such ramp contributions.
+        // Find the minimum required gain across the entire lookahead window.
+        // This is the gain we must apply to read_pos so that every future peak
+        // within the window is already at or below ceiling when it reaches the
+        // output. The lookahead delay means we have exactly `la` samples of
+        // warning — enough to apply the gain reduction without any transient
+        // overshoot.
         let mut read_gr = 1.0_f64;
         for k in 0..la {
             let idx = (read_pos + k) % la;
             let tgr = self.gain_buf[idx];
-            if tgr < 1.0 {
-                // This peak at distance k from read_pos contributes a ramp
-                let ramp_gr = if k == 0 {
-                    tgr // we're at the peak, full reduction needed
-                } else {
-                    // Linear interpolation: at distance k (out of la), we need
-                    // a fraction of the reduction. At k=la-1 (furthest ahead),
-                    // minimal pre-reduction; at k=0, full reduction.
-                    let frac = 1.0 - (k as f64 / la as f64);
-                    1.0 - (1.0 - tgr) * frac
-                };
-                if ramp_gr < read_gr {
-                    read_gr = ramp_gr;
-                }
+            if tgr < read_gr {
+                read_gr = tgr;
             }
         }
 
-        // Apply release smoothing so that gain recovery doesn't cause
-        // audible pumping. Attack is instant (follow read_gr down),
-        // release ramps back up with the release time constant.
+        // Release smoothing: attack is instant (never let read_gr overshoot),
+        // release ramps back up toward 1.0 at the user-controlled rate.
         self.smooth_gr = if read_gr < self.smooth_gr {
+            // Attack: snap immediately to prevent overshoot
             read_gr
         } else {
-            // Release: exponential approach toward read_gr
+            // Release: exponential approach toward read_gr (which may be 1.0)
             self.smooth_gr + (read_gr - self.smooth_gr) * (1.0 - release_coeff)
         };
         let gr = self.smooth_gr;
