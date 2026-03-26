@@ -5417,7 +5417,8 @@ fn draw_bottom_mixer(
             let knob_r = 13i32;
             let cell_w = (right_w / 2).max(30);
             let cell_h = 42i32;
-            let knob_base_y = below_vu + 20;
+            // Push knobs down so they don't overlap the bypass button (button ends at +18)
+            let knob_base_y = below_vu + byp_btn_h + 10;
 
             for (pi, desc) in cs_descs.iter().enumerate() {
                 let col = (pi / 5) as i32;
@@ -6369,7 +6370,8 @@ fn draw_bottom_mixer(
                 for px in 0..osc_w {
                     let idx = (px as f32 * step) as usize;
                     let s = osc_data.get(idx).copied().unwrap_or(0.0);
-                    let sy_sample = osc_mid - (s * osc_h as f32 * 0.45) as i32;
+                    let sy_sample = (osc_mid - (s * osc_h as f32 * 0.45) as i32)
+                        .clamp(osc_y, osc_y + osc_h - 1);
                     if px > 0 {
                         canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 220, 160, 200));
                         let _ = canvas.draw_line(
