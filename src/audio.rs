@@ -2318,10 +2318,15 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             mix_r = mr;
                         }
                     }
-                    // Capture post-effect master level (before master volume)
+                    // Capture post-effect master level (before master volume).
+                    // master_rms_accum = mono RMS for the centre VU meter.
+                    // master_rms_post_l/r_accum = stereo output meters — these also
+                    // sit post-limiter/pre-fader so they correctly show the ceiling.
                     {
                         let ms = (mix_l + mix_r) * 0.5;
                         master_rms_accum += (ms * ms) as f32;
+                        master_rms_post_l_accum += (mix_l * mix_l) as f32;
+                        master_rms_post_r_accum += (mix_r * mix_r) as f32;
                     }
 
                     mix_l *= smooth_master_vol;
@@ -2357,12 +2362,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
 
                     frame_samples_l[frame_idx] = mix_l as f32;
                     frame_samples_r[frame_idx] = mix_r as f32;
-
-                    // Accumulate post-everything stereo RMS (final output)
-                    master_rms_post_l_accum +=
-                        frame_samples_l[frame_idx] * frame_samples_l[frame_idx];
-                    master_rms_post_r_accum +=
-                        frame_samples_r[frame_idx] * frame_samples_r[frame_idx];
 
                     // Accumulate per-track squared samples for RMS (mono + stereo)
                     // Use post-pan levels so track meters match what goes into master bus
