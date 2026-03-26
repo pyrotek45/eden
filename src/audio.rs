@@ -517,6 +517,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         // removes discontinuity pops with zero tonal impact.
         const ANTI_CLICK_SAMPLES: usize = 220;
         let mut anti_click_remaining: usize = 0;
+        // Anti-click fade-out: when transport stops, applies a fast fade-out to the
+        // first callback of the stopped path so the signal ramps to ~0 instead of
+        // cutting abruptly.
+        let mut anti_click_fadeout: usize = 0;
 
         // DC-offset high-pass filter state (one-pole IIR, fc ≈ 20 Hz).
         // Removes any DC bias that can push the waveform off-centre and cause
@@ -771,6 +775,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             voice.released = true;
                         }
                     }
+                    // Start fade-out so the stopped path ramps from 1→0 over the first
+                    // few ms, preventing an audible pop when transport stops.
+                    anti_click_fadeout = ANTI_CLICK_SAMPLES;
                 }
                 // Detect transport start transition → reset arp state so last_beat doesn't
                 // refer to a position from a previous play session, causing the arp to
@@ -786,6 +793,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             fx.reset();
                         }
                     }
+                    // Fade-in from silence when starting playback (same as seek fade-in)
+                    anti_click_remaining = ANTI_CLICK_SAMPLES;
                 }
                 was_playing = snap.playing;
 
@@ -915,11 +924,29 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     let preview_rms_accum = &mut cb_preview_rms;
                     let preview_rms_pre_accum = &mut cb_preview_rms_pre;
 
+                    // Per-track stereo RMS accumulators (for mixer L/R meters during preview)
+                    let track_rms_l_accum = {
+                        cb_track_rms_l.resize(num_tracks, 0.0_f32);
+                        for v in &mut cb_track_rms_l[..num_tracks] { *v = 0.0; }
+                        &mut cb_track_rms_l
+                    };
+                    let track_rms_r_accum = {
+                        cb_track_rms_r.resize(num_tracks, 0.0_f32);
+                        for v in &mut cb_track_rms_r[..num_tracks] { *v = 0.0; }
+                        &mut cb_track_rms_r
+                    };
+
                     // Per-track accumulators for the inner loop
                     cb_per_track_sample.clear();
                     cb_per_track_sample.resize(num_tracks, (0.0_f64, 0.0_f64));
                     cb_per_track_voices.clear();
                     cb_per_track_voices.resize(num_tracks, 0usize);
+
+                    // Initialise smooth master volume if sentinel (first callback while stopped)
+                    if smooth_master_vol < 0.0 {
+                        smooth_master_vol = snap.master_volume as f64;
+                    }
+                    smooth_master_vol += (snap.master_volume as f64 - smooth_master_vol) * (FX_SMOOTH_COEFF as f64 * frames as f64).min(1.0);
 
                     let beats_per_sample_kbd = snap.bpm / 60.0 / sample_rate;
                     #[allow(clippy::needless_range_loop)]
@@ -1146,8 +1173,15 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 ((track.pan as f64) + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
                             let pan_l = crate::modules::fast_cos(theta);
                             let pan_r = crate::modules::fast_sin(theta);
-                            mix_l += tl * pan_l * track.volume as f64;
-                            mix_r += tr * pan_r * track.volume as f64;
+                            let sl = tl * pan_l * track.volume as f64;
+                            let sr = tr * pan_r * track.volume as f64;
+                            mix_l += sl;
+                            mix_r += sr;
+                            // Accumulate stereo RMS for track meters
+                            if ti < track_rms_l_accum.len() {
+                                track_rms_l_accum[ti] += (sl * sl) as f32;
+                                track_rms_r_accum[ti] += (sr * sr) as f32;
+                            }
                         }
                         // Apply master rack effects to preview stereo mix
                         for (fi2, (_, fx_params)) in snap.master_effects.iter().enumerate() {
@@ -1203,12 +1237,21 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
 
                     // Expand to channels + write back (stereo)
+                    // Apply anti-click fade-out if transport just stopped
                     for (fi, frame) in data.chunks_mut(channels).enumerate() {
-                        let (l, r) = if fi < frames {
+                        let (mut l, mut r) = if fi < frames {
                             (frame_samples_l[fi], frame_samples_r[fi])
                         } else {
                             (0.0, 0.0)
                         };
+                        // Fade-out envelope: ramp 1→0 over ANTI_CLICK_SAMPLES
+                        if anti_click_fadeout > 0 {
+                            let t = anti_click_fadeout as f64 / ANTI_CLICK_SAMPLES as f64;
+                            let gain = (t * std::f64::consts::FRAC_PI_2).sin() as f32;
+                            l *= gain;
+                            r *= gain;
+                            anti_click_fadeout -= 1;
+                        }
                         if channels >= 2 {
                             frame[0] = l;
                             frame[1] = r;
@@ -1257,6 +1300,21 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 };
                                 *v = *v * 0.85 + rms * 0.15;
                             }
+                            // Stereo per-track RMS (for mixer L/R meters)
+                            if s.track_rms_l.len() != n { s.track_rms_l.resize(n, 0.0); }
+                            if s.track_rms_r.len() != n { s.track_rms_r.resize(n, 0.0); }
+                            for i in 0..n {
+                                let rl = if i < track_rms_l_accum.len() {
+                                    (track_rms_l_accum[i] / frames as f32).sqrt()
+                                } else { 0.0 };
+                                let rr = if i < track_rms_r_accum.len() {
+                                    (track_rms_r_accum[i] / frames as f32).sqrt()
+                                } else { 0.0 };
+                                s.track_rms_l[i] = s.track_rms_l[i] * 0.85 + rl * 0.15;
+                                if s.track_rms_l[i] < 0.0005 { s.track_rms_l[i] = 0.0; }
+                                s.track_rms_r[i] = s.track_rms_r[i] * 0.85 + rr * 0.15;
+                                if s.track_rms_r[i] < 0.0005 { s.track_rms_r[i] = 0.0; }
+                            }
                         } else {
                             for v in s.track_rms.iter_mut() {
                                 *v *= 0.85;
@@ -1264,6 +1322,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     *v = 0.0;
                                 }
                             }
+                            // Decay stereo meters when no frames
+                            for v in s.track_rms_l.iter_mut() { *v *= 0.85; if *v < 0.0005 { *v = 0.0; } }
+                            for v in s.track_rms_r.iter_mut() { *v *= 0.85; if *v < 0.0005 { *v = 0.0; } }
                         }
                         // Update oscilloscope (use L channel for display)
                         let osc_len = s.oscilloscope.len();

@@ -4642,7 +4642,7 @@ pub fn draw_bottom_panel(
         {
             // Closed + single-click on dots zone (no drag) → open halfway
             input.consumed = true;
-            state.bottom_panel_height = 400;
+            state.bottom_panel_height = 600;
             state.bottom_panel_open = true;
         }
     }
