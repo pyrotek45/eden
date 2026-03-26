@@ -5042,45 +5042,6 @@ fn draw_bottom_mixer(
             name_col,
         );
 
-        // ── Slim / Expand toggle button (top-right of name bar) ──
-        {
-            let toggle_w = 16i32;
-            let toggle_h = 14i32;
-            let toggle_x = x + strip_w - toggle_w - 2;
-            let toggle_y = name_y - 2;
-            let slim_btn_id = input.next_id();
-            let label = if is_slim { "+" } else { "-" };
-            let hint = if is_slim {
-                "Expand strip"
-            } else {
-                "Collapse to slim"
-            };
-            let clicked = button(
-                canvas,
-                input,
-                &state.theme,
-                &ButtonParams {
-                    id: slim_btn_id,
-                    x: toggle_x,
-                    y: toggle_y,
-                    width: toggle_w,
-                    height: toggle_h,
-                    label: label.into(),
-                    toggled: is_slim,
-                    icon: ButtonIcon::None,
-                    hint: Some(hint.into()),
-                    ..Default::default()
-                },
-            );
-            if clicked {
-                if is_slim {
-                    state.mixer_slim_tracks.remove(&track_id);
-                } else {
-                    state.mixer_slim_tracks.insert(track_id);
-                }
-            }
-        }
-
         // ── Click to select strip ──
         let name_zone_h = 16i32;
         let strip_hover = input.mouse_in_rect(x, sy, strip_w, name_zone_h);
@@ -5898,6 +5859,40 @@ fn draw_bottom_mixer(
                     }
                 }
             }
+
+            // ── Slim / Expand toggle button (right of Solo) ──
+            let slim_x = solo_x + btn_sz + 4;
+            let slim_btn_id = input.next_id();
+            let slim_label = if is_slim { "+" } else { "-" };
+            let slim_hint = if is_slim {
+                "Expand strip"
+            } else {
+                "Collapse to slim"
+            };
+            let slim_clicked = button(
+                canvas,
+                input,
+                &state.theme,
+                &ButtonParams {
+                    id: slim_btn_id,
+                    x: slim_x,
+                    y: btn_y,
+                    width: btn_sz,
+                    height: btn_sz,
+                    label: slim_label.into(),
+                    toggled: is_slim,
+                    icon: ButtonIcon::None,
+                    hint: Some(slim_hint.into()),
+                    ..Default::default()
+                },
+            );
+            if slim_clicked {
+                if is_slim {
+                    state.mixer_slim_tracks.remove(&track_id);
+                } else {
+                    state.mixer_slim_tracks.insert(track_id);
+                }
+            }
         }
 
         // Strip border
@@ -6067,7 +6062,7 @@ fn draw_bottom_mixer(
     );
 
     // ── Master volume fader ──
-    let m_fader_top = m_vu_y + m_vu_h + 4;
+    let m_fader_top = m_vu_y + m_vu_h + 12;
     let m_bottom_bar = 14i32;
     let m_fader_h = (mh - (m_fader_top - my) - m_bottom_bar - 4).max(20);
     let m_fader_x = mx + 10;
