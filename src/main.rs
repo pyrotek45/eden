@@ -1829,6 +1829,39 @@ fn main() {
                     } else {
                         (state.meters.master_peak_hold_post_r - 0.002).max(0.0)
                     };
+                    // Master VU ballistic needle (same logic as track VU)
+                    {
+                        let m_rms = state.meters.master_rms_post_l
+                            .max(state.meters.master_rms_post_r);
+                        let m_vu_db = if m_rms > 1e-6 { 20.0 * m_rms.log10() } else { -60.0_f32 };
+                        let m_vu_pos = ((m_vu_db + 20.0) / 23.0).clamp(0.0, 1.0);
+                        let vu_coeff = 0.10_f32;
+                        let peak_attack = 0.6_f32;
+                        let peak_decay = 0.008_f32;
+                        let peak_hold_time = 90u32;
+                        state.meters.master_vu_needle += (m_vu_pos - state.meters.master_vu_needle) * vu_coeff;
+                        if m_vu_pos > state.meters.master_vu_peak_needle {
+                            state.meters.master_vu_peak_needle +=
+                                (m_vu_pos - state.meters.master_vu_peak_needle) * peak_attack;
+                            state.meters.master_vu_peak_hold_frames = peak_hold_time;
+                        } else if state.meters.master_vu_peak_hold_frames > 0 {
+                            state.meters.master_vu_peak_hold_frames -= 1;
+                        } else {
+                            state.meters.master_vu_peak_needle =
+                                (state.meters.master_vu_peak_needle - peak_decay).max(0.0);
+                        }
+                    }
+                    // Stereo correlation: cos(angle between L and R vectors) ≈ (L·R) / (|L|·|R|)
+                    // Use RMS as proxy: correlation ≈ 2*L*R / (L²+R²), range -1..+1
+                    {
+                        let l = state.meters.master_rms_post_l;
+                        let r = state.meters.master_rms_post_r;
+                        let denom = l * l + r * r;
+                        let corr_raw = if denom > 1e-10 { 2.0 * l * r / denom } else { 1.0_f32 };
+                        // Smooth toward new value
+                        state.meters.master_correlation +=
+                            (corr_raw - state.meters.master_correlation) * 0.05;
+                    }
                     // Per-track stereo peak hold + clipping
                     if state.meters.track_peak_hold_l.len() != n { state.meters.track_peak_hold_l.resize(n, 0.0); }
                     if state.meters.track_peak_hold_r.len() != n { state.meters.track_peak_hold_r.resize(n, 0.0); }

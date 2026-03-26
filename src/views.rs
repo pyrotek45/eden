@@ -5282,7 +5282,7 @@ fn draw_bottom_mixer(
 
             // ── EQ curve visual (below knobs) ──
             let eq_y = knob_base_y + 12 + 5 * cell_h + 4;
-            let eq_h = 36i32;
+            let eq_h = 50i32;
             let eq_w = right_w.min(cell_w * 2);
             if eq_y + eq_h < content_bottom && eq_w > 20 {
                 // Background
@@ -5427,7 +5427,7 @@ fn draw_bottom_mixer(
 
                 // ── Compressor curve + GR bar (actual gain reduction from audio) ──
                 let comp_y = eq_y + eq_h + 4;
-                let comp_h = 36i32;
+                let comp_h = 50i32;
                 if comp_y + comp_h < content_bottom && eq_w > 20 {
                     let compress = state.project.tracks[i].cstrip2_params.iter()
                         .find(|(id, _)| id == "compress").map(|(_, v)| *v).unwrap_or(0.0);
@@ -5635,10 +5635,18 @@ fn draw_bottom_mixer(
         mx + 8, my + 7, master_strip_w - 16,
         sdl2::pixels::Color::RGBA(180, 200, 255, 240));
 
+    // ── Master VU meter (below label, full width) ──
+    let m_vu_h = 76i32;
+    let m_vu_y = my + 18;
+    vu_meter(canvas, &state.theme,
+        mx + 6, m_vu_y, master_strip_w - 12, m_vu_h,
+        state.meters.master_vu_needle,
+        state.meters.master_vu_peak_needle);
+
     // ── Master volume fader ──
-    let m_fader_top = my + 24;
+    let m_fader_top = m_vu_y + m_vu_h + 4;
     let m_bottom_bar = 14i32;
-    let m_fader_h = (mh - 24 - m_bottom_bar - 4).max(20);
+    let m_fader_h = (mh - (m_fader_top - my) - m_bottom_bar - 4).max(20);
     let m_fader_x = mx + 10;
     let m_fader_w = 20i32;
 
@@ -5819,6 +5827,136 @@ fn draw_bottom_mixer(
             }
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 80));
             let _ = canvas.draw_rect(Rect::new(info_x, osc_y, osc_w as u32, osc_h as u32));
+        }
+
+        // ── Mastering section (below oscilloscope) ──
+        let mas_y = osc_y + osc_h + 6;
+        let mas_bot = my + mh - 16; // leave room for border + bottom label
+        let mas_avail = (mas_bot - mas_y).max(0);
+        if mas_avail >= 30 && osc_w > 20 {
+            let mut cy = mas_y;
+
+            // ── LUFS meters ──
+            let lufs_m  = state.meters.master_lufs_momentary;
+            let lufs_st = state.meters.master_lufs_short;
+            // Momentary LUFS label
+            let lufs_m_str = if lufs_m < -60.0 || lufs_m == 0.0 {
+                "M: -∞ LUFS".to_string()
+            } else {
+                format!("M: {:.1} LUFS", lufs_m)
+            };
+            let lufs_col = if lufs_m > -6.0 {
+                sdl2::pixels::Color::RGBA(230, 80, 60, 220)
+            } else if lufs_m > -14.0 {
+                sdl2::pixels::Color::RGBA(220, 190, 60, 200)
+            } else {
+                sdl2::pixels::Color::RGBA(120, 200, 150, 190)
+            };
+            draw_pixel_label(canvas, &state.theme, &lufs_m_str,
+                info_x, cy, osc_w, lufs_col);
+            cy += 11;
+            let lufs_st_str = if lufs_st < -60.0 || lufs_st == 0.0 {
+                "S: -∞ LUFS".to_string()
+            } else {
+                format!("S: {:.1} LUFS", lufs_st)
+            };
+            draw_pixel_label(canvas, &state.theme, &lufs_st_str,
+                info_x, cy, osc_w,
+                sdl2::pixels::Color::RGBA(100, 170, 130, 170));
+            cy += 13;
+
+            // ── Stereo correlation bar ──
+            // -1 = fully out of phase (mono danger), +1 = perfectly in phase
+            let corr = state.meters.master_correlation.clamp(-1.0, 1.0);
+            if cy + 13 < mas_bot {
+                draw_pixel_label(canvas, &state.theme, "Phase",
+                    info_x, cy, osc_w,
+                    sdl2::pixels::Color::RGBA(110, 120, 140, 160));
+                cy += 9;
+                // Background track
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(22, 24, 30, 220));
+                let _ = canvas.fill_rect(Rect::new(info_x, cy, osc_w as u32, 6));
+                // Centre tick (0 = mono)
+                let mid_x = info_x + osc_w / 2;
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(70, 75, 85, 180));
+                let _ = canvas.draw_line(
+                    sdl2::rect::Point::new(mid_x, cy),
+                    sdl2::rect::Point::new(mid_x, cy + 5));
+                // Fill: map corr -1..+1 to bar width
+                let fill_frac = (corr + 1.0) / 2.0; // 0..1
+                let fill_w = (fill_frac * osc_w as f32) as i32;
+                let bar_col = if corr < 0.0 {
+                    sdl2::pixels::Color::RGBA(200, 70, 50, 200)
+                } else if corr < 0.5 {
+                    sdl2::pixels::Color::RGBA(200, 180, 50, 200)
+                } else {
+                    sdl2::pixels::Color::RGBA(60, 190, 110, 200)
+                };
+                canvas.set_draw_color(bar_col);
+                let _ = canvas.fill_rect(Rect::new(info_x, cy, fill_w.max(1) as u32, 6));
+                // Border
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 80));
+                let _ = canvas.draw_rect(Rect::new(info_x, cy, osc_w as u32, 6));
+                // Numeric label
+                let corr_str = format!("{:+.2}", corr);
+                draw_pixel_label(canvas, &state.theme, &corr_str,
+                    info_x + osc_w - 26, cy - 1, 26,
+                    sdl2::pixels::Color::RGBA(130, 140, 155, 160));
+                cy += 10;
+            }
+
+            // ── Dynamic range (crest factor) bar ──
+            if cy + 16 < mas_bot {
+                let peak = state.meters.master_peak_l.max(state.meters.master_peak_r);
+                let rms2 = state.meters.master_rms;
+                let dr_db = if peak > 1e-6 && rms2 > 1e-6 {
+                    (20.0 * (peak / rms2).log10()).clamp(0.0, 30.0)
+                } else { 0.0_f32 };
+                draw_pixel_label(canvas, &state.theme, "DR",
+                    info_x, cy, osc_w,
+                    sdl2::pixels::Color::RGBA(110, 120, 140, 160));
+                cy += 9;
+                // Background
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(22, 24, 30, 220));
+                let _ = canvas.fill_rect(Rect::new(info_x, cy, osc_w as u32, 6));
+                // Fill: 0–30 dB range
+                let dr_frac = (dr_db / 30.0).clamp(0.0, 1.0);
+                let dr_fill = (dr_frac * osc_w as f32) as i32;
+                let dr_col = if dr_db < 6.0 {
+                    // Heavy limiting / brickwall
+                    sdl2::pixels::Color::RGBA(200, 60, 50, 200)
+                } else if dr_db < 12.0 {
+                    sdl2::pixels::Color::RGBA(200, 175, 50, 200)
+                } else {
+                    sdl2::pixels::Color::RGBA(60, 180, 100, 200)
+                };
+                canvas.set_draw_color(dr_col);
+                let _ = canvas.fill_rect(Rect::new(info_x, cy, dr_fill.max(1) as u32, 6));
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 80));
+                let _ = canvas.draw_rect(Rect::new(info_x, cy, osc_w as u32, 6));
+                let dr_str = format!("{:.0}dB", dr_db);
+                draw_pixel_label(canvas, &state.theme, &dr_str,
+                    info_x + osc_w - 22, cy - 1, 22,
+                    sdl2::pixels::Color::RGBA(130, 140, 155, 160));
+                cy += 10;
+            }
+
+            // ── True peak indicator ──
+            if cy + 10 < mas_bot {
+                let tp = state.meters.master_peak_l.max(state.meters.master_peak_r);
+                let tp_db = if tp > 1e-6 { 20.0 * tp.log10() } else { -60.0_f32 };
+                let tp_col = if tp_db > -0.1 {
+                    sdl2::pixels::Color::RGBA(235, 55, 40, 240)
+                } else if tp_db > -3.0 {
+                    sdl2::pixels::Color::RGBA(220, 185, 50, 210)
+                } else {
+                    sdl2::pixels::Color::RGBA(100, 170, 130, 180)
+                };
+                let tp_str = if tp > 1e-6 {
+                    format!("TP: {:.1}dBFS", tp_db)
+                } else { "TP: -∞".to_string() };
+                draw_pixel_label(canvas, &state.theme, &tp_str, info_x, cy, osc_w, tp_col);
+            }
         }
     }
 

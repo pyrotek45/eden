@@ -2612,10 +2612,15 @@ pub fn vu_meter(
         let pdy = pky - vis_pivot_y;
         let pdist = (pdx * pdx + pdy * pdy).sqrt();
         if pdist > 2.0 && pp > 0.01 {
+            // Draw peak needle as two adjacent anti-aliased lines for extra thickness
             let _ = canvas.aa_line(
                 vis_pivot_x as i16, vis_pivot_y as i16,
                 pkx as i16, pky as i16,
-                sdl2::pixels::Color::RGBA(200, 40, 30, 120));
+                sdl2::pixels::Color::RGBA(230, 50, 35, 200));
+            let _ = canvas.aa_line(
+                vis_pivot_x as i16 + 1, vis_pivot_y as i16,
+                pkx as i16 + 1, pky as i16,
+                sdl2::pixels::Color::RGBA(230, 50, 35, 130));
         }
     }
 
@@ -2629,16 +2634,24 @@ pub fn vu_meter(
         let _ = canvas.aa_line(
             vis_pivot_x as i16, vis_pivot_y as i16 + 1,
             nx as i16 + 1, ny as i16 + 1,
-            sdl2::pixels::Color::RGBA(0, 0, 0, 60));
-        // Needle
+            sdl2::pixels::Color::RGBA(0, 0, 0, 80));
+        // Needle — draw two aa_lines side-by-side for a thicker, brighter look
         let needle_col = if needle_pos > 0.87 {
-            sdl2::pixels::Color::RGBA(220, 55, 35, 255)
+            sdl2::pixels::Color::RGBA(240, 65, 40, 255)
         } else {
-            sdl2::pixels::Color::RGBA(215, 220, 225, 240)
+            sdl2::pixels::Color::RGBA(235, 240, 245, 255)
+        };
+        let needle_col2 = if needle_pos > 0.87 {
+            sdl2::pixels::Color::RGBA(240, 65, 40, 160)
+        } else {
+            sdl2::pixels::Color::RGBA(235, 240, 245, 160)
         };
         let _ = canvas.aa_line(
             vis_pivot_x as i16, vis_pivot_y as i16,
             nx as i16, ny as i16, needle_col);
+        let _ = canvas.aa_line(
+            vis_pivot_x as i16 + 1, vis_pivot_y as i16,
+            nx as i16 + 1, ny as i16, needle_col2);
     }
 
     // Pivot dot

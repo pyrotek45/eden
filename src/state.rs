@@ -294,6 +294,12 @@ pub struct MeterState {
     pub master_lufs_momentary: f32,
     pub master_clipping_l: bool,
     pub master_clipping_r: bool,
+    // ── Master VU ballistic state (GUI-side) ──
+    pub master_vu_needle: f32,
+    pub master_vu_peak_needle: f32,
+    pub master_vu_peak_hold_frames: u32,
+    // ── Stereo correlation (phase coherence, -1..+1) ──
+    pub master_correlation: f32,
 }
 
 /// Viewport / scroll state for the arrangement timeline.
