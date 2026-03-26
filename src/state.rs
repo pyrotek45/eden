@@ -297,6 +297,9 @@ pub struct MeterState {
     /// verify the limiter ceiling is being honoured.
     pub master_true_peak_post_l: f32,
     pub master_true_peak_post_r: f32,
+    /// Smoothed true peak for output meter bar display (same ballistics as RMS bars).
+    pub master_peak_smooth_post_l: f32,
+    pub master_peak_smooth_post_r: f32,
     pub master_lufs_short: f32,
     pub master_lufs_momentary: f32,
     pub master_clipping_l: bool,

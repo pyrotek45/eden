@@ -6154,10 +6154,10 @@ fn draw_bottom_mixer(
         m_fader_h,
     );
 
-    // Out (post-everything) pair
+    // Out (post-everything) pair — uses smoothed true peak so it matches the VU
     let m_out_x = m_meter_x + (m_meter_bar_w as i32) * 2 + m_meter_gap + m_pair_gap;
-    let m_out_l = state.meters.master_rms_post_l;
-    let m_out_r = state.meters.master_rms_post_r;
+    let m_out_l = state.meters.master_peak_smooth_post_l;
+    let m_out_r = state.meters.master_peak_smooth_post_r;
     draw_meter_bar(
         canvas,
         m_out_l,
@@ -10201,8 +10201,8 @@ fn draw_master_rack(
         let rm_meter_y = rmy + 20;
         let rm_meter_h = (rmh - 28).max(10);
 
-        let rms_post_l = state.meters.master_rms_post_l;
-        let rms_post_r = state.meters.master_rms_post_r;
+        let rms_post_l = state.meters.master_peak_smooth_post_l;
+        let rms_post_r = state.meters.master_peak_smooth_post_r;
         draw_meter_bar(
             canvas, rms_post_l, rm_meter_x, rm_meter_y, rm_bar_w, rm_meter_h,
         );

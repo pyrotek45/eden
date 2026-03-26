@@ -1759,6 +1759,8 @@ fn main() {
                 state.meters.master_rms_post_r = audio.master_rms_post_r;
                 state.meters.master_true_peak_post_l = audio.master_true_peak_post_l;
                 state.meters.master_true_peak_post_r = audio.master_true_peak_post_r;
+                state.meters.master_peak_smooth_post_l = audio.master_peak_smooth_post_l;
+                state.meters.master_peak_smooth_post_r = audio.master_peak_smooth_post_r;
                 state.meters.track_effect_gr = audio.track_effect_gr.clone();
                 state.meters.master_effect_gr = audio.master_effect_gr.clone();
                 state.meters.preview_rms_l = audio.preview_rms_l;
@@ -1857,14 +1859,15 @@ fn main() {
                         state.meters.master_peak_hold_post_r =
                             (state.meters.master_peak_hold_post_r - OUT_PEAK_DECAY).max(0.0);
                     }
-                    // Master VU ballistic needle (same logic as track VU)
+                    // Master VU ballistic needle — driven from true peak so it
+                    // matches the output meter bars (which also use true peak).
                     {
-                        let m_rms = state
+                        let m_peak = state
                             .meters
-                            .master_rms_post_l
-                            .max(state.meters.master_rms_post_r);
-                        let m_vu_db = if m_rms > 1e-6 {
-                            20.0 * m_rms.log10()
+                            .master_true_peak_post_l
+                            .max(state.meters.master_true_peak_post_r);
+                        let m_vu_db = if m_peak > 1e-6 {
+                            20.0 * m_peak.log10()
                         } else {
                             -60.0_f32
                         };
