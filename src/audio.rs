@@ -948,6 +948,68 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
                     smooth_master_vol += (snap.master_volume as f64 - smooth_master_vol) * (FX_SMOOTH_COEFF as f64 * frames as f64).min(1.0);
 
+                    // ── Per-callback parameter smoothing (preview path) ──────────
+                    // Mirror the playing-path smoothing so knob changes don't cause
+                    // zipper noise while previewing notes in piano/keyboard mode.
+
+                    // Smooth track effect params
+                    while smooth_track_fx_params.len() < snap.tracks.len() {
+                        smooth_track_fx_params.push(Vec::new());
+                    }
+                    for (ti, track) in snap.tracks.iter().enumerate() {
+                        let slot_cache = &mut smooth_track_fx_params[ti];
+                        while slot_cache.len() < track.effect_slots.len() {
+                            slot_cache.push(Vec::new());
+                        }
+                        for (si, (_, params)) in track.effect_slots.iter().enumerate() {
+                            let param_cache = &mut slot_cache[si];
+                            if param_cache.len() < params.len() {
+                                for pi in param_cache.len()..params.len() {
+                                    param_cache.push(params[pi].clone());
+                                }
+                            }
+                            let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
+                            for (pi, p) in params.iter().enumerate() {
+                                param_cache[pi].1 += (p.1 - param_cache[pi].1) * coeff;
+                            }
+                        }
+                    }
+                    // Smooth master effect params
+                    while smooth_master_fx_params.len() < snap.master_effects.len() {
+                        smooth_master_fx_params.push(Vec::new());
+                    }
+                    for (si, (_, params)) in snap.master_effects.iter().enumerate() {
+                        let param_cache = &mut smooth_master_fx_params[si];
+                        if param_cache.len() < params.len() {
+                            for pi in param_cache.len()..params.len() {
+                                param_cache.push(params[pi].clone());
+                            }
+                        }
+                        let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
+                        for (pi, p) in params.iter().enumerate() {
+                            param_cache[pi].1 += (p.1 - param_cache[pi].1) * coeff;
+                        }
+                    }
+                    // Smooth CStrip2 channel-strip params per track
+                    while smooth_cstrip_params.len() < snap.tracks.len() {
+                        smooth_cstrip_params.push(Vec::new());
+                    }
+                    for (ti, track) in snap.tracks.iter().enumerate() {
+                        let cs_raw = &track.cstrip2_params;
+                        if !cs_raw.is_empty() {
+                            let cache = &mut smooth_cstrip_params[ti];
+                            if cache.len() < cs_raw.len() {
+                                for pi in cache.len()..cs_raw.len() {
+                                    cache.push(cs_raw[pi].clone());
+                                }
+                            }
+                            let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
+                            for (pi, p) in cs_raw.iter().enumerate() {
+                                cache[pi].1 += (p.1 - cache[pi].1) * coeff;
+                            }
+                        }
+                    }
+
                     let beats_per_sample_kbd = snap.bpm / 60.0 / sample_rate;
                     #[allow(clippy::needless_range_loop)]
                     for fi in 0..frames {
