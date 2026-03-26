@@ -9278,7 +9278,11 @@ mod tests {
 
         // Skip the first 100 ms to let the HP filter settle
         let skip = (0.1 * sr as f64) as usize;
-        let settled = if skip < buf.len() { &buf[skip..] } else { &buf[..] };
+        let settled = if skip < buf.len() {
+            &buf[skip..]
+        } else {
+            &buf[..]
+        };
         let (dc_l, dc_r) = measure_dc_offset(settled);
 
         // DC should be below -80 dB (0.0001) after the filter settles
@@ -9467,8 +9471,16 @@ mod tests {
         // At i=0 it should be exactly 0, at i=n it should be exactly 1
         let gain_start = (0.0f64 * std::f64::consts::FRAC_PI_2).sin();
         let gain_end = (1.0f64 * std::f64::consts::FRAC_PI_2).sin();
-        assert!((gain_start - 0.0).abs() < 1e-12, "Fade start is not 0: {}", gain_start);
-        assert!((gain_end - 1.0).abs() < 1e-12, "Fade end is not 1: {}", gain_end);
+        assert!(
+            (gain_start - 0.0).abs() < 1e-12,
+            "Fade start is not 0: {}",
+            gain_start
+        );
+        assert!(
+            (gain_end - 1.0).abs() < 1e-12,
+            "Fade end is not 1: {}",
+            gain_end
+        );
     }
 
     // ── Test 8: DC HP filter decays to near-zero on silence ─────────────────
@@ -9587,7 +9599,10 @@ mod tests {
         // With alt bypass: simulate by using raw value directly
         let raw = 0.7_f64;
         let result = if true { raw } else { snap.snap(raw) }; // alt held
-        assert!((result - 0.7).abs() < 1e-9, "alt bypass should return raw value");
+        assert!(
+            (result - 0.7).abs() < 1e-9,
+            "alt bypass should return raw value"
+        );
     }
 
     /// snap_proximity also returns the raw value when bypass is active.
@@ -9602,7 +9617,11 @@ mod tests {
         // Alt bypass: pass raw through
         let raw = 0.95_f64;
         let alt = true;
-        let result = if alt { raw } else { snap.snap_proximity(raw, 0.1) };
+        let result = if alt {
+            raw
+        } else {
+            snap.snap_proximity(raw, 0.1)
+        };
         assert!((result - 0.95).abs() < 1e-9);
     }
 
@@ -9616,11 +9635,19 @@ mod tests {
         let candidates = vec![2.0_f64, 4.0];
         // Normal: 1.98 near edge 2.0 within 0.3 threshold → 2.0
         let snapped = snap.snap_with_edges(1.98, 0.3, &candidates);
-        assert!((snapped - 2.0).abs() < 1e-9, "expected snap to 2.0, got {}", snapped);
+        assert!(
+            (snapped - 2.0).abs() < 1e-9,
+            "expected snap to 2.0, got {}",
+            snapped
+        );
         // Alt bypass: raw 1.98 returned unchanged
         let raw = 1.98_f64;
         let alt = true;
-        let result = if alt { raw } else { snap.snap_with_edges(raw, 0.3, &candidates) };
+        let result = if alt {
+            raw
+        } else {
+            snap.snap_with_edges(raw, 0.3, &candidates)
+        };
         assert!((result - 1.98).abs() < 1e-9);
     }
 
@@ -9634,16 +9661,16 @@ mod tests {
         let sr = 44100u32;
         let mut cs = create_effect("CStrip2", sr).unwrap();
         let params = vec![
-            ("treble".to_string(),   0.5f32),
+            ("treble".to_string(), 0.5f32),
             ("treb_frq".to_string(), 0.5),
-            ("mid".to_string(),      0.5),
-            ("bass".to_string(),     0.5),
+            ("mid".to_string(), 0.5),
+            ("bass".to_string(), 0.5),
             ("bass_frq".to_string(), 0.5),
-            ("lo_cap".to_string(),   1.0),
-            ("hi_cap".to_string(),   0.0),
+            ("lo_cap".to_string(), 1.0),
+            ("hi_cap".to_string(), 0.0),
             ("compress".to_string(), 0.0),
             ("comp_spd".to_string(), 0.0),
-            ("output".to_string(),   0.33),
+            ("output".to_string(), 0.33),
         ];
 
         let input_level = 0.5_f64;
@@ -9666,16 +9693,16 @@ mod tests {
         let mut cs_high = create_effect("CStrip2", sr).unwrap();
 
         let params_low = vec![
-            ("treble".to_string(),   0.5f32),
+            ("treble".to_string(), 0.5f32),
             ("treb_frq".to_string(), 0.5),
-            ("mid".to_string(),      0.5),
-            ("bass".to_string(),     0.5),
+            ("mid".to_string(), 0.5),
+            ("bass".to_string(), 0.5),
             ("bass_frq".to_string(), 0.5),
-            ("lo_cap".to_string(),   1.0),
-            ("hi_cap".to_string(),   0.0),
+            ("lo_cap".to_string(), 1.0),
+            ("hi_cap".to_string(), 0.0),
             ("compress".to_string(), 0.0),
             ("comp_spd".to_string(), 0.0),
-            ("output".to_string(),   0.0), // min gain
+            ("output".to_string(), 0.0), // min gain
         ];
         let mut params_high = params_low.clone();
         params_high.last_mut().unwrap().1 = 1.0; // max gain
@@ -9686,7 +9713,8 @@ mod tests {
         assert!(
             high_l.abs() > low_l.abs(),
             "higher output param should produce louder output ({} vs {})",
-            high_l.abs(), low_l.abs()
+            high_l.abs(),
+            low_l.abs()
         );
     }
 
@@ -9697,26 +9725,35 @@ mod tests {
         let sr = 44100u32;
         let mut cs = create_effect("CStrip2", sr).unwrap();
         let params = vec![
-            ("treble".to_string(),   0.8f32), // boosted highs
+            ("treble".to_string(), 0.8f32), // boosted highs
             ("treb_frq".to_string(), 0.5),
-            ("mid".to_string(),      0.8),
-            ("bass".to_string(),     0.8),
+            ("mid".to_string(), 0.8),
+            ("bass".to_string(), 0.8),
             ("bass_frq".to_string(), 0.5),
-            ("lo_cap".to_string(),   1.0),
-            ("hi_cap".to_string(),   0.0),
+            ("lo_cap".to_string(), 1.0),
+            ("hi_cap".to_string(), 0.0),
             ("compress".to_string(), 0.5), // light compression
             ("comp_spd".to_string(), 0.5),
-            ("output".to_string(),   0.5),
+            ("output".to_string(), 0.5),
         ];
 
-        for i in 0..4410 { // 100 ms of 440 Hz sine
+        for i in 0..4410 {
+            // 100 ms of 440 Hz sine
             let t = i as f64 / sr as f64;
             let s = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.8;
             let (ol, or2) = cs.process(s, s, &params, sr as f64);
-            assert!(ol.is_finite() && or2.is_finite(),
-                "CStrip2 output diverged at sample {}: L={} R={}", i, ol, or2);
-            assert!(ol.abs() < 10.0 && or2.is_finite(),
-                "CStrip2 severely clipping at sample {}", i);
+            assert!(
+                ol.is_finite() && or2.is_finite(),
+                "CStrip2 output diverged at sample {}: L={} R={}",
+                i,
+                ol,
+                or2
+            );
+            assert!(
+                ol.abs() < 10.0 && or2.is_finite(),
+                "CStrip2 severely clipping at sample {}",
+                i
+            );
         }
     }
 }

@@ -2462,15 +2462,21 @@ pub fn draw_track_type_icon(
 /// Draws an analog-style VU meter gauge (wide shallow arc like a real VU).
 /// `x, y` = top-left of the bounding box, `w` = width, `h` = height.
 /// `needle_pos` = smoothed 0.0–1.0 value (from VU ballistic state).
+#[allow(clippy::too_many_arguments)]
 pub fn vu_meter(
     canvas: &mut Canvas<Window>,
     theme: &Theme,
-    x: i32, y: i32, w: i32, h: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
     needle_pos: f32,
     peak_pos: f32,
 ) {
     use sdl2::gfx::primitives::DrawRenderer;
-    if w < 30 || h < 20 { return; }
+    if w < 30 || h < 20 {
+        return;
+    }
 
     let pad = 3;
     let inner_w = w - pad * 2;
@@ -2488,7 +2494,7 @@ pub fn vu_meter(
     // Half the chord = inner_w / 2. We choose sagitta (arc height) to be ~40% of inner_h.
     let half_chord = inner_w as f64 / 2.0;
     let sagitta = (inner_h as f64 * 0.35).max(8.0); // how tall the arc bulge is
-    // From chord and sagitta: radius = (half_chord^2 + sagitta^2) / (2 * sagitta)
+                                                    // From chord and sagitta: radius = (half_chord^2 + sagitta^2) / (2 * sagitta)
     let arc_r = (half_chord * half_chord + sagitta * sagitta) / (2.0 * sagitta);
 
     // Center of the circle is below the widget
@@ -2504,30 +2510,47 @@ pub fn vu_meter(
     let half_angle_deg = half_angle_rad.to_degrees();
     // SDL2 arc: angles in degrees, screen coords (clockwise from +X)
     let start_deg = 270.0 - half_angle_deg; // left side
-    let end_deg = 270.0 + half_angle_deg;   // right side
+    let end_deg = 270.0 + half_angle_deg; // right side
     let sweep = end_deg - start_deg;
 
     // The arc top (at 270°) should be at the label area.
     // Labels sit above the arc, needle below.
     let label_zone_h = 9i32; // space for tiny scale labels above the arc
-    // Shift the arc down a bit so labels fit above
+                             // Shift the arc down a bit so labels fit above
     let arc_cy = cy + label_zone_h as f64;
     let arc_r_i16 = arc_r as i16;
     let cx_i16 = cx as i16;
     let cy_i16 = arc_cy as i16;
 
     // Draw arc tracks
-    let _ = canvas.arc(cx_i16, cy_i16, arc_r_i16, start_deg as i16, end_deg as i16,
-        sdl2::pixels::Color::RGBA(65, 70, 80, 200));
+    let _ = canvas.arc(
+        cx_i16,
+        cy_i16,
+        arc_r_i16,
+        start_deg as i16,
+        end_deg as i16,
+        sdl2::pixels::Color::RGBA(65, 70, 80, 200),
+    );
     if arc_r_i16 > 2 {
-        let _ = canvas.arc(cx_i16, cy_i16, arc_r_i16 - 1, start_deg as i16, end_deg as i16,
-            sdl2::pixels::Color::RGBA(50, 55, 62, 130));
+        let _ = canvas.arc(
+            cx_i16,
+            cy_i16,
+            arc_r_i16 - 1,
+            start_deg as i16,
+            end_deg as i16,
+            sdl2::pixels::Color::RGBA(50, 55, 62, 130),
+        );
     }
 
     // ── Scale markings: -20, -10, -7, -5, -3, 0, +3 dB ──
     let marks: [(f64, &str); 7] = [
-        (-20.0, "20"), (-10.0, "10"), (-7.0, "7"), (-5.0, "5"),
-        (-3.0, "3"),   (0.0, "0"),    (3.0, "+3"),
+        (-20.0, "20"),
+        (-10.0, "10"),
+        (-7.0, "7"),
+        (-5.0, "5"),
+        (-3.0, "3"),
+        (0.0, "0"),
+        (3.0, "+3"),
     ];
     for &(db, label) in &marks {
         let t = ((db + 20.0) / 23.0).clamp(0.0, 1.0);
@@ -2565,27 +2588,54 @@ pub fn vu_meter(
         };
         // Pixel font at scale 1 = 4px wide per char, 5px tall
         let lbl_w = label.len() as i32 * 5;
-        draw_pixel_label_scaled(canvas, theme, label,
-            lx as i32 - lbl_w / 2, ly as i32 - 6, lbl_w + 4, lbl_col, 1);
+        draw_pixel_label_scaled(
+            canvas,
+            theme,
+            label,
+            lx as i32 - lbl_w / 2,
+            ly as i32 - 6,
+            lbl_w + 4,
+            lbl_col,
+            1,
+        );
     }
 
     // ── Red zone arc (0dB to +3dB) ──
     {
         let zero_frac = 20.0 / 23.0;
         let red_start = start_deg + zero_frac * sweep;
-        let _ = canvas.arc(cx_i16, cy_i16, arc_r_i16, red_start as i16, end_deg as i16,
-            sdl2::pixels::Color::RGBA(180, 50, 40, 160));
+        let _ = canvas.arc(
+            cx_i16,
+            cy_i16,
+            arc_r_i16,
+            red_start as i16,
+            end_deg as i16,
+            sdl2::pixels::Color::RGBA(180, 50, 40, 160),
+        );
         if arc_r_i16 > 3 {
-            let _ = canvas.arc(cx_i16, cy_i16, arc_r_i16 - 1, red_start as i16, end_deg as i16,
-                sdl2::pixels::Color::RGBA(160, 45, 35, 100));
+            let _ = canvas.arc(
+                cx_i16,
+                cy_i16,
+                arc_r_i16 - 1,
+                red_start as i16,
+                end_deg as i16,
+                sdl2::pixels::Color::RGBA(160, 45, 35, 100),
+            );
         }
     }
 
     // "VU" label at bottom-center
     let vu_label_y = inner_y + inner_h - 7;
-    draw_pixel_label_scaled(canvas, theme, "VU",
-        (cx as i32) - 5, vu_label_y, 14,
-        sdl2::pixels::Color::RGBA(90, 95, 105, 140), 1);
+    draw_pixel_label_scaled(
+        canvas,
+        theme,
+        "VU",
+        (cx as i32) - 5,
+        vu_label_y,
+        14,
+        sdl2::pixels::Color::RGBA(90, 95, 105, 140),
+        1,
+    );
 
     // ── Needle ──
     let np = (needle_pos as f64).clamp(0.0, 1.0);
@@ -2614,13 +2664,19 @@ pub fn vu_meter(
         if pdist > 2.0 && pp > 0.01 {
             // Draw peak needle as two adjacent anti-aliased lines for extra thickness
             let _ = canvas.aa_line(
-                vis_pivot_x as i16, vis_pivot_y as i16,
-                pkx as i16, pky as i16,
-                sdl2::pixels::Color::RGBA(230, 50, 35, 200));
+                vis_pivot_x as i16,
+                vis_pivot_y as i16,
+                pkx as i16,
+                pky as i16,
+                sdl2::pixels::Color::RGBA(230, 50, 35, 200),
+            );
             let _ = canvas.aa_line(
-                vis_pivot_x as i16 + 1, vis_pivot_y as i16,
-                pkx as i16 + 1, pky as i16,
-                sdl2::pixels::Color::RGBA(230, 50, 35, 130));
+                vis_pivot_x as i16 + 1,
+                vis_pivot_y as i16,
+                pkx as i16 + 1,
+                pky as i16,
+                sdl2::pixels::Color::RGBA(230, 50, 35, 130),
+            );
         }
     }
 
@@ -2632,9 +2688,12 @@ pub fn vu_meter(
     if dist > 2.0 {
         // Shadow
         let _ = canvas.aa_line(
-            vis_pivot_x as i16, vis_pivot_y as i16 + 1,
-            nx as i16 + 1, ny as i16 + 1,
-            sdl2::pixels::Color::RGBA(0, 0, 0, 80));
+            vis_pivot_x as i16,
+            vis_pivot_y as i16 + 1,
+            nx as i16 + 1,
+            ny as i16 + 1,
+            sdl2::pixels::Color::RGBA(0, 0, 0, 80),
+        );
         // Needle — draw two aa_lines side-by-side for a thicker, brighter look
         let needle_col = if needle_pos > 0.87 {
             sdl2::pixels::Color::RGBA(240, 65, 40, 255)
@@ -2647,17 +2706,28 @@ pub fn vu_meter(
             sdl2::pixels::Color::RGBA(235, 240, 245, 160)
         };
         let _ = canvas.aa_line(
-            vis_pivot_x as i16, vis_pivot_y as i16,
-            nx as i16, ny as i16, needle_col);
+            vis_pivot_x as i16,
+            vis_pivot_y as i16,
+            nx as i16,
+            ny as i16,
+            needle_col,
+        );
         let _ = canvas.aa_line(
-            vis_pivot_x as i16 + 1, vis_pivot_y as i16,
-            nx as i16 + 1, ny as i16, needle_col2);
+            vis_pivot_x as i16 + 1,
+            vis_pivot_y as i16,
+            nx as i16 + 1,
+            ny as i16,
+            needle_col2,
+        );
     }
 
     // Pivot dot
     let _ = canvas.filled_circle(
-        vis_pivot_x as i16, vis_pivot_y as i16, 2,
-        sdl2::pixels::Color::RGBA(160, 165, 170, 255));
+        vis_pivot_x as i16,
+        vis_pivot_y as i16,
+        2,
+        sdl2::pixels::Color::RGBA(160, 165, 170, 255),
+    );
 
     // Subtle border
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 100));
@@ -2671,16 +2741,22 @@ pub fn vu_meter(
 /// `compress` = compressor amount param (0.0–1.0),
 /// `gr_db` = actual gain reduction in dB from metering (negative or zero).
 /// `input_rms` = current track RMS level (linear, 0.0–1.0+) for the riding dot.
+#[allow(clippy::too_many_arguments)]
 pub fn comp_curve_widget(
     canvas: &mut Canvas<Window>,
     theme: &Theme,
-    x: i32, y: i32, w: i32, h: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
     compress: f32,
     gr_db: f32,
     input_rms: f32,
 ) {
     use sdl2::gfx::primitives::DrawRenderer;
-    if w < 10 || h < 10 { return; }
+    if w < 10 || h < 10 {
+        return;
+    }
 
     // Background
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(18, 20, 26, 220));
@@ -2742,10 +2818,18 @@ pub fn comp_curve_widget(
         let dot_px = cx0 + (in_frac * cw as f32) as i32;
         let dot_py = cy0 - (out_frac * ch as f32) as i32;
         // Bright dot
-        let _ = canvas.filled_circle(dot_px as i16, dot_py as i16, 3,
-            sdl2::pixels::Color::RGBA(255, 200, 80, 255));
-        let _ = canvas.circle(dot_px as i16, dot_py as i16, 3,
-            sdl2::pixels::Color::RGBA(255, 160, 40, 180));
+        let _ = canvas.filled_circle(
+            dot_px as i16,
+            dot_py as i16,
+            3,
+            sdl2::pixels::Color::RGBA(255, 200, 80, 255),
+        );
+        let _ = canvas.circle(
+            dot_px as i16,
+            dot_py as i16,
+            3,
+            sdl2::pixels::Color::RGBA(255, 160, 40, 180),
+        );
     }
 
     // ── GR bar below the curve ──
@@ -2764,16 +2848,28 @@ pub fn comp_curve_widget(
         }
 
         // "GR" label
-        draw_pixel_label(canvas, theme, "GR",
-            x + 2, bar_y, 14,
-            sdl2::pixels::Color::RGBA(200, 140, 60, 140));
+        draw_pixel_label(
+            canvas,
+            theme,
+            "GR",
+            x + 2,
+            bar_y,
+            14,
+            sdl2::pixels::Color::RGBA(200, 140, 60, 140),
+        );
 
         // dB text
         if gr_db.abs() > 0.1 {
             let gr_str = format!("{:.1}", gr_db);
-            draw_pixel_label(canvas, theme, &gr_str,
-                x + w - 28, bar_y, 26,
-                sdl2::pixels::Color::RGBA(200, 160, 80, 180));
+            draw_pixel_label(
+                canvas,
+                theme,
+                &gr_str,
+                x + w - 28,
+                bar_y,
+                26,
+                sdl2::pixels::Color::RGBA(200, 160, 80, 180),
+            );
         }
     }
 

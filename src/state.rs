@@ -300,6 +300,9 @@ pub struct MeterState {
     pub master_vu_peak_hold_frames: u32,
     // ── Stereo correlation (phase coherence, -1..+1) ──
     pub master_correlation: f32,
+    // ── Preview (file browser sample) metering ──
+    pub preview_rms_l: f32,
+    pub preview_rms_r: f32,
 }
 
 /// Viewport / scroll state for the arrangement timeline.

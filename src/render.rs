@@ -252,6 +252,7 @@ pub fn render_to_buffer(
             midi_effect_slots,
             effect_sidechain_track,
             cstrip2_params: track.cstrip2_params.clone(),
+            cstrip2_bypass: track.cstrip2_bypass,
             extra: ModuleExtra::default(),
         });
     }
@@ -925,6 +926,7 @@ pub fn render_to_wav_with_progress(
             midi_effect_slots,
             effect_sidechain_track,
             cstrip2_params: track.cstrip2_params.clone(),
+            cstrip2_bypass: track.cstrip2_bypass,
             extra,
         });
     }
@@ -1028,7 +1030,7 @@ pub fn render_to_wav_with_progress(
     // Both use equal-power sine curve to preserve loudness perception.
     let export_fade_in_len = (0.002 * sample_rate as f64) as usize; //  ~88 samples @ 44.1kHz
     let export_fade_out_len = (0.005 * sample_rate as f64) as usize; // ~220 samples @ 44.1kHz
-    // Fade-out starts this many samples before the end of the export
+                                                                     // Fade-out starts this many samples before the end of the export
     let fade_out_start = total_samples.saturating_sub(export_fade_out_len);
 
     for _si in 0..total_samples {

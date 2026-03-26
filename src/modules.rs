@@ -3795,44 +3795,41 @@ impl EffectModule for FxCompressor {
 pub struct FxLimiter {
     /// Ring buffer for delayed left/right samples (interleaved: L0 R0 L1 R1 …)
     delay_buf: Vec<f64>,
-    /// Ring buffer for per-sample gain reduction (linear, ≤1.0)
-    gr_buf: Vec<f64>,
+    /// Per-sample target gain (linear, ≤ 1.0) for each position in the delay line.
+    /// Updated via backward-pass minimum propagation every sample.
+    gain_buf: Vec<f64>,
     /// Current write position in the ring buffers
     write_pos: usize,
     /// Lookahead length in samples (set from sample rate)
     lookahead: usize,
-    /// Smoothed envelope (log-domain) for release
-    env: f64,
+    /// Release-smoothed gain applied to the output sample.
+    /// Tracks gain_buf[read_pos] but with one-pole release smoothing.
+    smooth_gr: f64,
     sm_gain: SmoothedParam,
-    sm_ceiling: SmoothedParam,
     sm_output: SmoothedParam,
 }
 
 impl FxLimiter {
     pub fn new() -> Self {
-        // Start with empty buffers — they are resized on first process call
         Self {
             delay_buf: Vec::new(),
-            gr_buf: Vec::new(),
+            gain_buf: Vec::new(),
             write_pos: 0,
             lookahead: 0,
-            env: 1.0, // 1.0 = no gain reduction (NOT 0.0 which would silence everything)
+            smooth_gr: 1.0,
             sm_gain: SmoothedParam::new(0.0, 44100.0),
-            sm_ceiling: SmoothedParam::new(0.0, 44100.0),
             sm_output: SmoothedParam::new(0.0, 44100.0),
         }
     }
 
-    /// Ensure internal buffers match the current sample rate.
     fn ensure_buffers(&mut self, sr: f64) {
-        // 5 ms lookahead (common for transparent limiting)
         let la = ((sr * 0.005).round() as usize).max(1);
         if la != self.lookahead {
             self.lookahead = la;
-            self.delay_buf = vec![0.0; la * 2]; // interleaved L/R
-            self.gr_buf = vec![1.0; la]; // gain reduction (1.0 = no reduction)
+            self.delay_buf = vec![0.0; la * 2];
+            self.gain_buf = vec![1.0; la];
             self.write_pos = 0;
-            self.env = 1.0; // reset to no reduction on SR change
+            self.smooth_gr = 1.0;
         }
     }
 }
@@ -3883,9 +3880,7 @@ impl EffectModule for FxLimiter {
         self.ensure_buffers(sr);
 
         let gain_db = self.sm_gain.tick(param_val(params, "gain_db", 0.0) as f64);
-        let ceiling_db = self
-            .sm_ceiling
-            .tick(param_val(params, "ceiling_db", 0.0) as f64);
+        let ceiling_db = param_val(params, "ceiling_db", 0.0) as f64;
         let release_knob = param_val(params, "release", 0.05) as f64;
 
         let input_gain = db_to_lin(gain_db);
@@ -3901,56 +3896,97 @@ impl EffectModule for FxLimiter {
         // Peak of incoming sample
         let peak = il.abs().max(ir.abs());
 
-        // Compute required gain reduction for this sample
-        let needed_gr = if peak > ceiling_lin && peak > 1e-10 {
+        // Desired gain for this sample: how much we MUST reduce to stay ≤ ceiling
+        let target_gr = if peak > ceiling_lin && peak > 1e-10 {
             ceiling_lin / peak
         } else {
             1.0
         };
 
-        // If this peak needs limiting, ramp gain reduction over the
-        // lookahead window so it's fully applied by the time the
-        // delayed audio arrives at the output.
-        if needed_gr < 1.0 {
-            // Linear attack ramp: from 1.0 down to needed_gr over `la` samples
-            for k in 0..la {
-                let t = (k + 1) as f64 / la as f64; // 1/la .. 1.0
-                let ramped = 1.0 - t * (1.0 - needed_gr); // ramp from 1.0 to needed_gr
-                let idx = (self.write_pos + k) % la;
-                if ramped < self.gr_buf[idx] {
-                    self.gr_buf[idx] = ramped;
+        // Write input into the delay buffer at write_pos
+        self.delay_buf[self.write_pos * 2] = il;
+        self.delay_buf[self.write_pos * 2 + 1] = ir;
+        self.gain_buf[self.write_pos] = target_gr;
+
+        // Read the oldest sample from the delay line (this is our output sample).
+        let read_pos = (self.write_pos + 1) % la;
+        let dl = self.delay_buf[read_pos * 2];
+        let dr = self.delay_buf[read_pos * 2 + 1];
+
+        // Backward-minimum propagation through the lookahead window.
+        //
+        // We need the output sample (at read_pos) to already have enough
+        // gain reduction applied so that when a future loud peak arrives
+        // it doesn't overshoot. The gain at read_pos must be ≤ the gain of
+        // every sample between read_pos and write_pos, taking into account
+        // the linear attack ramp from unity down to the target.
+        //
+        // Simple O(la) approach: scan backwards from write_pos to read_pos.
+        // For each position j steps before write_pos, the required gain is:
+        //   min(gain_buf[pos], prev_min)
+        // And we linearly ramp from 1.0 to that min over the lookahead window.
+        //
+        // Optimized: just find the minimum gain in the window and compute
+        // the ramp value at read_pos.
+        let mut min_gr = 1.0_f64;
+        for k in 0..la {
+            let idx = (read_pos + k) % la;
+            if self.gain_buf[idx] < min_gr {
+                min_gr = self.gain_buf[idx];
+            }
+        }
+
+        // Linear ramp: the output sample needs to start ramping down so that
+        // by the time we reach the peak, the gain is fully applied.
+        // At read_pos (distance=min_distance from the peak), the gain should be:
+        //   lerp(1.0, min_gr, 1.0) if we ARE at the peak, or
+        //   lerp(1.0, min_gr, fraction) where fraction depends on position.
+        //
+        // For a proper limiter, we want the gain at read_pos to be the minimum
+        // of all the linearly-ramped gains from each peak in the window.
+        // Each peak at distance d from read_pos creates a gain ramp:
+        //   gr_at_read = 1.0 - (1.0 - target_gr) * (la - d) / la  for d > 0
+        //   gr_at_read = target_gr                                   for d = 0
+        //
+        // We take the minimum of all such ramp contributions.
+        let mut read_gr = 1.0_f64;
+        for k in 0..la {
+            let idx = (read_pos + k) % la;
+            let tgr = self.gain_buf[idx];
+            if tgr < 1.0 {
+                // This peak at distance k from read_pos contributes a ramp
+                let ramp_gr = if k == 0 {
+                    tgr // we're at the peak, full reduction needed
+                } else {
+                    // Linear interpolation: at distance k (out of la), we need
+                    // a fraction of the reduction. At k=la-1 (furthest ahead),
+                    // minimal pre-reduction; at k=0, full reduction.
+                    let frac = 1.0 - (k as f64 / la as f64);
+                    1.0 - (1.0 - tgr) * frac
+                };
+                if ramp_gr < read_gr {
+                    read_gr = ramp_gr;
                 }
             }
         }
 
-        // Read the oldest sample from the delay buffer (= lookahead delay)
-        let read_pos = self.write_pos;
-        let dl = self.delay_buf[read_pos * 2];
-        let dr = self.delay_buf[read_pos * 2 + 1];
-
-        // Read gain reduction for this output sample
-        let mut gr = self.gr_buf[read_pos];
-
-        // Smooth release: don't let gain reduction jump back to 1.0 instantly
-        self.env = if gr < self.env {
-            gr // attack: follow instantly (already ramped by lookahead)
+        // Apply release smoothing so that gain recovery doesn't cause
+        // audible pumping. Attack is instant (follow read_gr down),
+        // release ramps back up with the release time constant.
+        self.smooth_gr = if read_gr < self.smooth_gr {
+            read_gr
         } else {
-            release_coeff * self.env + (1.0 - release_coeff) * gr
+            // Release: exponential approach toward read_gr
+            self.smooth_gr + (read_gr - self.smooth_gr) * (1.0 - release_coeff)
         };
-        gr = self.env;
-
-        // Write new sample into the delay buffer
-        self.delay_buf[self.write_pos * 2] = il;
-        self.delay_buf[self.write_pos * 2 + 1] = ir;
-        // Reset gain reduction buffer for future use (will be written again by future peaks)
-        self.gr_buf[self.write_pos] = 1.0;
+        let gr = self.smooth_gr;
 
         // Advance write position
         self.write_pos = (self.write_pos + 1) % la;
 
-        // Apply gain reduction and hard-clip as safety net
-        let ol = (dl * gr).clamp(-ceiling_lin, ceiling_lin);
-        let or_ = (dr * gr).clamp(-ceiling_lin, ceiling_lin);
+        // Apply gain reduction to delayed output
+        let ol = dl * gr;
+        let or_ = dr * gr;
         let out_db = self
             .sm_output
             .tick(param_val(params, "output_db", 0.0) as f64);
@@ -3965,10 +4001,9 @@ impl EffectModule for FxLimiter {
         Box::new(FxLimiter::new())
     }
     fn gain_reduction_db(&self) -> f32 {
-        // env is linear gain (1.0 = no reduction, <1.0 = reducing)
-        if self.env > 1e-10 && self.env < 1.0 {
-            (20.0 * self.env.log10()) as f32
-        } else if self.env <= 1e-10 {
+        if self.smooth_gr > 1e-10 && self.smooth_gr < 1.0 {
+            (20.0 * self.smooth_gr.log10()) as f32
+        } else if self.smooth_gr <= 1e-10 {
             -60.0
         } else {
             0.0
@@ -3976,39 +4011,177 @@ impl EffectModule for FxLimiter {
     }
 }
 
+/// Biquad filter state for one channel.
+#[derive(Debug, Clone)]
+struct BiquadState {
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+}
+impl BiquadState {
+    fn new() -> Self {
+        Self {
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+    fn tick(&mut self, x: f64, b0: f64, b1: f64, b2: f64, a1: f64, a2: f64) -> f64 {
+        let y = b0 * x + b1 * self.x1 + b2 * self.x2 - a1 * self.y1 - a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y + DENORMAL_FIX;
+        y
+    }
+}
+
+/// Biquad coefficient set (normalized: a0 = 1).
+#[derive(Clone, Copy)]
+pub struct BiquadCoeffs {
+    pub b0: f64,
+    pub b1: f64,
+    pub b2: f64,
+    pub a1: f64,
+    pub a2: f64,
+}
+
+impl BiquadCoeffs {
+    /// Low shelf filter (RBJ cookbook).
+    pub fn low_shelf(freq: f64, gain_db: f64, sr: f64) -> Self {
+        let a = 10.0_f64.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f64::consts::PI * freq / sr;
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let alpha = sin_w0 / 2.0 * (2.0_f64).sqrt(); // S=1 (slope)
+        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+        let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+        Self {
+            b0: (a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha)) / a0,
+            b1: (2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0)) / a0,
+            b2: (a * ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha)) / a0,
+            a1: (-2.0 * ((a - 1.0) + (a + 1.0) * cos_w0)) / a0,
+            a2: ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha) / a0,
+        }
+    }
+
+    /// High shelf filter (RBJ cookbook).
+    pub fn high_shelf(freq: f64, gain_db: f64, sr: f64) -> Self {
+        let a = 10.0_f64.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f64::consts::PI * freq / sr;
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let alpha = sin_w0 / 2.0 * (2.0_f64).sqrt();
+        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+        let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+        Self {
+            b0: (a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha)) / a0,
+            b1: (-2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0)) / a0,
+            b2: (a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha)) / a0,
+            a1: (2.0 * ((a - 1.0) - (a + 1.0) * cos_w0)) / a0,
+            a2: ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha) / a0,
+        }
+    }
+
+    /// Peaking (bell) EQ filter (RBJ cookbook).
+    pub fn peaking(freq: f64, gain_db: f64, q: f64, sr: f64) -> Self {
+        let a = 10.0_f64.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f64::consts::PI * freq / sr;
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let alpha = sin_w0 / (2.0 * q);
+        let a0 = 1.0 + alpha / a;
+        Self {
+            b0: (1.0 + alpha * a) / a0,
+            b1: (-2.0 * cos_w0) / a0,
+            b2: (1.0 - alpha * a) / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha / a) / a0,
+        }
+    }
+
+    /// Evaluate the complex magnitude response at angular frequency omega.
+    pub fn magnitude_at(&self, omega: f64) -> f64 {
+        let cos1 = omega.cos();
+        let cos2 = (2.0 * omega).cos();
+        let sin1 = omega.sin();
+        let sin2 = (2.0 * omega).sin();
+        let num_re = self.b0 + self.b1 * cos1 + self.b2 * cos2;
+        let num_im = -(self.b1 * sin1 + self.b2 * sin2);
+        let den_re = 1.0 + self.a1 * cos1 + self.a2 * cos2;
+        let den_im = -(self.a1 * sin1 + self.a2 * sin2);
+        let num_sq = num_re * num_re + num_im * num_im;
+        let den_sq = den_re * den_re + den_im * den_im;
+        if den_sq > 1e-30 {
+            (num_sq / den_sq).sqrt()
+        } else {
+            1.0
+        }
+    }
+}
+
 pub struct FxEq {
-    lo_ic1_l: f64,
-    lo_ic2_l: f64,
-    hi_ic1_l: f64,
-    hi_ic2_l: f64,
-    lo_ic1_r: f64,
-    lo_ic2_r: f64,
-    hi_ic1_r: f64,
-    hi_ic2_r: f64,
+    // 3 bands: low shelf, mid peak, high shelf — stereo (L/R per band)
+    lo_l: BiquadState,
+    lo_r: BiquadState,
+    mid_l: BiquadState,
+    mid_r: BiquadState,
+    hi_l: BiquadState,
+    hi_r: BiquadState,
     sm_lo_gain: SmoothedParam,
     sm_mid_gain: SmoothedParam,
     sm_hi_gain: SmoothedParam,
     sm_lo_freq: SmoothedParam,
+    sm_mid_freq: SmoothedParam,
     sm_hi_freq: SmoothedParam,
     sm_output: SmoothedParam,
+    // Cache coefficients (recomputed when params change noticeably)
+    lo_coeffs: BiquadCoeffs,
+    mid_coeffs: BiquadCoeffs,
+    hi_coeffs: BiquadCoeffs,
+    last_lo_f: f64,
+    last_lo_g: f64,
+    last_mid_f: f64,
+    last_mid_g: f64,
+    last_hi_f: f64,
+    last_hi_g: f64,
+    last_sr: f64,
 }
 impl FxEq {
     pub fn new() -> Self {
+        let unity = BiquadCoeffs {
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+        };
         Self {
-            lo_ic1_l: 0.0,
-            lo_ic2_l: 0.0,
-            hi_ic1_l: 0.0,
-            hi_ic2_l: 0.0,
-            lo_ic1_r: 0.0,
-            lo_ic2_r: 0.0,
-            hi_ic1_r: 0.0,
-            hi_ic2_r: 0.0,
+            lo_l: BiquadState::new(),
+            lo_r: BiquadState::new(),
+            mid_l: BiquadState::new(),
+            mid_r: BiquadState::new(),
+            hi_l: BiquadState::new(),
+            hi_r: BiquadState::new(),
             sm_lo_gain: SmoothedParam::new(0.0, 44100.0),
             sm_mid_gain: SmoothedParam::new(0.0, 44100.0),
             sm_hi_gain: SmoothedParam::new(0.0, 44100.0),
             sm_lo_freq: SmoothedParam::new(200.0, 44100.0),
+            sm_mid_freq: SmoothedParam::new(1000.0, 44100.0),
             sm_hi_freq: SmoothedParam::new(4000.0, 44100.0),
             sm_output: SmoothedParam::new(0.0, 44100.0),
+            lo_coeffs: unity,
+            mid_coeffs: unity,
+            hi_coeffs: unity,
+            last_lo_f: 0.0,
+            last_lo_g: -999.0,
+            last_mid_f: 0.0,
+            last_mid_g: -999.0,
+            last_hi_f: 0.0,
+            last_hi_g: -999.0,
+            last_sr: 0.0,
         }
     }
 }
@@ -4023,6 +4196,14 @@ static EQ_PARAMS: &[ParamDesc] = &[
         options: None,
     },
     ParamDesc {
+        id: "lo_freq",
+        name: "Lo Freq",
+        default: 200.0,
+        min: 20.0,
+        max: 500.0,
+        options: None,
+    },
+    ParamDesc {
         id: "mid_gain",
         name: "Mid Gain",
         default: 0.0,
@@ -4031,19 +4212,19 @@ static EQ_PARAMS: &[ParamDesc] = &[
         options: None,
     },
     ParamDesc {
+        id: "mid_freq",
+        name: "Mid Freq",
+        default: 1000.0,
+        min: 100.0,
+        max: 10000.0,
+        options: None,
+    },
+    ParamDesc {
         id: "hi_gain",
         name: "Hi Gain",
         default: 0.0,
         min: -12.0,
         max: 12.0,
-        options: None,
-    },
-    ParamDesc {
-        id: "lo_freq",
-        name: "Lo Freq",
-        default: 200.0,
-        min: 20.0,
-        max: 500.0,
         options: None,
     },
     ParamDesc {
@@ -4085,31 +4266,92 @@ impl EffectModule for FxEq {
             .sm_lo_freq
             .tick(param_val(params, "lo_freq", 200.0) as f64)
             .clamp(20.0, sr * 0.49);
+        let mid_f = self
+            .sm_mid_freq
+            .tick(param_val(params, "mid_freq", 1000.0) as f64)
+            .clamp(20.0, sr * 0.49);
         let hi_f = self
             .sm_hi_freq
             .tick(param_val(params, "hi_freq", 4000.0) as f64)
             .clamp(20.0, sr * 0.49);
-        let lo_gain = db_to_lin(lo_g);
-        let mid_gain = db_to_lin(mid_g);
-        let hi_gain = db_to_lin(hi_g);
-        // Left channel
-        let (lo_l, _, _) = svf_tick(left, lo_f, 0.5, sr, &mut self.lo_ic1_l, &mut self.lo_ic2_l);
-        let (_, _, hi_l) = svf_tick(left, hi_f, 0.5, sr, &mut self.hi_ic1_l, &mut self.hi_ic2_l);
-        let mid_l = left - lo_l - hi_l;
-        let out_l = lo_l * lo_gain + mid_l * mid_gain + hi_l * hi_gain;
-        // Right channel
-        let (lo_r, _, _) = svf_tick(right, lo_f, 0.5, sr, &mut self.lo_ic1_r, &mut self.lo_ic2_r);
-        let (_, _, hi_r) = svf_tick(right, hi_f, 0.5, sr, &mut self.hi_ic1_r, &mut self.hi_ic2_r);
-        let mid_r = right - lo_r - hi_r;
-        let out_r = lo_r * lo_gain + mid_r * mid_gain + hi_r * hi_gain;
+
+        // Recompute biquad coefficients only when params change appreciably
+        let thresh_f = 0.5; // Hz
+        let thresh_g = 0.01; // dB
+        if (lo_f - self.last_lo_f).abs() > thresh_f
+            || (lo_g - self.last_lo_g).abs() > thresh_g
+            || (sr - self.last_sr).abs() > 1.0
+        {
+            self.lo_coeffs = if lo_g.abs() > 0.01 {
+                BiquadCoeffs::low_shelf(lo_f, lo_g, sr)
+            } else {
+                BiquadCoeffs {
+                    b0: 1.0,
+                    b1: 0.0,
+                    b2: 0.0,
+                    a1: 0.0,
+                    a2: 0.0,
+                }
+            };
+            self.last_lo_f = lo_f;
+            self.last_lo_g = lo_g;
+        }
+        if (mid_f - self.last_mid_f).abs() > thresh_f
+            || (mid_g - self.last_mid_g).abs() > thresh_g
+            || (sr - self.last_sr).abs() > 1.0
+        {
+            self.mid_coeffs = if mid_g.abs() > 0.01 {
+                BiquadCoeffs::peaking(mid_f, mid_g, 0.7, sr)
+            } else {
+                BiquadCoeffs {
+                    b0: 1.0,
+                    b1: 0.0,
+                    b2: 0.0,
+                    a1: 0.0,
+                    a2: 0.0,
+                }
+            };
+            self.last_mid_f = mid_f;
+            self.last_mid_g = mid_g;
+        }
+        if (hi_f - self.last_hi_f).abs() > thresh_f
+            || (hi_g - self.last_hi_g).abs() > thresh_g
+            || (sr - self.last_sr).abs() > 1.0
+        {
+            self.hi_coeffs = if hi_g.abs() > 0.01 {
+                BiquadCoeffs::high_shelf(hi_f, hi_g, sr)
+            } else {
+                BiquadCoeffs {
+                    b0: 1.0,
+                    b1: 0.0,
+                    b2: 0.0,
+                    a1: 0.0,
+                    a2: 0.0,
+                }
+            };
+            self.last_hi_f = hi_f;
+            self.last_hi_g = hi_g;
+        }
+        self.last_sr = sr;
+
+        let c = &self.lo_coeffs;
+        let mut l = self.lo_l.tick(left, c.b0, c.b1, c.b2, c.a1, c.a2);
+        let mut r = self.lo_r.tick(right, c.b0, c.b1, c.b2, c.a1, c.a2);
+        let c = &self.mid_coeffs;
+        l = self.mid_l.tick(l, c.b0, c.b1, c.b2, c.a1, c.a2);
+        r = self.mid_r.tick(r, c.b0, c.b1, c.b2, c.a1, c.a2);
+        let c = &self.hi_coeffs;
+        l = self.hi_l.tick(l, c.b0, c.b1, c.b2, c.a1, c.a2);
+        r = self.hi_r.tick(r, c.b0, c.b1, c.b2, c.a1, c.a2);
+
         let out_db = self
             .sm_output
             .tick(param_val(params, "output_db", 0.0) as f64);
         if out_db.abs() < 0.001 {
-            (out_l, out_r)
+            (l, r)
         } else {
             let g = db_to_linear(out_db);
-            (out_l * g, out_r * g)
+            (l * g, r * g)
         }
     }
     fn fresh(&self) -> Box<dyn EffectModule> {
@@ -4464,8 +4706,8 @@ struct CsHpLpState {
 /// Butter-style compressor state (4-way dual-rail).
 #[derive(Clone, Default)]
 struct CsCompState {
-    avg:   f64,
-    nvg:   f64,
+    avg: f64,
+    nvg: f64,
     tar_pos: f64,
     tar_neg: f64,
     ctrl_a_pos: f64,
@@ -4485,10 +4727,16 @@ pub struct CStrip2 {
     cl: CsCompState,
     cr: CsCompState,
     // 3-band Triplet EQ
-    tri_la: f64, tri_lb: f64, tri_lc: f64,
-    tri_ra: f64, tri_rb: f64, tri_rc: f64,
-    last_l: f64,  last2_l: f64,
-    last_r: f64,  last2_r: f64,
+    tri_la: f64,
+    tri_lb: f64,
+    tri_lc: f64,
+    tri_ra: f64,
+    tri_rb: f64,
+    tri_rc: f64,
+    last_l: f64,
+    last2_l: f64,
+    last_r: f64,
+    last2_r: f64,
     // Dithering seeds
     fpd_l: u32,
     fpd_r: u32,
@@ -4507,10 +4755,16 @@ impl CStrip2 {
             iir_hr: 0.0,
             cl: CsCompState::default(),
             cr: CsCompState::default(),
-            tri_la: 0.0, tri_lb: 0.0, tri_lc: 0.0,
-            tri_ra: 0.0, tri_rb: 0.0, tri_rc: 0.0,
-            last_l: 0.0, last2_l: 0.0,
-            last_r: 0.0, last2_r: 0.0,
+            tri_la: 0.0,
+            tri_lb: 0.0,
+            tri_lc: 0.0,
+            tri_ra: 0.0,
+            tri_rb: 0.0,
+            tri_rc: 0.0,
+            last_l: 0.0,
+            last2_l: 0.0,
+            last_r: 0.0,
+            last2_r: 0.0,
             fpd_l: 1,
             fpd_r: 1,
             flip: false,
@@ -4583,33 +4837,107 @@ impl CStrip2 {
 }
 
 static CSTRIP2_PARAMS: &[ParamDesc] = &[
-    ParamDesc { id: "treble",   name: "Treble",   default: 0.5, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "mid",      name: "Mid",      default: 0.5, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "bass",     name: "Bass",     default: 0.5, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "treb_frq", name: "TrebFreq", default: 0.55, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "bass_frq", name: "BassFreq", default: 0.15, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "lo_cap",   name: "LoCap",    default: 0.0, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "hi_cap",   name: "HiCap",    default: 0.0, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "compress", name: "Compress", default: 0.0, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "comp_spd", name: "CompSpd",  default: 0.0, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "output",   name: "Trim",     default: 0.5,  min: 0.0, max: 1.0, options: None },
+    ParamDesc {
+        id: "treble",
+        name: "Treble",
+        default: 0.5,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "mid",
+        name: "Mid",
+        default: 0.5,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "bass",
+        name: "Bass",
+        default: 0.5,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "treb_frq",
+        name: "TrebFreq",
+        default: 0.55,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "bass_frq",
+        name: "BassFreq",
+        default: 0.15,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "lo_cap",
+        name: "LoCap",
+        default: 0.0,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "hi_cap",
+        name: "HiCap",
+        default: 0.0,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "compress",
+        name: "Compress",
+        default: 0.0,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "comp_spd",
+        name: "CompSpd",
+        default: 0.0,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
+    ParamDesc {
+        id: "output",
+        name: "Trim",
+        default: 0.5,
+        min: 0.0,
+        max: 1.0,
+        options: None,
+    },
 ];
 
 impl EffectModule for CStrip2 {
-    fn name(&self) -> &'static str { "CStrip2" }
-    fn params(&self) -> &'static [ParamDesc] { CSTRIP2_PARAMS }
+    fn name(&self) -> &'static str {
+        "CStrip2"
+    }
+    fn params(&self) -> &'static [ParamDesc] {
+        CSTRIP2_PARAMS
+    }
 
     fn process(&mut self, left: f64, right: f64, params: &[(String, f32)], _sr: f64) -> (f64, f64) {
-        let treble   = param_val(params, "treble",   0.5) as f64;
-        let mid      = param_val(params, "mid",      0.5) as f64;
-        let bass     = param_val(params, "bass",     0.5) as f64;
+        let treble = param_val(params, "treble", 0.5) as f64;
+        let mid = param_val(params, "mid", 0.5) as f64;
+        let bass = param_val(params, "bass", 0.5) as f64;
         let treb_frq = param_val(params, "treb_frq", 0.55) as f64;
         let bass_frq = param_val(params, "bass_frq", 0.15) as f64;
-        let lo_cap   = param_val(params, "lo_cap",   0.0) as f64;
-        let hi_cap   = param_val(params, "hi_cap",   0.0) as f64;
+        let lo_cap = param_val(params, "lo_cap", 0.0) as f64;
+        let hi_cap = param_val(params, "hi_cap", 0.0) as f64;
         let compress = param_val(params, "compress", 0.0) as f64;
         let comp_spd = param_val(params, "comp_spd", 0.0) as f64;
-        let output   = param_val(params, "output",   0.5) as f64;
+        let output = param_val(params, "output", 0.5) as f64;
 
         // ── Hi-pass cap (lo_cap) ─────────────────────────────────────────
         // lo_cap=0.0 → no HP filter; 1.0 → aggressive HP cut
@@ -4658,12 +4986,12 @@ impl EffectModule for CStrip2 {
         self.tri_rb = r - self.tri_ra - (r - self.tri_rc);
 
         // EQ gains: 0..1 → -6..+6 dB style (0.5=unity)
-        let bass_g   = (bass   * 2.0 - 1.0) * 0.5 + 1.0; // 0.5 .. 1.5
-        let mid_g    = (mid    * 2.0 - 1.0) * 0.5 + 1.0;
+        let bass_g = (bass * 2.0 - 1.0) * 0.5 + 1.0; // 0.5 .. 1.5
+        let mid_g = (mid * 2.0 - 1.0) * 0.5 + 1.0;
         let treble_g = (treble * 2.0 - 1.0) * 0.5 + 1.0;
 
-        l = self.tri_la * bass_g + self.tri_lb * mid_g + (l - self.tri_lc) * treble_g ;
-        r = self.tri_ra * bass_g + self.tri_rb * mid_g + (r - self.tri_rc) * treble_g ;
+        l = self.tri_la * bass_g + self.tri_lb * mid_g + (l - self.tri_lc) * treble_g;
+        r = self.tri_ra * bass_g + self.tri_rb * mid_g + (r - self.tri_rc) * treble_g;
 
         // ── ButterComp ───────────────────────────────────────────────────
         if compress > 0.001 {
@@ -4683,8 +5011,12 @@ impl EffectModule for CStrip2 {
         (l, r)
     }
 
-    fn fresh(&self) -> Box<dyn EffectModule> { Box::new(CStrip2::new()) }
-    fn reset(&mut self) { *self = CStrip2::new(); }
+    fn fresh(&self) -> Box<dyn EffectModule> {
+        Box::new(CStrip2::new())
+    }
+    fn reset(&mut self) {
+        *self = CStrip2::new();
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════

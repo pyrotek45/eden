@@ -3534,7 +3534,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         // Preserve the currently-focused editor clip (MIDI, Audio, or Automation)
         // so clicking the arranger background doesn't close the active editor.
         let preserve_clip = state.bottom_panel_open
-            && state.selected_clip.map_or(false, |(tid, ci)| {
+            && state.selected_clip.is_some_and(|(tid, ci)| {
                 state
                     .project
                     .tracks
@@ -4766,6 +4766,97 @@ pub fn draw_bottom_panel(
     }
 }
 
+// ── Helper: dB-scaled meter color (module-level) ──
+fn meter_color(db: f64) -> sdl2::pixels::Color {
+    if db >= 0.0 {
+        sdl2::pixels::Color::RGBA(220, 40, 30, 240)
+    } else {
+        let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
+        if frac < 0.5 {
+            let t = frac / 0.5;
+            sdl2::pixels::Color::RGBA(
+                (20.0 + t * 40.0) as u8,
+                (90.0 + t * 130.0) as u8,
+                (40.0 + t * 40.0) as u8,
+                230,
+            )
+        } else if frac < 0.8 {
+            let t = (frac - 0.5) / 0.3;
+            sdl2::pixels::Color::RGBA(
+                (60.0 + t * 180.0) as u8,
+                (220.0 - t * 30.0) as u8,
+                (80.0 - t * 50.0) as u8,
+                230,
+            )
+        } else {
+            let t = (frac - 0.8) / 0.2;
+            sdl2::pixels::Color::RGBA((240.0 - t * 20.0) as u8, (190.0 - t * 90.0) as u8, 30, 230)
+        }
+    }
+}
+
+// ── Helper: draw one vertical meter bar (module-level) ──
+fn draw_meter_bar(canvas: &mut Canvas<Window>, rms: f32, x: i32, y: i32, w_px: u32, h_px: i32) {
+    const DB_FLOOR: f64 = -60.0;
+    const DB_CEIL: f64 = 12.0;
+    const DB_RANGE: f64 = DB_CEIL - DB_FLOOR;
+
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(16, 16, 20, 220));
+    let _ = canvas.fill_rect(Rect::new(x, y, w_px, h_px as u32));
+    if rms > 0.001 {
+        let db = if rms > 1e-6 {
+            20.0 * (rms as f64).log10()
+        } else {
+            DB_FLOOR
+        };
+        let frac = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0) as f32;
+        let fill = (frac * h_px as f32) as i32;
+        let seg_h = 2i32;
+        let gap = 1i32;
+        let mut py = y + h_px - fill;
+        while py < y + h_px {
+            let seg_bottom = (py + seg_h).min(y + h_px);
+            let seg_top_db = DB_FLOOR + DB_RANGE * (1.0 - (py - y) as f64 / h_px as f64);
+            let c = meter_color(seg_top_db);
+            canvas.set_draw_color(c);
+            let _ = canvas.fill_rect(Rect::new(x, py, w_px, (seg_bottom - py) as u32));
+            py = seg_bottom + gap;
+        }
+    }
+    let zero_frac = ((0.0 - DB_FLOOR) / DB_RANGE) as f32;
+    let zero_y = y + h_px - (zero_frac * h_px as f32) as i32;
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 50, 40, 160));
+    let _ = canvas.draw_line(
+        sdl2::rect::Point::new(x, zero_y),
+        sdl2::rect::Point::new(x + w_px as i32 - 1, zero_y),
+    );
+    {
+        let mut db_tick = -55.0_f64;
+        while db_tick <= DB_CEIL {
+            if (db_tick - 0.0).abs() < 0.1 {
+                db_tick += 5.0;
+                continue;
+            }
+            let frac = ((db_tick - DB_FLOOR) / DB_RANGE) as f32;
+            let ty = y + h_px - (frac * h_px as f32) as i32;
+            if ty > y && ty < y + h_px {
+                let alpha = if db_tick % 10.0 == 0.0 { 70u8 } else { 40u8 };
+                let tick_w = if db_tick % 10.0 == 0.0 {
+                    w_px
+                } else {
+                    (w_px / 2).max(1)
+                };
+                canvas.set_draw_color(sdl2::pixels::Color::RGBA(180, 190, 200, alpha));
+                let _ = canvas.draw_line(
+                    sdl2::rect::Point::new(x, ty),
+                    sdl2::rect::Point::new(x + tick_w as i32 - 1, ty),
+                );
+            }
+            db_tick += 5.0;
+        }
+    }
+}
+
 fn draw_bottom_mixer(
     canvas: &mut Canvas<Window>,
     input: &mut InputState,
@@ -4784,7 +4875,8 @@ fn draw_bottom_mixer(
     let track_count = state.project.tracks.len();
     let scrollbar_h = 14i32;
     let master_strip_w = 220i32;
-    let content_w = w - master_strip_w - 8;
+    let preview_strip_w = 60i32;
+    let content_w = w - master_strip_w - preview_strip_w - 12;
 
     let non_auto_count = state
         .project
@@ -4793,12 +4885,18 @@ fn draw_bottom_mixer(
         .filter(|t| t.track_type != crate::models::TrackType::Automation)
         .count() as i32;
     let _ = non_auto_count; // used only for legacy uniform-width fallback
-    // Compute total width accounting for slim tracks
+                            // Compute total width accounting for slim tracks
     let total_content_w = {
         let mut tw = 12i32;
         for t in &state.project.tracks {
-            if t.track_type == crate::models::TrackType::Automation { continue; }
-            let sw = if state.mixer_slim_tracks.contains(&t.id) { strip_w_slim } else { strip_w_full };
+            if t.track_type == crate::models::TrackType::Automation {
+                continue;
+            }
+            let sw = if state.mixer_slim_tracks.contains(&t.id) {
+                strip_w_slim
+            } else {
+                strip_w_full
+            };
             tw += sw + strip_gap;
         }
         tw
@@ -4813,96 +4911,22 @@ fn draw_bottom_mixer(
     let clip_h = if needs_scroll { h - scrollbar_h } else { h };
     canvas.set_clip_rect(Rect::new(0, top, content_w as u32, clip_h as u32));
 
-    // ── Helper: dB-scaled meter color ──
-    fn meter_color(db: f64) -> sdl2::pixels::Color {
-        if db >= 0.0 {
-            sdl2::pixels::Color::RGBA(220, 40, 30, 240)
-        } else {
-            let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32;
-            if frac < 0.5 {
-                let t = frac / 0.5;
-                sdl2::pixels::Color::RGBA(
-                    (20.0 + t * 40.0) as u8, (90.0 + t * 130.0) as u8, (40.0 + t * 40.0) as u8, 230)
-            } else if frac < 0.8 {
-                let t = (frac - 0.5) / 0.3;
-                sdl2::pixels::Color::RGBA(
-                    (60.0 + t * 180.0) as u8, (220.0 - t * 30.0) as u8, (80.0 - t * 50.0) as u8, 230)
-            } else {
-                let t = (frac - 0.8) / 0.2;
-                sdl2::pixels::Color::RGBA(
-                    (240.0 - t * 20.0) as u8, (190.0 - t * 90.0) as u8, 30, 230)
-            }
-        }
-    }
-
-    // ── Helper: draw one vertical meter bar ──
-    fn draw_meter_bar(
-        canvas: &mut Canvas<Window>, rms: f32, x: i32, y: i32, w_px: u32, h_px: i32,
-    ) {
-        // Meter scale: -60 dB to +12 dB.  0 dB sits at 60/72 ≈ 83 %.
-        const DB_FLOOR: f64 = -60.0;
-        const DB_CEIL:  f64 =  12.0;
-        const DB_RANGE: f64 = DB_CEIL - DB_FLOOR; // 72
-
-        canvas.set_draw_color(sdl2::pixels::Color::RGBA(16, 16, 20, 220));
-        let _ = canvas.fill_rect(Rect::new(x, y, w_px, h_px as u32));
-        if rms > 0.001 {
-            let db = if rms > 1e-6 { 20.0 * (rms as f64).log10() } else { DB_FLOOR };
-            let frac = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0) as f32;
-            let fill = (frac * h_px as f32) as i32;
-            let seg_h = 2i32;
-            let gap = 1i32;
-            let mut py = y + h_px - fill;
-            while py < y + h_px {
-                let seg_bottom = (py + seg_h).min(y + h_px);
-                let seg_top_db = DB_FLOOR + DB_RANGE * (1.0 - (py - y) as f64 / h_px as f64);
-                let c = meter_color(seg_top_db);
-                canvas.set_draw_color(c);
-                let _ = canvas.fill_rect(Rect::new(x, py, w_px, (seg_bottom - py) as u32));
-                py = seg_bottom + gap;
-            }
-        }
-        // 0 dB reference line (red, at 83 % height)
-        let zero_frac = ((0.0 - DB_FLOOR) / DB_RANGE) as f32; // ≈ 0.833
-        let zero_y = y + h_px - (zero_frac * h_px as f32) as i32;
-        canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 50, 40, 160));
-        let _ = canvas.draw_line(
-            sdl2::rect::Point::new(x, zero_y),
-            sdl2::rect::Point::new(x + w_px as i32 - 1, zero_y),
-        );
-        // dB tick marks every 5 dB
-        {
-            let mut db_tick = -55.0_f64;
-            while db_tick <= DB_CEIL {
-                if (db_tick - 0.0).abs() < 0.1 { db_tick += 5.0; continue; } // skip 0dB (already drawn)
-                let frac = ((db_tick - DB_FLOOR) / DB_RANGE) as f32;
-                let ty = y + h_px - (frac * h_px as f32) as i32;
-                if ty > y && ty < y + h_px {
-                    let alpha = if db_tick % 10.0 == 0.0 { 70u8 } else { 40u8 };
-                    let tick_w = if db_tick % 10.0 == 0.0 { w_px } else { (w_px / 2).max(1) };
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(180, 190, 200, alpha));
-                    let _ = canvas.draw_line(
-                        sdl2::rect::Point::new(x, ty),
-                        sdl2::rect::Point::new(x + tick_w as i32 - 1, ty),
-                    );
-                }
-                db_tick += 5.0;
-            }
-        }
-    }
-
     /// Draw dB labels to the right of a stereo meter pair.
     /// `label_x` is the x position where labels start (right edge of right meter + gap).
     fn draw_meter_db_labels(
-        canvas: &mut Canvas<Window>, theme: &Theme,
-        label_x: i32, y: i32, h_px: i32, max_label_w: i32,
+        canvas: &mut Canvas<Window>,
+        theme: &Theme,
+        label_x: i32,
+        y: i32,
+        h_px: i32,
+        max_label_w: i32,
     ) {
         const DB_FLOOR: f64 = -60.0;
-        const DB_CEIL:  f64 =  12.0;
+        const DB_CEIL: f64 = 12.0;
         const DB_RANGE: f64 = DB_CEIL - DB_FLOOR;
         let label_scale = 1i32; // tiny pixel font
         let gh = 5 * label_scale; // glyph height at scale=1
-        // Draw labels at 0, -10, -20, -30, -40, -50, +10
+                                  // Draw labels at 0, -10, -20, -30, -40, -50, +10
         for &db in &[0.0_f64, -10.0, -20.0, -30.0, -40.0, -50.0, 10.0] {
             let frac = ((db - DB_FLOOR) / DB_RANGE) as f32;
             let ty = y + h_px - (frac * h_px as f32) as i32;
@@ -4919,7 +4943,16 @@ fn draw_bottom_mixer(
                 } else {
                     sdl2::pixels::Color::RGBA(120, 130, 140, 140)
                 };
-                draw_pixel_label_scaled(canvas, theme, &label, lx, ly, max_label_w, col, label_scale);
+                draw_pixel_label_scaled(
+                    canvas,
+                    theme,
+                    &label,
+                    lx,
+                    ly,
+                    max_label_w,
+                    col,
+                    label_scale,
+                );
             }
         }
     }
@@ -4927,10 +4960,14 @@ fn draw_bottom_mixer(
     // Helper: draw peak hold line on a meter
     fn draw_peak_hold(canvas: &mut Canvas<Window>, ph: f32, x: i32, y: i32, w_px: u32, h_px: i32) {
         const DB_FLOOR: f64 = -60.0;
-        const DB_CEIL:  f64 =  12.0;
+        const DB_CEIL: f64 = 12.0;
         const DB_RANGE: f64 = DB_CEIL - DB_FLOOR;
         if ph > 0.01 {
-            let pk_db = if ph > 1e-6 { 20.0 * (ph as f64).log10() } else { DB_FLOOR };
+            let pk_db = if ph > 1e-6 {
+                20.0 * (ph as f64).log10()
+            } else {
+                DB_FLOOR
+            };
             let pk_frac = ((pk_db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0) as f32;
             let ph_y = y + h_px - (pk_frac * h_px as f32) as i32;
             let ph_col = if pk_db >= 0.0 {
@@ -4953,7 +4990,9 @@ fn draw_bottom_mixer(
             continue;
         }
 
-        let is_slim = state.mixer_slim_tracks.contains(&state.project.tracks[i].id);
+        let is_slim = state
+            .mixer_slim_tracks
+            .contains(&state.project.tracks[i].id);
         let strip_w = if is_slim { strip_w_slim } else { strip_w_full };
         let x = strip_x_accum - scroll_offset;
         let sy = top + 4;
@@ -4968,7 +5007,8 @@ fn draw_bottom_mixer(
                 state.theme.panel_bg[0].saturating_add(14),
                 state.theme.panel_bg[1].saturating_add(14),
                 state.theme.panel_bg[2].saturating_add(18),
-                255)
+                255,
+            )
         } else {
             Theme::c(state.theme.panel_bg)
         };
@@ -4978,7 +5018,10 @@ fn draw_bottom_mixer(
         // Color cap
         let cap_h = if selected { 4u32 } else { 3u32 };
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(
-            track_color[0], track_color[1], track_color[2], if selected { 255 } else { 200 },
+            track_color[0],
+            track_color[1],
+            track_color[2],
+            if selected { 255 } else { 200 },
         ));
         let _ = canvas.fill_rect(Rect::new(x, sy, strip_w as u32, cap_h));
 
@@ -4990,9 +5033,13 @@ fn draw_bottom_mixer(
             sdl2::pixels::Color::RGBA(190, 195, 200, 220)
         };
         draw_pixel_label(
-            canvas, &state.theme,
+            canvas,
+            &state.theme,
             &state.project.tracks[i].name.clone(),
-            x + 6, name_y, strip_w - 26, name_col,
+            x + 6,
+            name_y,
+            strip_w - 26,
+            name_col,
         );
 
         // ── Slim / Expand toggle button (top-right of name bar) ──
@@ -5003,13 +5050,21 @@ fn draw_bottom_mixer(
             let toggle_y = name_y - 2;
             let slim_btn_id = input.next_id();
             let label = if is_slim { "+" } else { "-" };
-            let hint = if is_slim { "Expand strip" } else { "Collapse to slim" };
+            let hint = if is_slim {
+                "Expand strip"
+            } else {
+                "Collapse to slim"
+            };
             let clicked = button(
-                canvas, input, &state.theme,
+                canvas,
+                input,
+                &state.theme,
                 &ButtonParams {
                     id: slim_btn_id,
-                    x: toggle_x, y: toggle_y,
-                    width: toggle_w, height: toggle_h,
+                    x: toggle_x,
+                    y: toggle_y,
+                    width: toggle_w,
+                    height: toggle_h,
                     label: label.into(),
                     toggled: is_slim,
                     icon: ButtonIcon::None,
@@ -5037,15 +5092,24 @@ fn draw_bottom_mixer(
                     state.selected_tracks.insert(track_id);
                 }
             } else if input.shift() {
-                let track_ids: Vec<u32> = state.project.tracks.iter()
+                let track_ids: Vec<u32> = state
+                    .project
+                    .tracks
+                    .iter()
                     .filter(|t| t.track_type != crate::models::TrackType::Automation)
-                    .map(|t| t.id).collect();
+                    .map(|t| t.id)
+                    .collect();
                 if let Some(clicked_idx) = track_ids.iter().position(|&tid| tid == track_id) {
-                    let anchor_idx = state.selected_track
+                    let anchor_idx = state
+                        .selected_track
                         .and_then(|sid| track_ids.iter().position(|&tid| tid == sid))
-                        .or_else(|| state.selected_tracks.iter()
-                            .filter_map(|&sid| track_ids.iter().position(|&tid| tid == sid))
-                            .min_by_key(|&idx| (idx as i32 - clicked_idx as i32).unsigned_abs()));
+                        .or_else(|| {
+                            state
+                                .selected_tracks
+                                .iter()
+                                .filter_map(|&sid| track_ids.iter().position(|&tid| tid == sid))
+                                .min_by_key(|&idx| (idx as i32 - clicked_idx as i32).unsigned_abs())
+                        });
                     if let Some(anchor) = anchor_idx {
                         let lo = anchor.min(clicked_idx);
                         let hi = anchor.max(clicked_idx);
@@ -5066,7 +5130,7 @@ fn draw_bottom_mixer(
 
         // ── Layout zones (top to bottom within strip) ──
         let content_top = name_y + 18; // more padding below name
-        let bottom_bar_h = 40i32;      // mute/solo/pan row (taller for label)
+        let bottom_bar_h = 40i32; // mute/solo/pan row (taller for label)
         let content_bottom = sy + sh - bottom_bar_h;
         let avail_h = (content_bottom - content_top).max(10);
 
@@ -5075,7 +5139,16 @@ fn draw_bottom_mixer(
         if vu_h >= 30 && !is_slim {
             let vu_pos = state.meters.vu_needle.get(i).copied().unwrap_or(0.0);
             let vu_peak = state.meters.vu_peak_needle.get(i).copied().unwrap_or(0.0);
-            vu_meter(canvas, &state.theme, x + 6, content_top, strip_w - 12, vu_h, vu_pos, vu_peak);
+            vu_meter(
+                canvas,
+                &state.theme,
+                x + 6,
+                content_top,
+                strip_w - 12,
+                vu_h,
+                vu_pos,
+                vu_peak,
+            );
         }
 
         let below_vu = content_top + if vu_h >= 30 { vu_h + 8 } else { 0 }; // more padding after VU
@@ -5096,10 +5169,15 @@ fn draw_bottom_mixer(
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(40, 42, 50, 200));
             let _ = canvas.draw_line(
                 sdl2::rect::Point::new(fader_x + 12, below_vu),
-                sdl2::rect::Point::new(fader_x + 12, below_vu + fader_h));
+                sdl2::rect::Point::new(fader_x + 12, below_vu + fader_h),
+            );
             // dB tick marks
             for &db_mark in &[-48.0_f32, -24.0, -12.0, -6.0, 0.0, 6.0] {
-                let gain = if db_mark <= -60.0 { 0.0 } else { 10.0_f32.powf(db_mark / 20.0) };
+                let gain = if db_mark <= -60.0 {
+                    0.0
+                } else {
+                    10.0_f32.powf(db_mark / 20.0)
+                };
                 let pos = vol_gain_to_pos(gain);
                 let tick_y = below_vu + fader_h - (pos * fader_h as f32) as i32;
                 let tc = if db_mark >= 0.0 {
@@ -5110,7 +5188,8 @@ fn draw_bottom_mixer(
                 canvas.set_draw_color(tc);
                 let _ = canvas.draw_line(
                     sdl2::rect::Point::new(fader_x, tick_y),
-                    sdl2::rect::Point::new(fader_x + 4, tick_y));
+                    sdl2::rect::Point::new(fader_x + 4, tick_y),
+                );
             }
         }
 
@@ -5118,11 +5197,17 @@ fn draw_bottom_mixer(
         let mut vol_pos = vol_gain_to_pos(state.project.tracks[i].volume);
         let mixer_vol_id = input.next_id();
         let vol_changed = slider(
-            canvas, input, &state.theme,
+            canvas,
+            input,
+            &state.theme,
             &SliderParams {
                 id: mixer_vol_id,
-                x: fader_x, y: below_vu, width: fader_w, height: fader_h,
-                min: 0.0, max: 1.0,
+                x: fader_x,
+                y: below_vu,
+                width: fader_w,
+                height: fader_h,
+                min: 0.0,
+                max: 1.0,
                 orientation: SliderOrientation::Vertical,
                 label: None,
                 default_value: Some(vol_gain_to_pos(0.8)),
@@ -5137,7 +5222,9 @@ fn draw_bottom_mixer(
             // Propagate volume delta to all other selected tracks
             if state.selected_tracks.contains(&track_id) {
                 for j in 0..state.project.tracks.len() {
-                    if j == i { continue; }
+                    if j == i {
+                        continue;
+                    }
                     let other_id = state.project.tracks[j].id;
                     if state.selected_tracks.contains(&other_id) {
                         state.project.tracks[j].volume =
@@ -5152,7 +5239,9 @@ fn draw_bottom_mixer(
             if (old_gain - new_gain).abs() > 1e-4 {
                 state.commands.execute(
                     Box::new(crate::commands::SetTrackVolume {
-                        track_id, old_value: old_gain, new_value: new_gain,
+                        track_id,
+                        old_value: old_gain,
+                        new_value: new_gain,
                     }),
                     &mut state.project,
                 );
@@ -5164,30 +5253,71 @@ fn draw_bottom_mixer(
         let rms_l = state.meters.track_rms_l.get(i).copied().unwrap_or(0.0);
         let rms_r = state.meters.track_rms_r.get(i).copied().unwrap_or(0.0);
         draw_meter_bar(canvas, rms_l, meter_x, below_vu, meter_bar_w, fader_h);
-        draw_meter_bar(canvas, rms_r, meter_x + meter_bar_w as i32 + meter_gap, below_vu, meter_bar_w, fader_h);
+        draw_meter_bar(
+            canvas,
+            rms_r,
+            meter_x + meter_bar_w as i32 + meter_gap,
+            below_vu,
+            meter_bar_w,
+            fader_h,
+        );
 
         // Peak hold lines
-        let ph_l = state.meters.track_peak_hold_l.get(i).copied().unwrap_or(0.0);
-        let ph_r = state.meters.track_peak_hold_r.get(i).copied().unwrap_or(0.0);
+        let ph_l = state
+            .meters
+            .track_peak_hold_l
+            .get(i)
+            .copied()
+            .unwrap_or(0.0);
+        let ph_r = state
+            .meters
+            .track_peak_hold_r
+            .get(i)
+            .copied()
+            .unwrap_or(0.0);
         draw_peak_hold(canvas, ph_l, meter_x, below_vu, meter_bar_w, fader_h);
-        draw_peak_hold(canvas, ph_r, meter_x + meter_bar_w as i32 + meter_gap, below_vu, meter_bar_w, fader_h);
+        draw_peak_hold(
+            canvas,
+            ph_r,
+            meter_x + meter_bar_w as i32 + meter_gap,
+            below_vu,
+            meter_bar_w,
+            fader_h,
+        );
 
         // dB labels to the right of the meters
         // dB labels — skip in slim mode
         if !is_slim {
             let labels_x = meter_x + meter_bar_w as i32 * 2 + meter_gap + 2;
-            let label_max_w = strip_w as i32 - (labels_x - x) - 2;
+            let label_max_w = strip_w - (labels_x - x) - 2;
             if label_max_w > 8 {
-                draw_meter_db_labels(canvas, &state.theme, labels_x, below_vu, fader_h, label_max_w);
+                draw_meter_db_labels(
+                    canvas,
+                    &state.theme,
+                    labels_x,
+                    below_vu,
+                    fader_h,
+                    label_max_w,
+                );
             }
         }
 
         // Clip LEDs above meters
         for (ch, mx_off) in [(0i32, 0i32), (1i32, meter_bar_w as i32 + meter_gap)] {
             let clip_flag = if ch == 0 {
-                state.meters.track_clipping_l.get(i).copied().unwrap_or(false)
+                state
+                    .meters
+                    .track_clipping_l
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false)
             } else {
-                state.meters.track_clipping_r.get(i).copied().unwrap_or(false)
+                state
+                    .meters
+                    .track_clipping_r
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false)
             };
             let led_x = meter_x + mx_off;
             let led_y = below_vu - 6;
@@ -5195,8 +5325,11 @@ fn draw_bottom_mixer(
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 20, 20, 255));
                 let _ = canvas.fill_rect(Rect::new(led_x, led_y, meter_bar_w, 4));
                 if input.mouse_in_rect(led_x, led_y, meter_bar_w as i32, 4) && input.mouse_pressed {
-                    if ch == 0 { state.meters.track_clipping_l[i] = false; }
-                    else { state.meters.track_clipping_r[i] = false; }
+                    if ch == 0 {
+                        state.meters.track_clipping_l[i] = false;
+                    } else {
+                        state.meters.track_clipping_r[i] = false;
+                    }
                 }
             } else {
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(30, 50, 30, 160));
@@ -5205,12 +5338,26 @@ fn draw_bottom_mixer(
         }
 
         // L/R labels
-        draw_pixel_label_scaled(canvas, &state.theme, "L",
-            meter_x, below_vu + fader_h + 1, meter_bar_w as i32,
-            sdl2::pixels::Color::RGBA(100, 110, 120, 140), 1);
-        draw_pixel_label_scaled(canvas, &state.theme, "R",
-            meter_x + meter_bar_w as i32 + meter_gap, below_vu + fader_h + 1, meter_bar_w as i32,
-            sdl2::pixels::Color::RGBA(100, 110, 120, 140), 1);
+        draw_pixel_label_scaled(
+            canvas,
+            &state.theme,
+            "L",
+            meter_x,
+            below_vu + fader_h + 1,
+            meter_bar_w as i32,
+            sdl2::pixels::Color::RGBA(100, 110, 120, 140),
+            1,
+        );
+        draw_pixel_label_scaled(
+            canvas,
+            &state.theme,
+            "R",
+            meter_x + meter_bar_w as i32 + meter_gap,
+            below_vu + fader_h + 1,
+            meter_bar_w as i32,
+            sdl2::pixels::Color::RGBA(100, 110, 120, 140),
+            1,
+        );
 
         // ── Right column: CStrip2 knobs + EQ + Comp curve (skip in slim mode) ──
         let right_x = x + 8 + left_col_w + 30;
@@ -5219,7 +5366,52 @@ fn draw_bottom_mixer(
             let cs_descs = crate::modules::get_param_descs("CStrip2");
             if state.project.tracks[i].cstrip2_params.is_empty() && !cs_descs.is_empty() {
                 state.project.tracks[i].cstrip2_params = cs_descs
-                    .iter().map(|d| (d.id.to_string(), d.default)).collect();
+                    .iter()
+                    .map(|d| (d.id.to_string(), d.default))
+                    .collect();
+            }
+
+            // ── CStrip2 bypass toggle ──
+            let bypass_on = state.project.tracks[i].cstrip2_bypass;
+            let byp_btn_x = right_x;
+            let byp_btn_y = below_vu + 4;
+            let byp_btn_w = 32i32;
+            let byp_btn_h = 14i32;
+            let byp_col = if bypass_on {
+                sdl2::pixels::Color::RGBA(220, 160, 50, 240)
+            } else {
+                sdl2::pixels::Color::RGBA(60, 65, 75, 200)
+            };
+            canvas.set_draw_color(byp_col);
+            let _ = canvas.fill_rect(Rect::new(
+                byp_btn_x,
+                byp_btn_y,
+                byp_btn_w as u32,
+                byp_btn_h as u32,
+            ));
+            let byp_label = if bypass_on { "BYP" } else { "CS" };
+            let byp_text_col = if bypass_on {
+                sdl2::pixels::Color::RGBA(30, 20, 10, 255)
+            } else {
+                sdl2::pixels::Color::RGBA(140, 150, 160, 200)
+            };
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                byp_label,
+                byp_btn_x + 3,
+                byp_btn_y + 3,
+                byp_btn_w - 6,
+                byp_text_col,
+            );
+            if input.mouse_pressed
+                && input.mouse_x >= byp_btn_x
+                && input.mouse_x < byp_btn_x + byp_btn_w
+                && input.mouse_y >= byp_btn_y
+                && input.mouse_y < byp_btn_y + byp_btn_h
+            {
+                state.project.tracks[i].cstrip2_bypass = !bypass_on;
+                state.dirty = true;
             }
 
             let knob_r = 13i32;
@@ -5232,44 +5424,73 @@ fn draw_bottom_mixer(
                 let row = (pi % 5) as i32;
                 let kx = right_x + cell_w / 2 + col * cell_w;
                 let ky = knob_base_y + 12 + row * cell_h;
-                if ky + knob_r + 8 > content_bottom { break; }
+                if ky + knob_r + 8 > content_bottom {
+                    break;
+                }
 
                 let cur_val = state.project.tracks[i]
-                    .cstrip2_params.iter()
+                    .cstrip2_params
+                    .iter()
                     .find(|(id, _)| id == desc.id)
-                    .map(|(_, v)| *v).unwrap_or(desc.default);
+                    .map(|(_, v)| *v)
+                    .unwrap_or(desc.default);
                 let mut val = cur_val;
                 let cs_knob_id = input.next_id();
-                let is_bipolar = desc.id == "output" || desc.id == "treble"
-                    || desc.id == "mid" || desc.id == "bass";
+                let is_bipolar = desc.id == "output"
+                    || desc.id == "treble"
+                    || desc.id == "mid"
+                    || desc.id == "bass";
                 let changed = knob(
-                    canvas, input, &state.theme,
+                    canvas,
+                    input,
+                    &state.theme,
                     &KnobParams {
-                        id: cs_knob_id, x: kx, y: ky, radius: knob_r,
-                        min: desc.min, max: desc.max, sensitivity: 0.005,
-                        label: None, bipolar: is_bipolar,
+                        id: cs_knob_id,
+                        x: kx,
+                        y: ky,
+                        radius: knob_r,
+                        min: desc.min,
+                        max: desc.max,
+                        sensitivity: 0.005,
+                        label: None,
+                        bipolar: is_bipolar,
                         default_value: Some(desc.default),
-                        hint: Some(desc.name.into()), snap_points: vec![],
+                        hint: Some(desc.name.into()),
+                        snap_points: vec![],
                     },
                     &mut val,
                 );
                 // Label above knob
-                draw_pixel_label(canvas, &state.theme, desc.name,
-                    kx - cell_w / 2, ky - knob_r - 9, cell_w,
-                    sdl2::pixels::Color::RGBA(130, 135, 145, 170));
+                draw_pixel_label(
+                    canvas,
+                    &state.theme,
+                    desc.name,
+                    kx - cell_w / 2,
+                    ky - knob_r - 9,
+                    cell_w,
+                    sdl2::pixels::Color::RGBA(130, 135, 145, 170),
+                );
                 if changed {
                     let delta = val - cur_val;
                     if let Some(entry) = state.project.tracks[i]
-                        .cstrip2_params.iter_mut().find(|(id, _)| id == desc.id)
-                    { entry.1 = val; }
+                        .cstrip2_params
+                        .iter_mut()
+                        .find(|(id, _)| id == desc.id)
+                    {
+                        entry.1 = val;
+                    }
                     // Propagate to all other selected tracks
                     if state.selected_tracks.contains(&track_id) {
                         for j in 0..state.project.tracks.len() {
-                            if j == i { continue; }
+                            if j == i {
+                                continue;
+                            }
                             let other_id = state.project.tracks[j].id;
                             if state.selected_tracks.contains(&other_id) {
                                 if let Some(entry) = state.project.tracks[j]
-                                    .cstrip2_params.iter_mut().find(|(id, _)| id == desc.id)
+                                    .cstrip2_params
+                                    .iter_mut()
+                                    .find(|(id, _)| id == desc.id)
                                 {
                                     entry.1 = (entry.1 + delta).clamp(desc.min, desc.max);
                                 }
@@ -5293,23 +5514,52 @@ fn draw_bottom_mixer(
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 100));
                 let _ = canvas.draw_line(
                     sdl2::rect::Point::new(right_x, mid_line),
-                    sdl2::rect::Point::new(right_x + eq_w, mid_line));
+                    sdl2::rect::Point::new(right_x + eq_w, mid_line),
+                );
 
                 // Read all relevant params
-                let treble = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "treble").map(|(_, v)| *v).unwrap_or(0.5);
-                let mid = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "mid").map(|(_, v)| *v).unwrap_or(0.5);
-                let bass = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "bass").map(|(_, v)| *v).unwrap_or(0.5);
-                let treb_frq = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "treb_frq").map(|(_, v)| *v).unwrap_or(0.55);
-                let bass_frq = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "bass_frq").map(|(_, v)| *v).unwrap_or(0.15);
-                let lo_cap = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "lo_cap").map(|(_, v)| *v).unwrap_or(0.0);
-                let hi_cap = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "hi_cap").map(|(_, v)| *v).unwrap_or(0.0);
+                let treble = state.project.tracks[i]
+                    .cstrip2_params
+                    .iter()
+                    .find(|(id, _)| id == "treble")
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0.5);
+                let mid = state.project.tracks[i]
+                    .cstrip2_params
+                    .iter()
+                    .find(|(id, _)| id == "mid")
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0.5);
+                let bass = state.project.tracks[i]
+                    .cstrip2_params
+                    .iter()
+                    .find(|(id, _)| id == "bass")
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0.5);
+                let treb_frq = state.project.tracks[i]
+                    .cstrip2_params
+                    .iter()
+                    .find(|(id, _)| id == "treb_frq")
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0.55);
+                let bass_frq = state.project.tracks[i]
+                    .cstrip2_params
+                    .iter()
+                    .find(|(id, _)| id == "bass_frq")
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0.15);
+                let lo_cap = state.project.tracks[i]
+                    .cstrip2_params
+                    .iter()
+                    .find(|(id, _)| id == "lo_cap")
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0.0);
+                let hi_cap = state.project.tracks[i]
+                    .cstrip2_params
+                    .iter()
+                    .find(|(id, _)| id == "hi_cap")
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0.0);
 
                 // Compute frequency response at each pixel column
                 // X axis: log frequency from 20 Hz to 20 kHz
@@ -5322,27 +5572,37 @@ fn draw_bottom_mixer(
                 // Filter coefficients (matching DSP)
                 let hp_coef = if lo_cap > 0.0 {
                     (lo_cap as f64).powf(2.0) * 0.4995 + 0.0001
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 let lp_coef = if hi_cap > 0.0 {
                     (hi_cap as f64).powf(2.0) * 0.4995 + 0.0001
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 let bass_coef = (bass_frq as f64) * (bass_frq as f64) * 0.499 + 0.001;
                 let treb_coef = treb_frq as f64 * treb_frq as f64 * 0.499 + 0.001;
-                let bass_g  = ((bass as f64)   * 2.0 - 1.0) * 0.5 + 1.0;
-                let mid_g   = ((mid as f64)    * 2.0 - 1.0) * 0.5 + 1.0;
-                let treb_g  = ((treble as f64) * 2.0 - 1.0) * 0.5 + 1.0;
+                let bass_g = ((bass as f64) * 2.0 - 1.0) * 0.5 + 1.0;
+                let mid_g = ((mid as f64) * 2.0 - 1.0) * 0.5 + 1.0;
+                let treb_g = ((treble as f64) * 2.0 - 1.0) * 0.5 + 1.0;
 
                 // Compute EQ response once per pixel column, then draw fill + curve in two passes.
 
                 // Helper: evaluate EQ magnitude (dB) at a normalised angular frequency omega.
                 let eval_eq_db = |omega: f64| -> f64 {
                     let lp_complex = |c: f64| -> (f64, f64) {
-                        if c < 1e-8 { return (1.0, 0.0); }
+                        if c < 1e-8 {
+                            return (1.0, 0.0);
+                        }
                         let omc = 1.0 - c;
                         let dr = 1.0 - omc * omega.cos();
                         let di = omc * omega.sin();
                         let ds = dr * dr + di * di;
-                        if ds < 1e-15 { (1.0, 0.0) } else { (c * dr / ds, c * di / ds) }
+                        if ds < 1e-15 {
+                            (1.0, 0.0)
+                        } else {
+                            (c * dr / ds, c * di / ds)
+                        }
                     };
 
                     let hp_mag = if hp_coef > 1e-8 {
@@ -5350,21 +5610,31 @@ fn draw_bottom_mixer(
                         let cos_w = omega.cos();
                         let sin_w = omega.sin();
                         let den_sq = 1.0 - 2.0 * omc * cos_w + omc * omc;
-                        if den_sq < 1e-15 { 1.0 } else {
+                        if den_sq < 1e-15 {
+                            1.0
+                        } else {
                             let re_lp = hp_coef * (1.0 - omc * cos_w) / den_sq;
                             let im_lp = hp_coef * omc * sin_w / den_sq;
                             let re_hp = 1.0 - re_lp;
                             let im_hp = -im_lp;
                             (re_hp * re_hp + im_hp * im_hp).sqrt()
                         }
-                    } else { 1.0 };
+                    } else {
+                        1.0
+                    };
 
                     let lp_mag = if lp_coef > 1e-8 {
                         let omc = 1.0 - lp_coef;
                         let num = lp_coef * lp_coef;
                         let den = 1.0 - 2.0 * omc * omega.cos() + omc * omc;
-                        if den > 1e-12 { (num / den).sqrt() } else { 1.0 }
-                    } else { 1.0 };
+                        if den > 1e-12 {
+                            (num / den).sqrt()
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    };
 
                     let (lbr, lbi) = lp_complex(bass_coef);
                     let (ltr, lti) = lp_complex(treb_coef);
@@ -5373,7 +5643,11 @@ fn draw_bottom_mixer(
                     let eq_mag = (eq_re * eq_re + eq_im * eq_im).sqrt();
 
                     let total = hp_mag * lp_mag * eq_mag;
-                    if total > 1e-10 { 20.0 * total.log10() } else { -db_range }
+                    if total > 1e-10 {
+                        20.0 * total.log10()
+                    } else {
+                        -db_range
+                    }
                 };
 
                 // Build pixel array: one Y value per screen pixel column (no gaps).
@@ -5411,17 +5685,24 @@ fn draw_bottom_mixer(
                 for col in 1..eq_w {
                     let ppx = right_x + col - 1;
                     let ppy = curve_py[(col - 1) as usize];
-                    let px  = right_x + col;
-                    let py  = curve_py[col as usize];
+                    let px = right_x + col;
+                    let py = curve_py[col as usize];
                     let _ = canvas.draw_line(
                         sdl2::rect::Point::new(ppx, ppy),
-                        sdl2::rect::Point::new(px, py));
+                        sdl2::rect::Point::new(px, py),
+                    );
                 }
 
                 // Label and border
-                draw_pixel_label(canvas, &state.theme, "EQ",
-                    right_x + 2, eq_y + 1, 16,
-                    sdl2::pixels::Color::RGBA(80, 200, 140, 110));
+                draw_pixel_label(
+                    canvas,
+                    &state.theme,
+                    "EQ",
+                    right_x + 2,
+                    eq_y + 1,
+                    16,
+                    sdl2::pixels::Color::RGBA(80, 200, 140, 110),
+                );
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 80));
                 let _ = canvas.draw_rect(Rect::new(right_x, eq_y, eq_w as u32, eq_h as u32));
 
@@ -5429,17 +5710,31 @@ fn draw_bottom_mixer(
                 let comp_y = eq_y + eq_h + 4;
                 let comp_h = 50i32;
                 if comp_y + comp_h < content_bottom && eq_w > 20 {
-                    let compress = state.project.tracks[i].cstrip2_params.iter()
-                        .find(|(id, _)| id == "compress").map(|(_, v)| *v).unwrap_or(0.0);
+                    let compress = state.project.tracks[i]
+                        .cstrip2_params
+                        .iter()
+                        .find(|(id, _)| id == "compress")
+                        .map(|(_, v)| *v)
+                        .unwrap_or(0.0);
                     // Get actual gain reduction from metering (sum of all effect slot GR for this track)
-                    let gr_db = state.meters.track_effect_gr
+                    let gr_db = state
+                        .meters
+                        .track_effect_gr
                         .get(i)
                         .map(|slots| slots.iter().sum::<f32>())
                         .unwrap_or(0.0);
                     let track_rms = state.meters.track_rms.get(i).copied().unwrap_or(0.0);
-                    comp_curve_widget(canvas, &state.theme,
-                        right_x, comp_y, eq_w, comp_h,
-                        compress, gr_db, track_rms);
+                    comp_curve_widget(
+                        canvas,
+                        &state.theme,
+                        right_x,
+                        comp_y,
+                        eq_w,
+                        comp_h,
+                        compress,
+                        gr_db,
+                        track_rms,
+                    );
                 }
             }
         }
@@ -5454,12 +5749,22 @@ fn draw_bottom_mixer(
             let mut pan_val = state.project.tracks[i].pan;
             let mixer_pan_id = input.next_id();
             let pan_changed = knob(
-                canvas, input, &state.theme,
+                canvas,
+                input,
+                &state.theme,
                 &KnobParams {
-                    id: mixer_pan_id, x: pan_knob_x, y: pan_knob_y, radius: 10,
-                    min: -1.0, max: 1.0, sensitivity: 0.008,
-                    label: None, bipolar: true, default_value: Some(0.0),
-                    hint: Some("Pan".into()), snap_points: vec![0.0],
+                    id: mixer_pan_id,
+                    x: pan_knob_x,
+                    y: pan_knob_y,
+                    radius: 10,
+                    min: -1.0,
+                    max: 1.0,
+                    sensitivity: 0.008,
+                    label: None,
+                    bipolar: true,
+                    default_value: Some(0.0),
+                    hint: Some("Pan".into()),
+                    snap_points: vec![0.0],
                 },
                 &mut pan_val,
             );
@@ -5470,7 +5775,9 @@ fn draw_bottom_mixer(
                 // Propagate pan delta to all other selected tracks
                 if state.selected_tracks.contains(&track_id) {
                     for j in 0..state.project.tracks.len() {
-                        if j == i { continue; }
+                        if j == i {
+                            continue;
+                        }
                         let other_id = state.project.tracks[j].id;
                         if state.selected_tracks.contains(&other_id) {
                             state.project.tracks[j].pan =
@@ -5484,7 +5791,9 @@ fn draw_bottom_mixer(
                 if (old_pan - pan_val).abs() > 1e-4 {
                     state.commands.execute(
                         Box::new(crate::commands::SetTrackPan {
-                            track_id, old_value: old_pan, new_value: pan_val,
+                            track_id,
+                            old_value: old_pan,
+                            new_value: pan_val,
                         }),
                         &mut state.project,
                     );
@@ -5507,22 +5816,34 @@ fn draw_bottom_mixer(
             };
             let mix_mute_id = input.next_id();
             let mute_clicked = toggle_button(
-                canvas, input, &state.theme,
-                mute_x, btn_y, btn_sz,
-                state.theme.mute_on, mute_on, mix_mute_id, "M", Some("Mute track"),
+                canvas,
+                input,
+                &state.theme,
+                mute_x,
+                btn_y,
+                btn_sz,
+                state.theme.mute_on,
+                mute_on,
+                mix_mute_id,
+                "M",
+                Some("Mute track"),
             );
             if mute_clicked {
                 let new_mute = !mute_on;
                 state.commands.execute(
                     Box::new(crate::commands::SetTrackMute {
-                        track_id, new_value: new_mute, old_value: mute_on,
+                        track_id,
+                        new_value: new_mute,
+                        old_value: mute_on,
                     }),
                     &mut state.project,
                 );
                 // Propagate to all other selected tracks
                 if state.selected_tracks.contains(&track_id) {
                     for j in 0..state.project.tracks.len() {
-                        if j == i { continue; }
+                        if j == i {
+                            continue;
+                        }
                         let other_id = state.project.tracks[j].id;
                         if state.selected_tracks.contains(&other_id) {
                             state.project.tracks[j].mute = new_mute;
@@ -5532,28 +5853,42 @@ fn draw_bottom_mixer(
             }
             let mix_solo_id = input.next_id();
             let solo_clicked = toggle_button(
-                canvas, input, &state.theme,
-                solo_x, btn_y, btn_sz,
-                state.theme.solo_on, solo_on, mix_solo_id, "S", Some("Solo track"),
+                canvas,
+                input,
+                &state.theme,
+                solo_x,
+                btn_y,
+                btn_sz,
+                state.theme.solo_on,
+                solo_on,
+                mix_solo_id,
+                "S",
+                Some("Solo track"),
             );
             if solo_clicked {
                 if input.ctrl() {
                     let snapshot = state.project.clone();
-                    for t in &mut state.project.tracks { t.solo = false; }
+                    for t in &mut state.project.tracks {
+                        t.solo = false;
+                    }
                     state.commands.push_undo_snapshot(snapshot, "Unsolo All");
                     state.dirty = true;
                 } else {
                     let new_solo = !solo_on;
                     state.commands.execute(
                         Box::new(crate::commands::SetTrackSolo {
-                            track_id, new_value: new_solo, old_value: solo_on,
+                            track_id,
+                            new_value: new_solo,
+                            old_value: solo_on,
                         }),
                         &mut state.project,
                     );
                     // Propagate to all other selected tracks
                     if state.selected_tracks.contains(&track_id) {
                         for j in 0..state.project.tracks.len() {
-                            if j == i { continue; }
+                            if j == i {
+                                continue;
+                            }
                             let other_id = state.project.tracks[j].id;
                             if state.selected_tracks.contains(&other_id) {
                                 state.project.tracks[j].solo = new_solo;
@@ -5572,7 +5907,8 @@ fn draw_bottom_mixer(
                 state.theme.panel_border[0],
                 state.theme.panel_border[1],
                 state.theme.panel_border[2],
-                state.theme.panel_border[3])
+                state.theme.panel_border[3],
+            )
         };
         canvas.set_draw_color(border_col);
         let _ = canvas.draw_rect(Rect::new(x, sy, strip_w as u32, sh as u32));
@@ -5586,11 +5922,24 @@ fn draw_bottom_mixer(
     // ── Scrollbar ──
     if needs_scroll {
         let sb_y = top + h - scrollbar_h;
-        let frac = if max_scroll > 0.0 { state.bottom_mixer_scroll_x / max_scroll } else { 0.0 };
+        let frac = if max_scroll > 0.0 {
+            state.bottom_mixer_scroll_x / max_scroll
+        } else {
+            0.0
+        };
         let visible_frac = (content_w as f32 / total_content_w as f32).clamp(0.05, 1.0);
         let new_frac = scrollbar(
-            canvas, input, &state.theme, WidgetId::Auto(84200),
-            0, sb_y, content_w, scrollbar_h, ScrollbarDir::Horizontal, frac, visible_frac,
+            canvas,
+            input,
+            &state.theme,
+            WidgetId::Auto(84200),
+            0,
+            sb_y,
+            content_w,
+            scrollbar_h,
+            ScrollbarDir::Horizontal,
+            frac,
+            visible_frac,
         );
         state.bottom_mixer_scroll_x = new_frac * max_scroll;
     } else {
@@ -5598,24 +5947,85 @@ fn draw_bottom_mixer(
     }
 
     // Scroll wheel
-    if input.mouse_y >= top && input.mouse_y < top + h
-        && input.mouse_x < content_w && input.scroll_y != 0
-        && needs_scroll && !input.scroll_consumed
+    if input.mouse_y >= top
+        && input.mouse_y < top + h
+        && input.mouse_x < content_w
+        && input.scroll_y != 0
+        && needs_scroll
+        && !input.scroll_consumed
     {
         state.bottom_mixer_scroll_x = (state.bottom_mixer_scroll_x - input.scroll_y as f32 * 30.0)
-            .max(0.0).min(max_scroll);
+            .max(0.0)
+            .min(max_scroll);
     }
 
     // Middle-click drag
     if needs_scroll {
         let bottom_mixer_drag_id = WidgetId::Auto(87004);
-        if input.middle_mouse_down && input.mouse_y >= top && input.mouse_y < top + h
-            && input.mouse_x < content_w && input.middle_drag_widget == WidgetId::None
-        { input.middle_drag_widget = bottom_mixer_drag_id; }
-        if input.middle_mouse_down && input.middle_drag_widget == bottom_mixer_drag_id {
-            state.bottom_mixer_scroll_x = (state.bottom_mixer_scroll_x - input.mouse_dx as f32)
-                .clamp(0.0, max_scroll);
+        if input.middle_mouse_down
+            && input.mouse_y >= top
+            && input.mouse_y < top + h
+            && input.mouse_x < content_w
+            && input.middle_drag_widget == WidgetId::None
+        {
+            input.middle_drag_widget = bottom_mixer_drag_id;
         }
+        if input.middle_mouse_down && input.middle_drag_widget == bottom_mixer_drag_id {
+            state.bottom_mixer_scroll_x =
+                (state.bottom_mixer_scroll_x - input.mouse_dx as f32).clamp(0.0, max_scroll);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ── PREVIEW STRIP (between track list and master bus) ──
+    // ══════════════════════════════════════════════════════════════════
+    {
+        let px = w - master_strip_w - preview_strip_w - 4;
+        let py = top + 4;
+        let ph = (h - 8).max(4);
+
+        // Background
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 28, 255));
+        let _ = canvas.fill_rect(Rect::new(px, py, preview_strip_w as u32, ph as u32));
+
+        // Accent cap
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(180, 140, 220, 220));
+        let _ = canvas.fill_rect(Rect::new(px, py, preview_strip_w as u32, 4));
+
+        // Label
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            "PRV",
+            px + 4,
+            py + 7,
+            preview_strip_w - 8,
+            sdl2::pixels::Color::RGBA(180, 160, 220, 240),
+        );
+
+        // Stereo meters
+        let prv_meter_y = py + 20;
+        let prv_meter_h = (ph - 28).max(10);
+        let bar_w = 10u32;
+        let bar_gap = 4i32;
+        let total_meter_w = bar_w as i32 * 2 + bar_gap;
+        let meter_x = px + (preview_strip_w - total_meter_w) / 2;
+
+        let prv_rms_l = state.meters.preview_rms_l;
+        let prv_rms_r = state.meters.preview_rms_r;
+        draw_meter_bar(canvas, prv_rms_l, meter_x, prv_meter_y, bar_w, prv_meter_h);
+        draw_meter_bar(
+            canvas,
+            prv_rms_r,
+            meter_x + bar_w as i32 + bar_gap,
+            prv_meter_y,
+            bar_w,
+            prv_meter_h,
+        );
+
+        // Border
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 55, 80, 180));
+        let _ = canvas.draw_rect(Rect::new(px, py, preview_strip_w as u32, ph as u32));
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -5631,17 +6041,29 @@ fn draw_bottom_mixer(
     // Accent cap
     canvas.set_draw_color(Theme::c(state.theme.accent));
     let _ = canvas.fill_rect(Rect::new(mx, my, master_strip_w as u32, 4));
-    draw_pixel_label(canvas, &state.theme, "MASTER",
-        mx + 8, my + 7, master_strip_w - 16,
-        sdl2::pixels::Color::RGBA(180, 200, 255, 240));
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "MASTER",
+        mx + 8,
+        my + 7,
+        master_strip_w - 16,
+        sdl2::pixels::Color::RGBA(180, 200, 255, 240),
+    );
 
     // ── Master VU meter (below label, full width) ──
     let m_vu_h = 76i32;
     let m_vu_y = my + 18;
-    vu_meter(canvas, &state.theme,
-        mx + 6, m_vu_y, master_strip_w - 12, m_vu_h,
+    vu_meter(
+        canvas,
+        &state.theme,
+        mx + 6,
+        m_vu_y,
+        master_strip_w - 12,
+        m_vu_h,
         state.meters.master_vu_needle,
-        state.meters.master_vu_peak_needle);
+        state.meters.master_vu_peak_needle,
+    );
 
     // ── Master volume fader ──
     let m_fader_top = m_vu_y + m_vu_h + 4;
@@ -5656,10 +6078,15 @@ fn draw_bottom_mixer(
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(40, 42, 50, 200));
     let _ = canvas.draw_line(
         sdl2::rect::Point::new(m_fader_x + 13, m_fader_top),
-        sdl2::rect::Point::new(m_fader_x + 13, m_fader_top + m_fader_h));
+        sdl2::rect::Point::new(m_fader_x + 13, m_fader_top + m_fader_h),
+    );
     // dB ticks
     for &db_mark in &[-48.0_f32, -36.0, -24.0, -12.0, -6.0, 0.0, 6.0] {
-        let gain = if db_mark <= -60.0 { 0.0 } else { 10.0_f32.powf(db_mark / 20.0) };
+        let gain = if db_mark <= -60.0 {
+            0.0
+        } else {
+            10.0_f32.powf(db_mark / 20.0)
+        };
         let pos = vol_gain_to_pos(gain);
         let tick_y = m_fader_top + m_fader_h - (pos * m_fader_h as f32) as i32;
         let tc = if db_mark >= 0.0 {
@@ -5670,23 +6097,34 @@ fn draw_bottom_mixer(
         canvas.set_draw_color(tc);
         let _ = canvas.draw_line(
             sdl2::rect::Point::new(m_fader_x, tick_y),
-            sdl2::rect::Point::new(m_fader_x + 4, tick_y));
+            sdl2::rect::Point::new(m_fader_x + 4, tick_y),
+        );
     }
 
     {
         let mut mvol_pos = vol_gain_to_pos(state.master_volume_ui);
         let mvol_id = input.next_id();
         let mvol_changed = slider(
-            canvas, input, &state.theme,
+            canvas,
+            input,
+            &state.theme,
             &SliderParams {
-                id: mvol_id, x: m_fader_x, y: m_fader_top,
-                width: m_fader_w, height: m_fader_h,
-                min: 0.0, max: 1.0, orientation: SliderOrientation::Vertical,
-                label: None, default_value: Some(vol_gain_to_pos(1.0)),
+                id: mvol_id,
+                x: m_fader_x,
+                y: m_fader_top,
+                width: m_fader_w,
+                height: m_fader_h,
+                min: 0.0,
+                max: 1.0,
+                orientation: SliderOrientation::Vertical,
+                label: None,
+                default_value: Some(vol_gain_to_pos(1.0)),
             },
             &mut mvol_pos,
         );
-        if mvol_changed { state.master_volume_ui = vol_pos_to_gain(mvol_pos); }
+        if mvol_changed {
+            state.master_volume_ui = vol_pos_to_gain(mvol_pos);
+        }
     }
 
     // ── Master stereo meters (Pre = pre-volume, Out = post-everything) ──
@@ -5698,48 +6136,118 @@ fn draw_bottom_mixer(
     // Pre-effects pair
     let m_rms_l = state.meters.master_rms_l;
     let m_rms_r = state.meters.master_rms_r;
-    draw_meter_bar(canvas, m_rms_l, m_meter_x, m_fader_top, m_meter_bar_w, m_fader_h);
-    draw_meter_bar(canvas, m_rms_r, m_meter_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
+    draw_meter_bar(
+        canvas,
+        m_rms_l,
+        m_meter_x,
+        m_fader_top,
+        m_meter_bar_w,
+        m_fader_h,
+    );
+    draw_meter_bar(
+        canvas,
+        m_rms_r,
+        m_meter_x + m_meter_bar_w as i32 + m_meter_gap,
+        m_fader_top,
+        m_meter_bar_w,
+        m_fader_h,
+    );
 
     // Out (post-everything) pair
     let m_out_x = m_meter_x + (m_meter_bar_w as i32) * 2 + m_meter_gap + m_pair_gap;
     let m_out_l = state.meters.master_rms_post_l;
     let m_out_r = state.meters.master_rms_post_r;
-    draw_meter_bar(canvas, m_out_l, m_out_x, m_fader_top, m_meter_bar_w, m_fader_h);
-    draw_meter_bar(canvas, m_out_r, m_out_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
+    draw_meter_bar(
+        canvas,
+        m_out_l,
+        m_out_x,
+        m_fader_top,
+        m_meter_bar_w,
+        m_fader_h,
+    );
+    draw_meter_bar(
+        canvas,
+        m_out_r,
+        m_out_x + m_meter_bar_w as i32 + m_meter_gap,
+        m_fader_top,
+        m_meter_bar_w,
+        m_fader_h,
+    );
 
     // Master peak hold (pre pair)
-    draw_peak_hold(canvas, state.meters.master_peak_hold_l, m_meter_x, m_fader_top, m_meter_bar_w, m_fader_h);
-    draw_peak_hold(canvas, state.meters.master_peak_hold_r,
-        m_meter_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
+    draw_peak_hold(
+        canvas,
+        state.meters.master_peak_hold_l,
+        m_meter_x,
+        m_fader_top,
+        m_meter_bar_w,
+        m_fader_h,
+    );
+    draw_peak_hold(
+        canvas,
+        state.meters.master_peak_hold_r,
+        m_meter_x + m_meter_bar_w as i32 + m_meter_gap,
+        m_fader_top,
+        m_meter_bar_w,
+        m_fader_h,
+    );
 
     // Master peak hold (out pair)
-    draw_peak_hold(canvas, state.meters.master_peak_hold_post_l, m_out_x, m_fader_top, m_meter_bar_w, m_fader_h);
-    draw_peak_hold(canvas, state.meters.master_peak_hold_post_r,
-        m_out_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
+    draw_peak_hold(
+        canvas,
+        state.meters.master_peak_hold_post_l,
+        m_out_x,
+        m_fader_top,
+        m_meter_bar_w,
+        m_fader_h,
+    );
+    draw_peak_hold(
+        canvas,
+        state.meters.master_peak_hold_post_r,
+        m_out_x + m_meter_bar_w as i32 + m_meter_gap,
+        m_fader_top,
+        m_meter_bar_w,
+        m_fader_h,
+    );
 
     // dB labels to the right of out meters
     {
         let m_labels_x = m_out_x + m_meter_bar_w as i32 * 2 + m_meter_gap + 2;
         let m_label_max_w = mx + master_strip_w - m_labels_x - 4;
         if m_label_max_w > 8 {
-            draw_meter_db_labels(canvas, &state.theme, m_labels_x, m_fader_top, m_fader_h, m_label_max_w);
+            draw_meter_db_labels(
+                canvas,
+                &state.theme,
+                m_labels_x,
+                m_fader_top,
+                m_fader_h,
+                m_label_max_w,
+            );
         }
     }
 
     // Master clip LEDs (on out pair — final output clipping)
     for (ch, (flag, mx_off)) in [
         (state.meters.master_clipping_l, (m_out_x - m_meter_x)),
-        (state.meters.master_clipping_r, (m_out_x - m_meter_x) + m_meter_bar_w as i32 + m_meter_gap),
-    ].iter().enumerate() {
+        (
+            state.meters.master_clipping_r,
+            (m_out_x - m_meter_x) + m_meter_bar_w as i32 + m_meter_gap,
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
         let led_x = m_meter_x + mx_off;
         let led_y = m_fader_top - 7;
         if *flag {
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 20, 20, 255));
             let _ = canvas.fill_rect(Rect::new(led_x, led_y, m_meter_bar_w, 4));
             if input.mouse_in_rect(led_x, led_y, m_meter_bar_w as i32, 4) && input.mouse_pressed {
-                if ch == 0 { state.meters.master_clipping_l = false; }
-                else { state.meters.master_clipping_r = false; }
+                if ch == 0 {
+                    state.meters.master_clipping_l = false;
+                } else {
+                    state.meters.master_clipping_r = false;
+                }
             }
         } else {
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(30, 50, 30, 160));
@@ -5748,15 +6256,27 @@ fn draw_bottom_mixer(
     }
 
     // Pre / Out labels above meter pairs
-    draw_pixel_label(canvas, &state.theme, "Pre",
-        m_meter_x, m_fader_top + m_fader_h + 1, m_meter_bar_w as i32 * 2 + m_meter_gap,
-        sdl2::pixels::Color::RGBA(100, 110, 130, 150));
-    draw_pixel_label(canvas, &state.theme, "Out",
-        m_out_x, m_fader_top + m_fader_h + 1, m_meter_bar_w as i32 * 2 + m_meter_gap,
-        sdl2::pixels::Color::RGBA(140, 180, 120, 180));
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "Pre",
+        m_meter_x,
+        m_fader_top + m_fader_h + 1,
+        m_meter_bar_w as i32 * 2 + m_meter_gap,
+        sdl2::pixels::Color::RGBA(100, 110, 130, 150),
+    );
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "Out",
+        m_out_x,
+        m_fader_top + m_fader_h + 1,
+        m_meter_bar_w as i32 * 2 + m_meter_gap,
+        sdl2::pixels::Color::RGBA(140, 180, 120, 180),
+    );
 
     // ── Master info column (right of meters) ──
-    let info_x = m_out_x + (m_meter_bar_w as i32) * 2 + m_meter_gap + 10;
+    let info_x = m_out_x + (m_meter_bar_w as i32) * 2 + m_meter_gap + 10 + 10;
     let info_w = master_strip_w - (info_x - mx) - 8;
     if info_w > 20 {
         let peak = state.meters.master_peak_l.max(state.meters.master_peak_r);
@@ -5764,41 +6284,74 @@ fn draw_bottom_mixer(
 
         let peak_db_str = if peak > 1e-6 {
             format!("Peak {:.1}dB", 20.0 * peak.log10())
-        } else { "Peak -∞".to_string() };
-        draw_pixel_label(canvas, &state.theme, &peak_db_str,
-            info_x, m_fader_top + 2, info_w,
-            sdl2::pixels::Color::RGBA(180, 190, 200, 220));
+        } else {
+            "Peak -∞".to_string()
+        };
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            &peak_db_str,
+            info_x,
+            m_fader_top + 2,
+            info_w,
+            sdl2::pixels::Color::RGBA(180, 190, 200, 220),
+        );
 
         let rms_db_str = if rms > 1e-6 {
             format!("RMS {:.1}dB", 20.0 * rms.log10())
-        } else { "RMS -∞".to_string() };
-        draw_pixel_label(canvas, &state.theme, &rms_db_str,
-            info_x, m_fader_top + 16, info_w,
-            sdl2::pixels::Color::RGBA(160, 170, 180, 200));
+        } else {
+            "RMS -∞".to_string()
+        };
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            &rms_db_str,
+            info_x,
+            m_fader_top + 16,
+            info_w,
+            sdl2::pixels::Color::RGBA(160, 170, 180, 200),
+        );
 
         // Balance
         let bal = if (m_rms_l + m_rms_r) > 1e-6 {
             (m_rms_r - m_rms_l) / (m_rms_l + m_rms_r)
-        } else { 0.0 };
-        let bal_str = if bal.abs() < 0.05 { "Bal: C".to_string() }
-        else if bal > 0.0 { format!("Bal: R{:.0}%", bal * 100.0) }
-        else { format!("Bal: L{:.0}%", -bal * 100.0) };
-        draw_pixel_label(canvas, &state.theme, &bal_str,
-            info_x, m_fader_top + 30, info_w,
-            sdl2::pixels::Color::RGBA(140, 150, 160, 170));
+        } else {
+            0.0
+        };
+        let bal_str = if bal.abs() < 0.05 {
+            "Bal: C".to_string()
+        } else if bal > 0.0 {
+            format!("Bal: R{:.0}%", bal * 100.0)
+        } else {
+            format!("Bal: L{:.0}%", -bal * 100.0)
+        };
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            &bal_str,
+            info_x,
+            m_fader_top + 30,
+            info_w,
+            sdl2::pixels::Color::RGBA(140, 150, 160, 170),
+        );
 
         // Crest
         if peak > 1e-6 && rms > 1e-6 {
             let crest = 20.0 * (peak / rms).log10();
-            draw_pixel_label(canvas, &state.theme,
+            draw_pixel_label(
+                canvas,
+                &state.theme,
                 &format!("Crest {:.1}dB", crest),
-                info_x, m_fader_top + 44, info_w,
-                sdl2::pixels::Color::RGBA(140, 150, 160, 170));
+                info_x,
+                m_fader_top + 44,
+                info_w,
+                sdl2::pixels::Color::RGBA(140, 150, 160, 170),
+            );
         }
 
         // ── Mini oscilloscope ──
         let osc_y = m_fader_top + 62;
-        let osc_h = (m_fader_h - 70).max(0).min(60);
+        let osc_h = (m_fader_h - 70).clamp(0, 60);
         let osc_w = info_w;
         if osc_h > 16 && osc_w > 20 {
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(14, 16, 22, 240));
@@ -5807,7 +6360,8 @@ fn draw_bottom_mixer(
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 100));
             let _ = canvas.draw_line(
                 sdl2::rect::Point::new(info_x, osc_mid),
-                sdl2::rect::Point::new(info_x + osc_w, osc_mid));
+                sdl2::rect::Point::new(info_x + osc_w, osc_mid),
+            );
             let osc_data = &state.meters.oscilloscope;
             if !osc_data.is_empty() {
                 let step = (osc_data.len() as f32 / osc_w as f32).max(1.0);
@@ -5820,7 +6374,8 @@ fn draw_bottom_mixer(
                         canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 220, 160, 200));
                         let _ = canvas.draw_line(
                             sdl2::rect::Point::new(info_x + px - 1, prev_y),
-                            sdl2::rect::Point::new(info_x + px, sy_sample));
+                            sdl2::rect::Point::new(info_x + px, sy_sample),
+                        );
                     }
                     prev_y = sy_sample;
                 }
@@ -5833,13 +6388,13 @@ fn draw_bottom_mixer(
         let mas_y = osc_y + osc_h + 6;
         let mas_bot = my + mh - 16; // leave room for border + bottom label
         let mas_avail = (mas_bot - mas_y).max(0);
-        let mas_x = info_x + 10;
-        let mas_w = (osc_w - 10).max(0);
+        let mas_x = info_x;
+        let mas_w = info_w;
         if mas_avail >= 30 && mas_w > 20 {
             let mut cy = mas_y;
 
             // ── LUFS meters ──
-            let lufs_m  = state.meters.master_lufs_momentary;
+            let lufs_m = state.meters.master_lufs_momentary;
             let lufs_st = state.meters.master_lufs_short;
             // Momentary LUFS label
             let lufs_m_str = if lufs_m < -60.0 || lufs_m == 0.0 {
@@ -5854,26 +6409,45 @@ fn draw_bottom_mixer(
             } else {
                 sdl2::pixels::Color::RGBA(120, 200, 150, 190)
             };
-            draw_pixel_label(canvas, &state.theme, &lufs_m_str,
-                mas_x, cy, mas_w, lufs_col);
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                &lufs_m_str,
+                mas_x,
+                cy,
+                mas_w,
+                lufs_col,
+            );
             cy += 11;
             let lufs_st_str = if lufs_st < -60.0 || lufs_st == 0.0 {
                 "S: -∞ LUFS".to_string()
             } else {
                 format!("S: {:.1} LUFS", lufs_st)
             };
-            draw_pixel_label(canvas, &state.theme, &lufs_st_str,
-                mas_x, cy, mas_w,
-                sdl2::pixels::Color::RGBA(100, 170, 130, 170));
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                &lufs_st_str,
+                mas_x,
+                cy,
+                mas_w,
+                sdl2::pixels::Color::RGBA(100, 170, 130, 170),
+            );
             cy += 13;
 
             // ── Stereo correlation bar ──
             // -1 = fully out of phase (mono danger), +1 = perfectly in phase
             let corr = state.meters.master_correlation.clamp(-1.0, 1.0);
             if cy + 13 < mas_bot {
-                draw_pixel_label(canvas, &state.theme, "Phase",
-                    mas_x, cy, mas_w,
-                    sdl2::pixels::Color::RGBA(110, 120, 140, 160));
+                draw_pixel_label(
+                    canvas,
+                    &state.theme,
+                    "Phase",
+                    mas_x,
+                    cy,
+                    mas_w,
+                    sdl2::pixels::Color::RGBA(110, 120, 140, 160),
+                );
                 cy += 9;
                 // Background track
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(22, 24, 30, 220));
@@ -5883,7 +6457,8 @@ fn draw_bottom_mixer(
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(70, 75, 85, 180));
                 let _ = canvas.draw_line(
                     sdl2::rect::Point::new(mid_x, cy),
-                    sdl2::rect::Point::new(mid_x, cy + 5));
+                    sdl2::rect::Point::new(mid_x, cy + 5),
+                );
                 // Fill: map corr -1..+1 to bar width
                 let fill_frac = (corr + 1.0) / 2.0; // 0..1
                 let fill_w = (fill_frac * mas_w as f32) as i32;
@@ -5901,9 +6476,15 @@ fn draw_bottom_mixer(
                 let _ = canvas.draw_rect(Rect::new(mas_x, cy, mas_w as u32, 6));
                 // Numeric label
                 let corr_str = format!("{:+.2}", corr);
-                draw_pixel_label(canvas, &state.theme, &corr_str,
-                    mas_x + mas_w - 26, cy - 1, 26,
-                    sdl2::pixels::Color::RGBA(130, 140, 155, 160));
+                draw_pixel_label(
+                    canvas,
+                    &state.theme,
+                    &corr_str,
+                    mas_x + mas_w - 26,
+                    cy - 1,
+                    26,
+                    sdl2::pixels::Color::RGBA(130, 140, 155, 160),
+                );
                 cy += 10;
             }
 
@@ -5913,10 +6494,18 @@ fn draw_bottom_mixer(
                 let rms2 = state.meters.master_rms;
                 let dr_db = if peak > 1e-6 && rms2 > 1e-6 {
                     (20.0 * (peak / rms2).log10()).clamp(0.0, 30.0)
-                } else { 0.0_f32 };
-                draw_pixel_label(canvas, &state.theme, "DR",
-                    mas_x, cy, mas_w,
-                    sdl2::pixels::Color::RGBA(110, 120, 140, 160));
+                } else {
+                    0.0_f32
+                };
+                draw_pixel_label(
+                    canvas,
+                    &state.theme,
+                    "DR",
+                    mas_x,
+                    cy,
+                    mas_w,
+                    sdl2::pixels::Color::RGBA(110, 120, 140, 160),
+                );
                 cy += 9;
                 // Background
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(22, 24, 30, 220));
@@ -5937,16 +6526,26 @@ fn draw_bottom_mixer(
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 80));
                 let _ = canvas.draw_rect(Rect::new(mas_x, cy, mas_w as u32, 6));
                 let dr_str = format!("{:.0}dB", dr_db);
-                draw_pixel_label(canvas, &state.theme, &dr_str,
-                    mas_x + mas_w - 22, cy - 1, 22,
-                    sdl2::pixels::Color::RGBA(130, 140, 155, 160));
+                draw_pixel_label(
+                    canvas,
+                    &state.theme,
+                    &dr_str,
+                    mas_x + mas_w - 22,
+                    cy - 1,
+                    22,
+                    sdl2::pixels::Color::RGBA(130, 140, 155, 160),
+                );
                 cy += 10;
             }
 
             // ── True peak indicator ──
             if cy + 10 < mas_bot {
                 let tp = state.meters.master_peak_l.max(state.meters.master_peak_r);
-                let tp_db = if tp > 1e-6 { 20.0 * tp.log10() } else { -60.0_f32 };
+                let tp_db = if tp > 1e-6 {
+                    20.0 * tp.log10()
+                } else {
+                    -60.0_f32
+                };
                 let tp_col = if tp_db > -0.1 {
                     sdl2::pixels::Color::RGBA(235, 55, 40, 240)
                 } else if tp_db > -3.0 {
@@ -5956,7 +6555,9 @@ fn draw_bottom_mixer(
                 };
                 let tp_str = if tp > 1e-6 {
                     format!("TP: {:.1}dBFS", tp_db)
-                } else { "TP: -∞".to_string() };
+                } else {
+                    "TP: -∞".to_string()
+                };
                 draw_pixel_label(canvas, &state.theme, &tp_str, mas_x, cy, mas_w, tp_col);
             }
         }
@@ -7220,50 +7821,102 @@ fn draw_instrument_rack(
                 }
 
                 "EQ" => {
-                    let lo_gain = params_snap
+                    let lo_gain_db = params_snap
                         .iter()
                         .find(|(k, _)| k == "lo_gain")
-                        .map(|(_, v)| *v)
+                        .map(|(_, v)| *v as f64)
                         .unwrap_or(0.0);
-                    let mid_gain = params_snap
+                    let mid_gain_db = params_snap
                         .iter()
                         .find(|(k, _)| k == "mid_gain")
-                        .map(|(_, v)| *v)
+                        .map(|(_, v)| *v as f64)
                         .unwrap_or(0.0);
-                    let hi_gain = params_snap
+                    let hi_gain_db = params_snap
                         .iter()
                         .find(|(k, _)| k == "hi_gain")
-                        .map(|(_, v)| *v)
+                        .map(|(_, v)| *v as f64)
                         .unwrap_or(0.0);
+                    let lo_freq = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "lo_freq")
+                        .map(|(_, v)| *v as f64)
+                        .unwrap_or(200.0);
+                    let mid_freq = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "mid_freq")
+                        .map(|(_, v)| *v as f64)
+                        .unwrap_or(1000.0);
+                    let hi_freq = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "hi_freq")
+                        .map(|(_, v)| *v as f64)
+                        .unwrap_or(4000.0);
+                    let sr = 44100.0_f64;
+                    let lo_c = crate::modules::BiquadCoeffs::low_shelf(lo_freq, lo_gain_db, sr);
+                    let mid_c =
+                        crate::modules::BiquadCoeffs::peaking(mid_freq, mid_gain_db, 0.7, sr);
+                    let hi_c = crate::modules::BiquadCoeffs::high_shelf(hi_freq, hi_gain_db, sr);
+
+                    let db_range = 18.0_f64;
+                    let log_min = (20.0_f64).ln();
+                    let log_max = (20000.0_f64).ln();
+                    let w_i = vis_w as i32;
+                    let h_f = vis_h as f64;
+                    let mid_line = vis_y + vis_h / 2;
+
+                    // Build pixel-per-column Y values
+                    let mut curve_py: Vec<i32> = Vec::with_capacity(w_i as usize);
+                    for col in 0..w_i {
+                        let t = col as f64 / (w_i - 1).max(1) as f64;
+                        let freq = (log_min + t * (log_max - log_min)).exp();
+                        let omega = 2.0 * std::f64::consts::PI * freq / sr;
+                        let mag = lo_c.magnitude_at(omega)
+                            * mid_c.magnitude_at(omega)
+                            * hi_c.magnitude_at(omega);
+                        let db = if mag > 1e-10 {
+                            20.0 * mag.log10()
+                        } else {
+                            -db_range
+                        };
+                        let db_clamped = db.clamp(-db_range, db_range);
+                        let py = mid_line - (db_clamped / db_range * (h_f / 2.0)) as i32;
+                        curve_py.push(py.clamp(vis_y, vis_y + vis_h - 1));
+                    }
+
+                    // 0 dB reference line
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 120));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, mid_line),
+                        sdl2::rect::Point::new(vis_x + w_i, mid_line),
+                    );
+
+                    // Filled area between curve and centre
                     let accent = Theme::c(state.theme.accent);
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                        accent.r, accent.g, accent.b, 30,
+                    ));
+                    for col in 0..w_i {
+                        let px = vis_x + col;
+                        let py = curve_py[col as usize];
+                        let (ya, yb) = if py <= mid_line {
+                            (py, mid_line)
+                        } else {
+                            (mid_line, py)
+                        };
+                        let fill_h = (yb - ya + 1).max(1) as u32;
+                        let _ = canvas.fill_rect(Rect::new(px, ya, 1, fill_h));
+                    }
+
+                    // Curve line
                     canvas.set_draw_color(sdl2::pixels::Color::RGBA(
                         accent.r, accent.g, accent.b, 200,
                     ));
-                    let w_f = vis_w as f32;
-                    let h_f = vis_h as f32;
-                    let mut prev_y_px = 0i32;
-                    for px in 0..vis_w as i32 {
-                        let t = px as f32 / w_f;
-                        let lo_w = (1.0 - t * 3.0).clamp(0.0, 1.0);
-                        let hi_w = ((t - 0.67) * 3.0).clamp(0.0, 1.0);
-                        let mid_w = 1.0 - lo_w - hi_w;
-                        let gain_db = lo_gain * lo_w + mid_gain * mid_w + hi_gain * hi_w;
-                        let y_norm = 0.5 - gain_db / 24.0;
-                        let y_px = vis_y + (y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
-                        if px > 0 {
-                            let _ = canvas.draw_line(
-                                sdl2::rect::Point::new(vis_x + px - 1, prev_y_px),
-                                sdl2::rect::Point::new(vis_x + px, y_px),
-                            );
-                        }
-                        prev_y_px = y_px;
+                    for col in 1..w_i {
+                        let _ = canvas.draw_line(
+                            sdl2::rect::Point::new(vis_x + col - 1, curve_py[(col - 1) as usize]),
+                            sdl2::rect::Point::new(vis_x + col, curve_py[col as usize]),
+                        );
                     }
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 120));
-                    let ref_y = vis_y + vis_h / 2;
-                    let _ = canvas.draw_line(
-                        sdl2::rect::Point::new(vis_x, ref_y),
-                        sdl2::rect::Point::new(vis_x + vis_w as i32, ref_y),
-                    );
                 }
 
                 "Distortion" => {
@@ -8210,13 +8863,17 @@ fn draw_master_rack(
     canvas.set_draw_color(Theme::c(state.theme.bg_dark));
     let _ = canvas.fill_rect(Rect::new(0, top, w as u32, h as u32));
 
+    // Reserve right side for a condensed master meter strip
+    let rack_master_w = 80i32;
+    let rack_w = w - rack_master_w - 4;
+
     draw_pixel_label(
         canvas,
         &state.theme,
         "MASTER RACK [Audio FX -> Out]",
         8,
         top + 6,
-        w - 16,
+        rack_w - 16,
         Theme::c(state.theme.text_secondary),
     );
 
@@ -8230,7 +8887,7 @@ fn draw_master_rack(
     let mut sx = 10i32 - scroll_offset;
     let knob_cell_w = 80i32;
 
-    canvas.set_clip_rect(Rect::new(0, top + 20, w as u32, (slot_h + 24) as u32));
+    canvas.set_clip_rect(Rect::new(0, top + 20, rack_w as u32, (slot_h + 24) as u32));
 
     for slot_idx in 0..slot_count {
         // Signal flow arrow
@@ -8842,50 +9499,101 @@ fn draw_master_rack(
                     );
                 }
                 "EQ" => {
-                    let lo_gain = params_snap
+                    let lo_gain_db = params_snap
                         .iter()
                         .find(|(k, _)| k == "lo_gain")
-                        .map(|(_, v)| *v)
+                        .map(|(_, v)| *v as f64)
                         .unwrap_or(0.0);
-                    let mid_gain = params_snap
+                    let mid_gain_db = params_snap
                         .iter()
                         .find(|(k, _)| k == "mid_gain")
-                        .map(|(_, v)| *v)
+                        .map(|(_, v)| *v as f64)
                         .unwrap_or(0.0);
-                    let hi_gain = params_snap
+                    let hi_gain_db = params_snap
                         .iter()
                         .find(|(k, _)| k == "hi_gain")
-                        .map(|(_, v)| *v)
+                        .map(|(_, v)| *v as f64)
                         .unwrap_or(0.0);
+                    let lo_freq = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "lo_freq")
+                        .map(|(_, v)| *v as f64)
+                        .unwrap_or(200.0);
+                    let mid_freq = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "mid_freq")
+                        .map(|(_, v)| *v as f64)
+                        .unwrap_or(1000.0);
+                    let hi_freq = params_snap
+                        .iter()
+                        .find(|(k, _)| k == "hi_freq")
+                        .map(|(_, v)| *v as f64)
+                        .unwrap_or(4000.0);
+                    let sr = 44100.0_f64;
+                    let lo_c = crate::modules::BiquadCoeffs::low_shelf(lo_freq, lo_gain_db, sr);
+                    let mid_c =
+                        crate::modules::BiquadCoeffs::peaking(mid_freq, mid_gain_db, 0.7, sr);
+                    let hi_c = crate::modules::BiquadCoeffs::high_shelf(hi_freq, hi_gain_db, sr);
+
+                    let db_range = 18.0_f64;
+                    let log_min = (20.0_f64).ln();
+                    let log_max = (20000.0_f64).ln();
+                    let w_i = vis_w as i32;
+                    let h_f = vis_h as f64;
+                    let mid_line = vis_y + vis_h / 2;
+
+                    let mut curve_py: Vec<i32> = Vec::with_capacity(w_i as usize);
+                    for col in 0..w_i {
+                        let t = col as f64 / (w_i - 1).max(1) as f64;
+                        let freq = (log_min + t * (log_max - log_min)).exp();
+                        let omega = 2.0 * std::f64::consts::PI * freq / sr;
+                        let mag = lo_c.magnitude_at(omega)
+                            * mid_c.magnitude_at(omega)
+                            * hi_c.magnitude_at(omega);
+                        let db = if mag > 1e-10 {
+                            20.0 * mag.log10()
+                        } else {
+                            -db_range
+                        };
+                        let db_clamped = db.clamp(-db_range, db_range);
+                        let py = mid_line - (db_clamped / db_range * (h_f / 2.0)) as i32;
+                        curve_py.push(py.clamp(vis_y, vis_y + vis_h - 1));
+                    }
+
+                    // 0 dB reference line
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 120));
+                    let _ = canvas.draw_line(
+                        sdl2::rect::Point::new(vis_x, mid_line),
+                        sdl2::rect::Point::new(vis_x + w_i, mid_line),
+                    );
+
+                    // Filled area
                     let accent = Theme::c(state.theme.accent);
+                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(
+                        accent.r, accent.g, accent.b, 30,
+                    ));
+                    for col in 0..w_i {
+                        let px = vis_x + col;
+                        let py = curve_py[col as usize];
+                        let (ya, yb) = if py <= mid_line {
+                            (py, mid_line)
+                        } else {
+                            (mid_line, py)
+                        };
+                        let fill_h = (yb - ya + 1).max(1) as u32;
+                        let _ = canvas.fill_rect(Rect::new(px, ya, 1, fill_h));
+                    }
+
+                    // Curve line
                     canvas.set_draw_color(sdl2::pixels::Color::RGBA(
                         accent.r, accent.g, accent.b, 200,
                     ));
-                    let w_f = vis_w as f32;
-                    let h_f = vis_h as f32;
-                    let mut prev_y_px = 0i32;
-                    for px in 0..vis_w as i32 {
-                        let t = px as f32 / w_f;
-                        let lo_w = (1.0 - t * 3.0).clamp(0.0, 1.0);
-                        let hi_w = ((t - 0.67) * 3.0).clamp(0.0, 1.0);
-                        let mid_w = 1.0 - lo_w - hi_w;
-                        let gain_db = lo_gain * lo_w + mid_gain * mid_w + hi_gain * hi_w;
-                        let y_norm = 0.5 - gain_db / 24.0;
-                        let y_px = vis_y + (y_norm * h_f).clamp(0.0, h_f - 1.0) as i32;
-                        if px > 0 {
-                            let _ = canvas.draw_line(
-                                sdl2::rect::Point::new(vis_x + px - 1, prev_y_px),
-                                sdl2::rect::Point::new(vis_x + px, y_px),
-                            );
-                        }
-                        prev_y_px = y_px;
+                    for col in 1..w_i {
+                        let _ = canvas.draw_line(
+                            sdl2::rect::Point::new(vis_x + col - 1, curve_py[(col - 1) as usize]),
+                            sdl2::rect::Point::new(vis_x + col, curve_py[col as usize]),
+                        );
                     }
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(60, 60, 70, 120));
-                    let ref_y = vis_y + vis_h / 2;
-                    let _ = canvas.draw_line(
-                        sdl2::rect::Point::new(vis_x, ref_y),
-                        sdl2::rect::Point::new(vis_x + vis_w as i32, ref_y),
-                    );
                 }
                 "Distortion" => {
                     // Transfer curve (synced with track rack vis)
@@ -9350,9 +10058,9 @@ fn draw_master_rack(
     // ── Scrollbar ──
     let total_content_w = sx + scroll_offset;
     let sb_y = top + h - scrollbar_h;
-    if total_content_w > w {
-        let visible_ratio = (w as f32 / total_content_w as f32).clamp(0.02, 1.0);
-        let max_scroll = (total_content_w - w) as f32;
+    if total_content_w > rack_w {
+        let visible_ratio = (rack_w as f32 / total_content_w as f32).clamp(0.02, 1.0);
+        let max_scroll = (total_content_w - rack_w) as f32;
         let cur = (state.rack_scroll_x / max_scroll).clamp(0.0, 1.0);
         let new_s = scrollbar(
             canvas,
@@ -9361,7 +10069,7 @@ fn draw_master_rack(
             WidgetId::Auto(85100),
             0,
             sb_y,
-            w,
+            rack_w,
             scrollbar_h,
             ScrollbarDir::Horizontal,
             cur,
@@ -9371,28 +10079,166 @@ fn draw_master_rack(
     } else {
         state.rack_scroll_x = 0.0;
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 24, 200));
-        let _ = canvas.fill_rect(Rect::new(0, sb_y, w as u32, scrollbar_h as u32));
+        let _ = canvas.fill_rect(Rect::new(0, sb_y, rack_w as u32, scrollbar_h as u32));
     }
-    if input.mouse_in_rect(0, top, w, h - scrollbar_h)
+    if input.mouse_in_rect(0, top, rack_w, h - scrollbar_h)
         && input.scroll_y != 0
         && !input.scroll_consumed
     {
         let delta = input.scroll_y as f32 * 40.0;
-        let max_scroll = ((total_content_w - w) as f32).max(0.0);
+        let max_scroll = ((total_content_w - rack_w) as f32).max(0.0);
         state.rack_scroll_x = (state.rack_scroll_x - delta).clamp(0.0, max_scroll);
     }
 
     // Middle-click drag: pan the master rack horizontally
     let rack_master_drag_id = WidgetId::Auto(87002);
     if input.middle_mouse_down
-        && input.mouse_in_rect(0, top, w, h - scrollbar_h)
+        && input.mouse_in_rect(0, top, rack_w, h - scrollbar_h)
         && input.middle_drag_widget == WidgetId::None
     {
         input.middle_drag_widget = rack_master_drag_id;
     }
     if input.middle_mouse_down && input.middle_drag_widget == rack_master_drag_id {
-        let max_scroll = ((total_content_w - w) as f32).max(0.0);
+        let max_scroll = ((total_content_w - rack_w) as f32).max(0.0);
         state.rack_scroll_x = (state.rack_scroll_x - input.mouse_dx as f32).clamp(0.0, max_scroll);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // ── MASTER METER STRIP (right side of rack view) ──
+    // ══════════════════════════════════════════════════════════════════
+    {
+        let rmx = rack_w + 4;
+        let rmy = top + 4;
+        let rmh = (h - 8).max(4);
+
+        // Background
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(24, 24, 32, 255));
+        let _ = canvas.fill_rect(Rect::new(rmx, rmy, rack_master_w as u32, rmh as u32));
+
+        // Accent cap
+        canvas.set_draw_color(Theme::c(state.theme.accent));
+        let _ = canvas.fill_rect(Rect::new(rmx, rmy, rack_master_w as u32, 4));
+
+        // Label
+        draw_pixel_label(
+            canvas,
+            &state.theme,
+            "OUT",
+            rmx + 4,
+            rmy + 7,
+            rack_master_w - 8,
+            sdl2::pixels::Color::RGBA(180, 200, 255, 240),
+        );
+
+        // Master volume fader (slim)
+        let rm_fader_top = rmy + 20;
+        let rm_fader_h = (rmh - 28).max(20);
+        let rm_fader_x = rmx + 4;
+        let rm_fader_w = 18i32;
+
+        // Fader groove
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(12, 12, 16, 255));
+        let _ = canvas.fill_rect(Rect::new(
+            rm_fader_x + 6,
+            rm_fader_top,
+            6,
+            rm_fader_h as u32,
+        ));
+
+        // dB tick marks
+        for &db_mark in &[-48.0_f32, -24.0, -12.0, 0.0, 6.0] {
+            let gain = if db_mark <= -60.0 {
+                0.0
+            } else {
+                10.0_f32.powf(db_mark / 20.0)
+            };
+            let pos = vol_gain_to_pos(gain);
+            let tick_y = rm_fader_top + rm_fader_h - (pos * rm_fader_h as f32) as i32;
+            let tc = if db_mark >= 0.0 {
+                sdl2::pixels::Color::RGBA(200, 80, 60, 140)
+            } else {
+                sdl2::pixels::Color::RGBA(70, 75, 85, 120)
+            };
+            canvas.set_draw_color(tc);
+            let _ = canvas.draw_line(
+                sdl2::rect::Point::new(rm_fader_x, tick_y),
+                sdl2::rect::Point::new(rm_fader_x + 4, tick_y),
+            );
+        }
+
+        {
+            let mut mvol_pos = vol_gain_to_pos(state.master_volume_ui);
+            let mvol_id = WidgetId::Auto(85200);
+            let mvol_changed = slider(
+                canvas,
+                input,
+                &state.theme,
+                &SliderParams {
+                    id: mvol_id,
+                    x: rm_fader_x,
+                    y: rm_fader_top,
+                    width: rm_fader_w,
+                    height: rm_fader_h,
+                    min: 0.0,
+                    max: 1.0,
+                    orientation: SliderOrientation::Vertical,
+                    label: None,
+                    default_value: Some(vol_gain_to_pos(1.0)),
+                },
+                &mut mvol_pos,
+            );
+            if mvol_changed {
+                state.master_volume_ui = vol_pos_to_gain(mvol_pos);
+            }
+        }
+
+        // Stereo post meters
+        let rm_meter_x = rmx + 30;
+        let rm_bar_w = 10u32;
+        let rm_bar_gap = 4i32;
+        let rm_meter_y = rmy + 20;
+        let rm_meter_h = (rmh - 28).max(10);
+
+        let rms_post_l = state.meters.master_rms_post_l;
+        let rms_post_r = state.meters.master_rms_post_r;
+        draw_meter_bar(
+            canvas, rms_post_l, rm_meter_x, rm_meter_y, rm_bar_w, rm_meter_h,
+        );
+        draw_meter_bar(
+            canvas,
+            rms_post_r,
+            rm_meter_x + rm_bar_w as i32 + rm_bar_gap,
+            rm_meter_y,
+            rm_bar_w,
+            rm_meter_h,
+        );
+
+        // dB value label at bottom
+        {
+            let db_val = if state.master_volume_ui > 1e-6 {
+                20.0 * (state.master_volume_ui as f64).log10()
+            } else {
+                -60.0
+            };
+            let db_str = if db_val <= -60.0 {
+                "-∞ dB".to_string()
+            } else {
+                format!("{:.1}dB", db_val)
+            };
+            draw_pixel_label(
+                canvas,
+                &state.theme,
+                &db_str,
+                rmx + 4,
+                rmy + rmh - 10,
+                rack_master_w - 8,
+                sdl2::pixels::Color::RGBA(160, 170, 190, 200),
+            );
+        }
+
+        // Border
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(70, 80, 120, 200));
+        let _ = canvas.draw_rect(Rect::new(rmx, rmy, rack_master_w as u32, rmh as u32));
     }
 }
 // ── Sample Browser (left panel) ─────────────────────────────────────
@@ -10045,19 +10891,18 @@ fn draw_left_panel_files(
                     // value that the right-handle resize will later clamp to.
                     let file_str = row.path.to_string_lossy().to_string();
                     let beats_per_sec = state.project.tempo_map.bpm_at(0.0) / 60.0;
-                    let clip_len_beats = if let Some((_, total_dur)) =
-                        state.waveform_cache.get(&file_str)
-                    {
-                        // Cache hit — use the exact same duration the handle-resize uses
-                        (*total_dur * beats_per_sec).max(0.01)
-                    } else if let Ok((samples, sr)) =
-                        crate::audio::load_audio(std::path::Path::new(&file_str))
-                    {
-                        let duration_secs = samples.len() as f64 / sr as f64;
-                        (duration_secs * beats_per_sec).max(0.01)
-                    } else {
-                        4.0
-                    };
+                    let clip_len_beats =
+                        if let Some((_, total_dur)) = state.waveform_cache.get(&file_str) {
+                            // Cache hit — use the exact same duration the handle-resize uses
+                            (*total_dur * beats_per_sec).max(0.01)
+                        } else if let Ok((samples, sr)) =
+                            crate::audio::load_audio(std::path::Path::new(&file_str))
+                        {
+                            let duration_secs = samples.len() as f64 / sr as f64;
+                            (duration_secs * beats_per_sec).max(0.01)
+                        } else {
+                            4.0
+                        };
                     state.sample_drag_len_beats = Some(clip_len_beats);
                 }
                 // Auto-play preview on click (if enabled)
@@ -16133,8 +16978,8 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
             input.middle_drag_widget = mixer_drag_id;
         }
         if input.middle_mouse_down && input.middle_drag_widget == mixer_drag_id {
-            state.mixer_scroll_x = (state.mixer_scroll_x - input.mouse_dx as f32)
-                .clamp(0.0, max_scroll);
+            state.mixer_scroll_x =
+                (state.mixer_scroll_x - input.mouse_dx as f32).clamp(0.0, max_scroll);
         }
     } else {
         state.mixer_scroll_x = 0.0;
@@ -18569,6 +19414,7 @@ fn draw_audio_editor(
     }
 
     // ── Gather clip info ─────────────────────────────────────────────
+    #[allow(clippy::type_complexity)]
     let clip_info: Option<(String, String, f64, f64, f32, f64, f64, f64)> =
         if let Some((track_id, clip_idx)) = state.selected_clip {
             state
@@ -22319,6 +23165,18 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             ("Preset dropdown (module)", "Load / switch presets", false),
             ("", "", false),
             ("── Effects Info ──", "", true),
+            (
+                "EQ",
+                "3-band parametric: lo shelf, mid bell, hi shelf",
+                false,
+            ),
+            ("  Lo / Hi Gain", "Shelving filter gain (±12 dB)", false),
+            ("  Mid Gain", "Peaking bell filter gain (±12 dB)", false),
+            (
+                "  Mid Freq",
+                "Mid band center frequency (100–10 kHz)",
+                false,
+            ),
             ("Delay", "Stereo delay with beat-synced L/R times", false),
             (
                 "  Time L / Time R dropdowns",
@@ -22326,7 +23184,17 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 false,
             ),
             ("Compressor", "Real-time curve dot + GR / IN meters", false),
-            ("Limiter", "Ceiling curve + real-time dot + GR meter", false),
+            (
+                "Limiter",
+                "Lookahead brickwall with per-sample GR ramp",
+                false,
+            ),
+            (
+                "  Ceiling",
+                "Maximum output peak level (-12 to 0 dB)",
+                false,
+            ),
+            ("  Release", "Gain recovery speed after limiting", false),
         ],
         6 => vec![
             // Mixer
@@ -22377,6 +23245,11 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             ),
             ("", "", false),
             ("── CStrip2 (per-track) ──", "", true),
+            (
+                "CS / BYP button",
+                "Toggle channel strip bypass for A/B comparison",
+                false,
+            ),
             ("Treble", "High-frequency EQ gain (0.5 = unity)", false),
             ("Mid", "Mid-frequency EQ gain (0.5 = unity)", false),
             ("Bass", "Low-frequency EQ gain (0.5 = unity)", false),
@@ -22386,7 +23259,11 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             ("HiCap", "Lo-pass filter (0.0 = off, 1.0 = full cut)", false),
             ("Compress", "Compressor amount (0.0 = off)", false),
             ("CompSpd", "Compressor speed / attack", false),
-            ("Output", "Output gain + soft saturation (0.33 = unity)", false),
+            (
+                "Output",
+                "Output gain + soft saturation (0.33 = unity)",
+                false,
+            ),
             ("  Shift+Click knob", "Reset to default (neutral)", false),
             ("", "", false),
             ("── Effect Rack ──", "", true),

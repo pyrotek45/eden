@@ -1519,9 +1519,6 @@ impl Command for JoinClips {
                 }
                 // Second pass: merge with silence for gaps
                 let mut prev_end_secs = clips_sorted[0].1.start_time() * 60.0 / bpm;
-                let base_start_secs = prev_end_secs;
-                // Reset to actual start
-                prev_end_secs = base_start_secs;
                 for (clip_i, (_idx, clip)) in clips_sorted.iter().enumerate() {
                     if let Clip::Audio(ac) = clip {
                         let clip_start_secs = ac.start_time * 60.0 / bpm;
@@ -1530,9 +1527,10 @@ impl Command for JoinClips {
                             let gap_secs = clip_start_secs - prev_end_secs;
                             if gap_secs > 0.001 {
                                 let silence_frames = (gap_secs * out_sr as f64) as usize;
-                                merged_samples.extend(
-                                    std::iter::repeat(0.0f32).take(silence_frames * out_channels),
-                                );
+                                merged_samples.extend(std::iter::repeat_n(
+                                    0.0f32,
+                                    silence_frames * out_channels,
+                                ));
                             }
                         }
                         let path = std::path::Path::new(&ac.source_file);

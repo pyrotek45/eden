@@ -1663,6 +1663,7 @@ fn main() {
                     midi_effect_slots,
                     effect_sidechain_track,
                     cstrip2_params: track.cstrip2_params.clone(),
+                    cstrip2_bypass: track.cstrip2_bypass,
                     extra,
                 });
             }
@@ -1758,6 +1759,8 @@ fn main() {
                 state.meters.master_rms_post_r = audio.master_rms_post_r;
                 state.meters.track_effect_gr = audio.track_effect_gr.clone();
                 state.meters.master_effect_gr = audio.master_effect_gr.clone();
+                state.meters.preview_rms_l = audio.preview_rms_l;
+                state.meters.preview_rms_r = audio.preview_rms_r;
 
                 // Update VU ballistic needles (GUI-side, ~300ms attack/decay)
                 {
@@ -1774,20 +1777,27 @@ fn main() {
                     // VU ballistic: ~300ms integration (attack ≈ decay ≈ 0.1 per frame @ 60fps)
                     let vu_coeff = 0.10_f32;
                     // Peak needle: fast attack (~instant), very slow decay
-                    let peak_attack = 0.6_f32;    // fast rise
-                    let peak_decay  = 0.008_f32;   // slow fall (~5s from 1→0 @ 60fps)
-                    let peak_hold_time = 90u32;    // ~1.5s hold at 60fps before decay starts
+                    let peak_attack = 0.6_f32; // fast rise
+                    let peak_decay = 0.008_f32; // slow fall (~5s from 1→0 @ 60fps)
+                    let peak_hold_time = 90u32; // ~1.5s hold at 60fps before decay starts
                     for i in 0..n {
                         let rms = state.meters.track_rms.get(i).copied().unwrap_or(0.0);
                         // Convert to VU scale: 0dBVU ≈ 0.3162 (~-10dBFS), needle 0–1
-                        let vu_db = if rms > 1e-6 { 20.0 * rms.log10() } else { -60.0 };
+                        let vu_db = if rms > 1e-6 {
+                            20.0 * rms.log10()
+                        } else {
+                            -60.0
+                        };
                         // Map: -20dBFS → 0.0 (left), 0dBFS → ~0.77, +3dBFS → 1.0
                         let vu_pos = ((vu_db + 20.0) / 23.0).clamp(0.0, 1.0);
-                        state.meters.vu_needle[i] += (vu_pos - state.meters.vu_needle[i]) * vu_coeff;
+                        state.meters.vu_needle[i] +=
+                            (vu_pos - state.meters.vu_needle[i]) * vu_coeff;
                         // Peak needle: jumps up quickly, holds, then decays very slowly
                         if vu_pos > state.meters.vu_peak_needle[i] {
-                            state.meters.vu_peak_needle[i] += (vu_pos - state.meters.vu_peak_needle[i]) * peak_attack;
-                            state.meters.vu_peak_hold_frames[i] = peak_hold_time; // reset hold
+                            state.meters.vu_peak_needle[i] +=
+                                (vu_pos - state.meters.vu_peak_needle[i]) * peak_attack;
+                            state.meters.vu_peak_hold_frames[i] = peak_hold_time;
+                        // reset hold
                         } else if state.meters.vu_peak_hold_frames[i] > 0 {
                             // Holding at peak — don't decay yet
                             state.meters.vu_peak_hold_frames[i] -= 1;
@@ -1814,32 +1824,45 @@ fn main() {
                     };
                     state.meters.master_peak_l = ml.max(state.meters.master_peak_l * 0.995);
                     state.meters.master_peak_r = mr.max(state.meters.master_peak_r * 0.995);
-                    if ml >= 0.98 { state.meters.master_clipping_l = true; }
-                    if mr >= 0.98 { state.meters.master_clipping_r = true; }
+                    if ml >= 0.98 {
+                        state.meters.master_clipping_l = true;
+                    }
+                    if mr >= 0.98 {
+                        state.meters.master_clipping_r = true;
+                    }
                     // Post-output (Out pair) peak hold
                     let pl = state.meters.master_rms_post_l;
                     let pr = state.meters.master_rms_post_r;
-                    state.meters.master_peak_hold_post_l = if pl > state.meters.master_peak_hold_post_l {
-                        pl
-                    } else {
-                        (state.meters.master_peak_hold_post_l - 0.002).max(0.0)
-                    };
-                    state.meters.master_peak_hold_post_r = if pr > state.meters.master_peak_hold_post_r {
-                        pr
-                    } else {
-                        (state.meters.master_peak_hold_post_r - 0.002).max(0.0)
-                    };
+                    state.meters.master_peak_hold_post_l =
+                        if pl > state.meters.master_peak_hold_post_l {
+                            pl
+                        } else {
+                            (state.meters.master_peak_hold_post_l - 0.002).max(0.0)
+                        };
+                    state.meters.master_peak_hold_post_r =
+                        if pr > state.meters.master_peak_hold_post_r {
+                            pr
+                        } else {
+                            (state.meters.master_peak_hold_post_r - 0.002).max(0.0)
+                        };
                     // Master VU ballistic needle (same logic as track VU)
                     {
-                        let m_rms = state.meters.master_rms_post_l
+                        let m_rms = state
+                            .meters
+                            .master_rms_post_l
                             .max(state.meters.master_rms_post_r);
-                        let m_vu_db = if m_rms > 1e-6 { 20.0 * m_rms.log10() } else { -60.0_f32 };
+                        let m_vu_db = if m_rms > 1e-6 {
+                            20.0 * m_rms.log10()
+                        } else {
+                            -60.0_f32
+                        };
                         let m_vu_pos = ((m_vu_db + 20.0) / 23.0).clamp(0.0, 1.0);
                         let vu_coeff = 0.10_f32;
                         let peak_attack = 0.6_f32;
                         let peak_decay = 0.008_f32;
                         let peak_hold_time = 90u32;
-                        state.meters.master_vu_needle += (m_vu_pos - state.meters.master_vu_needle) * vu_coeff;
+                        state.meters.master_vu_needle +=
+                            (m_vu_pos - state.meters.master_vu_needle) * vu_coeff;
                         if m_vu_pos > state.meters.master_vu_peak_needle {
                             state.meters.master_vu_peak_needle +=
                                 (m_vu_pos - state.meters.master_vu_peak_needle) * peak_attack;
@@ -1857,23 +1880,49 @@ fn main() {
                         let l = state.meters.master_rms_post_l;
                         let r = state.meters.master_rms_post_r;
                         let denom = l * l + r * r;
-                        let corr_raw = if denom > 1e-10 { 2.0 * l * r / denom } else { 1.0_f32 };
+                        let corr_raw = if denom > 1e-10 {
+                            2.0 * l * r / denom
+                        } else {
+                            1.0_f32
+                        };
                         // Smooth toward new value
                         state.meters.master_correlation +=
                             (corr_raw - state.meters.master_correlation) * 0.05;
                     }
                     // Per-track stereo peak hold + clipping
-                    if state.meters.track_peak_hold_l.len() != n { state.meters.track_peak_hold_l.resize(n, 0.0); }
-                    if state.meters.track_peak_hold_r.len() != n { state.meters.track_peak_hold_r.resize(n, 0.0); }
-                    if state.meters.track_clipping_l.len() != n { state.meters.track_clipping_l.resize(n, false); }
-                    if state.meters.track_clipping_r.len() != n { state.meters.track_clipping_r.resize(n, false); }
+                    if state.meters.track_peak_hold_l.len() != n {
+                        state.meters.track_peak_hold_l.resize(n, 0.0);
+                    }
+                    if state.meters.track_peak_hold_r.len() != n {
+                        state.meters.track_peak_hold_r.resize(n, 0.0);
+                    }
+                    if state.meters.track_clipping_l.len() != n {
+                        state.meters.track_clipping_l.resize(n, false);
+                    }
+                    if state.meters.track_clipping_r.len() != n {
+                        state.meters.track_clipping_r.resize(n, false);
+                    }
                     for i in 0..n {
                         let tl = state.meters.track_rms_l.get(i).copied().unwrap_or(0.0);
                         let tr = state.meters.track_rms_r.get(i).copied().unwrap_or(0.0);
-                        state.meters.track_peak_hold_l[i] = if tl > state.meters.track_peak_hold_l[i] { tl } else { (state.meters.track_peak_hold_l[i] - 0.003).max(0.0) };
-                        state.meters.track_peak_hold_r[i] = if tr > state.meters.track_peak_hold_r[i] { tr } else { (state.meters.track_peak_hold_r[i] - 0.003).max(0.0) };
-                        if tl >= 0.98 { state.meters.track_clipping_l[i] = true; }
-                        if tr >= 0.98 { state.meters.track_clipping_r[i] = true; }
+                        state.meters.track_peak_hold_l[i] =
+                            if tl > state.meters.track_peak_hold_l[i] {
+                                tl
+                            } else {
+                                (state.meters.track_peak_hold_l[i] - 0.003).max(0.0)
+                            };
+                        state.meters.track_peak_hold_r[i] =
+                            if tr > state.meters.track_peak_hold_r[i] {
+                                tr
+                            } else {
+                                (state.meters.track_peak_hold_r[i] - 0.003).max(0.0)
+                            };
+                        if tl >= 0.98 {
+                            state.meters.track_clipping_l[i] = true;
+                        }
+                        if tr >= 0.98 {
+                            state.meters.track_clipping_r[i] = true;
+                        }
                     }
                 }
             }

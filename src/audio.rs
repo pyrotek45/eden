@@ -127,6 +127,9 @@ pub struct AudioShared {
     /// Master rack effect chain: list of (effect_name, params).
     /// Applied to the stereo mix after all tracks are summed, before master_volume.
     pub master_effects: Vec<(String, Vec<(String, f32)>)>,
+    // ── Preview sample metering ──
+    pub preview_rms_l: f32,
+    pub preview_rms_r: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +160,8 @@ pub struct AudioTrack {
     pub effect_sidechain_track: Vec<Option<usize>>,
     /// Channel strip (CStrip2) params — applied after the effect chain, before pan/vol.
     pub cstrip2_params: Vec<(String, f32)>,
+    /// Whether the CStrip2 channel strip is bypassed.
+    pub cstrip2_bypass: bool,
     // ── Extra data for instruments (e.g. sampler buffers) ──
     pub extra: ModuleExtra,
 }
@@ -237,6 +242,8 @@ impl Default for AudioShared {
             preview_held_pitches: Vec::new(),
             panic: false,
             master_effects: Vec::new(),
+            preview_rms_l: 0.0,
+            preview_rms_r: 0.0,
         }
     }
 }
@@ -580,6 +587,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         let mut cb_track_rms_r: Vec<f32> = Vec::with_capacity(64);
         let mut cb_preview_rms: Vec<f32> = Vec::with_capacity(64);
         let mut cb_preview_rms_pre: Vec<f32> = Vec::with_capacity(64);
+        // Preview sample (file browser) RMS accumulators
+        #[allow(unused_assignments)]
+        let mut cb_preview_sample_rms_l: f32 = 0.0;
+        #[allow(unused_assignments)]
+        let mut cb_preview_sample_rms_r: f32 = 0.0;
         // Arp scratch — reused per-track per-sample.
         let mut cb_arp_active_pitches: Vec<u8> = Vec::with_capacity(32);
         let mut cb_arp_pool: Vec<u8> = Vec::with_capacity(64);
@@ -639,9 +651,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             s.preview_playing = false;
                         }
                         // Extract preview note request — drain into pre-allocated vec (no alloc)
-                        pending_preview.extend(s.preview_notes.drain(..));
+                        pending_preview.append(&mut s.preview_notes);
                         // Extract note-offs — drain into pre-allocated vec (no alloc)
-                        pending_note_offs.extend(s.preview_note_off.drain(..));
+                        pending_note_offs.append(&mut s.preview_note_off);
                         sustain_mode = s.preview_sustain;
                         // Snapshot the currently-held keyboard pitches (for keyboard arp).
                         // Clone is small (a few u8 vecs) and happens only when lock succeeds.
@@ -806,8 +818,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // Stereo preview frame buffer — reuse pre-allocated scratch (no alloc)
                     cb_frame_l.resize(frames, 0.0_f32);
                     cb_frame_r.resize(frames, 0.0_f32);
-                    for v in cb_frame_l.iter_mut().take(frames) { *v = 0.0; }
-                    for v in cb_frame_r.iter_mut().take(frames) { *v = 0.0; }
+                    for v in cb_frame_l.iter_mut().take(frames) {
+                        *v = 0.0;
+                    }
+                    for v in cb_frame_r.iter_mut().take(frames) {
+                        *v = 0.0;
+                    }
                     // Alias as a zipped iterator-friendly form via index access below.
                     let frame_samples_l = &mut cb_frame_l;
                     let frame_samples_r = &mut cb_frame_r;
@@ -871,6 +887,18 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                     }
 
+                    // Accumulate preview sample RMS for the preview meter strip
+                    cb_preview_sample_rms_l = 0.0;
+                    cb_preview_sample_rms_r = 0.0;
+                    if snap.preview_playing && !snap.preview_samples.is_empty() && frames > 0 {
+                        for fi in 0..frames {
+                            cb_preview_sample_rms_l += frame_samples_l[fi] * frame_samples_l[fi];
+                            cb_preview_sample_rms_r += frame_samples_r[fi] * frame_samples_r[fi];
+                        }
+                        cb_preview_sample_rms_l = (cb_preview_sample_rms_l / frames as f32).sqrt();
+                        cb_preview_sample_rms_r = (cb_preview_sample_rms_r / frames as f32).sqrt();
+                    }
+
                     // ── Process preview voices (note preview) even when stopped ──
                     let num_tracks = snap.tracks.len();
                     // Ensure instrument instances are up to date
@@ -927,12 +955,16 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // Per-track stereo RMS accumulators (for mixer L/R meters during preview)
                     let track_rms_l_accum = {
                         cb_track_rms_l.resize(num_tracks, 0.0_f32);
-                        for v in &mut cb_track_rms_l[..num_tracks] { *v = 0.0; }
+                        for v in &mut cb_track_rms_l[..num_tracks] {
+                            *v = 0.0;
+                        }
                         &mut cb_track_rms_l
                     };
                     let track_rms_r_accum = {
                         cb_track_rms_r.resize(num_tracks, 0.0_f32);
-                        for v in &mut cb_track_rms_r[..num_tracks] { *v = 0.0; }
+                        for v in &mut cb_track_rms_r[..num_tracks] {
+                            *v = 0.0;
+                        }
                         &mut cb_track_rms_r
                     };
 
@@ -946,7 +978,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     if smooth_master_vol < 0.0 {
                         smooth_master_vol = snap.master_volume as f64;
                     }
-                    smooth_master_vol += (snap.master_volume as f64 - smooth_master_vol) * (FX_SMOOTH_COEFF as f64 * frames as f64).min(1.0);
+                    smooth_master_vol += (snap.master_volume as f64 - smooth_master_vol)
+                        * (FX_SMOOTH_COEFF as f64 * frames as f64).min(1.0);
 
                     // ── Per-callback parameter smoothing (preview path) ──────────
                     // Mirror the playing-path smoothing so knob changes don't cause
@@ -964,8 +997,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         for (si, (_, params)) in track.effect_slots.iter().enumerate() {
                             let param_cache = &mut slot_cache[si];
                             if param_cache.len() < params.len() {
-                                for pi in param_cache.len()..params.len() {
-                                    param_cache.push(params[pi].clone());
+                                for item in params.iter().skip(param_cache.len()) {
+                                    param_cache.push(item.clone());
                                 }
                             }
                             let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
@@ -981,8 +1014,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     for (si, (_, params)) in snap.master_effects.iter().enumerate() {
                         let param_cache = &mut smooth_master_fx_params[si];
                         if param_cache.len() < params.len() {
-                            for pi in param_cache.len()..params.len() {
-                                param_cache.push(params[pi].clone());
+                            for item in params.iter().skip(param_cache.len()) {
+                                param_cache.push(item.clone());
                             }
                         }
                         let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
@@ -999,8 +1032,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         if !cs_raw.is_empty() {
                             let cache = &mut smooth_cstrip_params[ti];
                             if cache.len() < cs_raw.len() {
-                                for pi in cache.len()..cs_raw.len() {
-                                    cache.push(cs_raw[pi].clone());
+                                for item in cs_raw.iter().skip(cache.len()) {
+                                    cache.push(item.clone());
                                 }
                             }
                             let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
@@ -1025,7 +1058,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 continue;
                             }
                             let held_opt = cur_held_pitches.iter().find(|(t, _)| *t == ti);
-                            if held_opt.map_or(true, |(_, v)| v.is_empty()) {
+                            if held_opt.is_none_or(|(_, v)| v.is_empty()) {
                                 for v in voices.iter_mut() {
                                     if v.track_idx == ti
                                         && !v.released
@@ -1069,7 +1102,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     2 => {
                                         let down_start = cb_arp_pool.len();
                                         // append reversed interior
-                                        let mid: Vec<u8> = cb_arp_pool[1..down_start.saturating_sub(1)].iter().rev().copied().collect();
+                                        let mid: Vec<u8> = cb_arp_pool
+                                            [1..down_start.saturating_sub(1)]
+                                            .iter()
+                                            .rev()
+                                            .copied()
+                                            .collect();
                                         cb_arp_pool.extend_from_slice(&mid);
                                     }
                                     3 => {
@@ -1133,8 +1171,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             }
                         }
                         // Accumulate per-track stereo samples — reset scratch bufs
-                        for v in cb_per_track_sample.iter_mut() { *v = (0.0, 0.0); }
-                        for v in cb_per_track_voices.iter_mut() { *v = 0; }
+                        for v in cb_per_track_sample.iter_mut() {
+                            *v = (0.0, 0.0);
+                        }
+                        for v in cb_per_track_voices.iter_mut() {
+                            *v = 0;
+                        }
                         for voice in voices.iter_mut() {
                             let ti = voice.track_idx;
                             if ti >= num_tracks {
@@ -1155,7 +1197,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                         // Normalize + run effect chain per track (same as main path)
                         for ti in 0..num_tracks {
-                            if cb_per_track_sample[ti] == (0.0, 0.0) && cb_per_track_voices[ti] == 0 {
+                            if cb_per_track_sample[ti] == (0.0, 0.0) && cb_per_track_voices[ti] == 0
+                            {
                                 let has_tail = ti < track_effects.len()
                                     && track_effects[ti].iter().any(|(_, fx)| fx.has_tail());
                                 if !has_tail {
@@ -1167,8 +1210,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 cb_per_track_sample[ti].0 /= norm;
                                 cb_per_track_sample[ti].1 /= norm;
                             }
-                            let pre_mono =
-                                ((cb_per_track_sample[ti].0 + cb_per_track_sample[ti].1) * 0.5) as f32;
+                            let pre_mono = ((cb_per_track_sample[ti].0 + cb_per_track_sample[ti].1)
+                                * 0.5) as f32;
                             if ti < preview_rms_pre_accum.len() {
                                 preview_rms_pre_accum[ti] += pre_mono * pre_mono;
                             }
@@ -1178,9 +1221,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     if fi2 < track_effects[ti].len() {
                                         track_effects[ti][fi2].1.set_bpm(snap.bpm);
                                         // Use pre-smoothed params if available, else raw snapshot
-                                        let params_ref: &[(String, f32)] = if ti < smooth_track_fx_params.len()
+                                        let params_ref: &[(String, f32)] = if ti
+                                            < smooth_track_fx_params.len()
                                             && fi2 < smooth_track_fx_params[ti].len()
-                                            && smooth_track_fx_params[ti][fi2].len() == fx_params.len()
+                                            && smooth_track_fx_params[ti][fi2].len()
+                                                == fx_params.len()
                                         {
                                             &smooth_track_fx_params[ti][fi2]
                                         } else {
@@ -1197,17 +1242,17 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 }
                             }
                             // ── CStrip2 channel strip ──
-                            if ti < track_cstrip.len() {
+                            if ti < track_cstrip.len() && !snap.tracks[ti].cstrip2_bypass {
                                 let cs_raw = &snap.tracks[ti].cstrip2_params;
                                 if !cs_raw.is_empty() {
-                                    let cs_params: &[(String, f32)] =
-                                        if ti < smooth_cstrip_params.len()
-                                            && smooth_cstrip_params[ti].len() == cs_raw.len()
-                                        {
-                                            &smooth_cstrip_params[ti]
-                                        } else {
-                                            cs_raw
-                                        };
+                                    let cs_params: &[(String, f32)] = if ti
+                                        < smooth_cstrip_params.len()
+                                        && smooth_cstrip_params[ti].len() == cs_raw.len()
+                                    {
+                                        &smooth_cstrip_params[ti]
+                                    } else {
+                                        cs_raw
+                                    };
                                     let (cl, cr) = track_cstrip[ti].process(
                                         cb_per_track_sample[ti].0,
                                         cb_per_track_sample[ti].1,
@@ -1217,8 +1262,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     cb_per_track_sample[ti] = (cl, cr);
                                 }
                             }
-                            let post_mono =
-                                ((cb_per_track_sample[ti].0 + cb_per_track_sample[ti].1) * 0.5) as f32;
+                            let post_mono = ((cb_per_track_sample[ti].0
+                                + cb_per_track_sample[ti].1)
+                                * 0.5) as f32;
                             if ti < preview_rms_accum.len() {
                                 preview_rms_accum[ti] += post_mono * post_mono;
                             }
@@ -1249,7 +1295,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         for (fi2, (_, fx_params)) in snap.master_effects.iter().enumerate() {
                             if fi2 < master_effects.len() {
                                 master_effects[fi2].1.set_bpm(snap.bpm);
-                                let params_ref: &[(String, f32)] = if fi2 < smooth_master_fx_params.len()
+                                let params_ref: &[(String, f32)] = if fi2
+                                    < smooth_master_fx_params.len()
                                     && smooth_master_fx_params[fi2].len() == fx_params.len()
                                 {
                                     &smooth_master_fx_params[fi2]
@@ -1269,10 +1316,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             }
                         }
                         let mv = smooth_master_vol;
-                        frame_samples_l[fi] =
-                            (frame_samples_l[fi] as f64 + mix_l * mv).clamp(-1.0, 1.0) as f32;
-                        frame_samples_r[fi] =
-                            (frame_samples_r[fi] as f64 + mix_r * mv).clamp(-1.0, 1.0) as f32;
+                        frame_samples_l[fi] = (frame_samples_l[fi] as f64 + mix_l * mv) as f32;
+                        frame_samples_r[fi] = (frame_samples_r[fi] as f64 + mix_r * mv) as f32;
                     }
                     // Remove dead voices
                     voices.retain(|v| !voice_is_done(v));
@@ -1363,19 +1408,31 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 *v = *v * 0.85 + rms * 0.15;
                             }
                             // Stereo per-track RMS (for mixer L/R meters)
-                            if s.track_rms_l.len() != n { s.track_rms_l.resize(n, 0.0); }
-                            if s.track_rms_r.len() != n { s.track_rms_r.resize(n, 0.0); }
+                            if s.track_rms_l.len() != n {
+                                s.track_rms_l.resize(n, 0.0);
+                            }
+                            if s.track_rms_r.len() != n {
+                                s.track_rms_r.resize(n, 0.0);
+                            }
                             for i in 0..n {
                                 let rl = if i < track_rms_l_accum.len() {
                                     (track_rms_l_accum[i] / frames as f32).sqrt()
-                                } else { 0.0 };
+                                } else {
+                                    0.0
+                                };
                                 let rr = if i < track_rms_r_accum.len() {
                                     (track_rms_r_accum[i] / frames as f32).sqrt()
-                                } else { 0.0 };
+                                } else {
+                                    0.0
+                                };
                                 s.track_rms_l[i] = s.track_rms_l[i] * 0.85 + rl * 0.15;
-                                if s.track_rms_l[i] < 0.0005 { s.track_rms_l[i] = 0.0; }
+                                if s.track_rms_l[i] < 0.0005 {
+                                    s.track_rms_l[i] = 0.0;
+                                }
                                 s.track_rms_r[i] = s.track_rms_r[i] * 0.85 + rr * 0.15;
-                                if s.track_rms_r[i] < 0.0005 { s.track_rms_r[i] = 0.0; }
+                                if s.track_rms_r[i] < 0.0005 {
+                                    s.track_rms_r[i] = 0.0;
+                                }
                             }
                         } else {
                             for v in s.track_rms.iter_mut() {
@@ -1385,8 +1442,18 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 }
                             }
                             // Decay stereo meters when no frames
-                            for v in s.track_rms_l.iter_mut() { *v *= 0.85; if *v < 0.0005 { *v = 0.0; } }
-                            for v in s.track_rms_r.iter_mut() { *v *= 0.85; if *v < 0.0005 { *v = 0.0; } }
+                            for v in s.track_rms_l.iter_mut() {
+                                *v *= 0.85;
+                                if *v < 0.0005 {
+                                    *v = 0.0;
+                                }
+                            }
+                            for v in s.track_rms_r.iter_mut() {
+                                *v *= 0.85;
+                                if *v < 0.0005 {
+                                    *v = 0.0;
+                                }
+                            }
                         }
                         // Update oscilloscope (use L channel for display)
                         let osc_len = s.oscilloscope.len();
@@ -1396,6 +1463,15 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             s.osc_write += 1;
                         }
                         s.osc_write %= osc_len;
+                        // Write preview sample RMS for preview meter strip
+                        s.preview_rms_l = s.preview_rms_l * 0.85 + cb_preview_sample_rms_l * 0.15;
+                        s.preview_rms_r = s.preview_rms_r * 0.85 + cb_preview_sample_rms_r * 0.15;
+                        if s.preview_rms_l < 0.0005 {
+                            s.preview_rms_l = 0.0;
+                        }
+                        if s.preview_rms_r < 0.0005 {
+                            s.preview_rms_r = 0.0;
+                        }
                     }
 
                     return;
@@ -1419,33 +1495,45 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 // and exact clip boundary alignment.
                 let frame_samples_l = {
                     cb_frame_l.resize(frames, 0.0_f32);
-                    for v in &mut cb_frame_l[..frames] { *v = 0.0; }
+                    for v in &mut cb_frame_l[..frames] {
+                        *v = 0.0;
+                    }
                     &mut cb_frame_l
                 };
                 let frame_samples_r = {
                     cb_frame_r.resize(frames, 0.0_f32);
-                    for v in &mut cb_frame_r[..frames] { *v = 0.0; }
+                    for v in &mut cb_frame_r[..frames] {
+                        *v = 0.0;
+                    }
                     &mut cb_frame_r
                 };
                 let num_tracks_total = snap.tracks.len();
                 let track_rms_accum = {
                     cb_track_rms.resize(num_tracks_total, 0.0_f32);
-                    for v in &mut cb_track_rms[..num_tracks_total] { *v = 0.0; }
+                    for v in &mut cb_track_rms[..num_tracks_total] {
+                        *v = 0.0;
+                    }
                     &mut cb_track_rms
                 };
                 let track_rms_pre_accum = {
                     cb_track_rms_pre.resize(num_tracks_total, 0.0_f32);
-                    for v in &mut cb_track_rms_pre[..num_tracks_total] { *v = 0.0; }
+                    for v in &mut cb_track_rms_pre[..num_tracks_total] {
+                        *v = 0.0;
+                    }
                     &mut cb_track_rms_pre
                 };
                 let track_rms_l_accum = {
                     cb_track_rms_l.resize(num_tracks_total, 0.0_f32);
-                    for v in &mut cb_track_rms_l[..num_tracks_total] { *v = 0.0; }
+                    for v in &mut cb_track_rms_l[..num_tracks_total] {
+                        *v = 0.0;
+                    }
                     &mut cb_track_rms_l
                 };
                 let track_rms_r_accum = {
                     cb_track_rms_r.resize(num_tracks_total, 0.0_f32);
-                    for v in &mut cb_track_rms_r[..num_tracks_total] { *v = 0.0; }
+                    for v in &mut cb_track_rms_r[..num_tracks_total] {
+                        *v = 0.0;
+                    }
                     &mut cb_track_rms_r
                 };
                 let mut master_rms_accum = 0.0_f32;
@@ -1580,7 +1668,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 if smooth_master_vol < 0.0 {
                     smooth_master_vol = snap.master_volume as f64;
                 }
-                smooth_master_vol += (snap.master_volume as f64 - smooth_master_vol) * (FX_SMOOTH_COEFF as f64 * frames as f64).min(1.0);
+                smooth_master_vol += (snap.master_volume as f64 - smooth_master_vol)
+                    * (FX_SMOOTH_COEFF as f64 * frames as f64).min(1.0);
 
                 // Grow track fx param cache to match current layout
                 while smooth_track_fx_params.len() < snap.tracks.len() {
@@ -1596,8 +1685,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         // Initialise missing entries with (name, value) — allocates strings
                         // only ONCE when the slot first appears.
                         if param_cache.len() < params.len() {
-                            for pi in param_cache.len()..params.len() {
-                                param_cache.push(params[pi].clone());
+                            for item in params.iter().skip(param_cache.len()) {
+                                param_cache.push(item.clone());
                             }
                         }
                         // One-pole smooth every param value toward its target (no allocation)
@@ -1614,8 +1703,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 for (si, (_, params)) in snap.master_effects.iter().enumerate() {
                     let param_cache = &mut smooth_master_fx_params[si];
                     if param_cache.len() < params.len() {
-                        for pi in param_cache.len()..params.len() {
-                            param_cache.push(params[pi].clone());
+                        for item in params.iter().skip(param_cache.len()) {
+                            param_cache.push(item.clone());
                         }
                     }
                     let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
@@ -1633,8 +1722,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     if !cs_raw.is_empty() {
                         let cache = &mut smooth_cstrip_params[ti];
                         if cache.len() < cs_raw.len() {
-                            for pi in cache.len()..cs_raw.len() {
-                                cache.push(cs_raw[pi].clone());
+                            for item in cs_raw.iter().skip(cache.len()) {
+                                cache.push(item.clone());
                             }
                         }
                         let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
@@ -1817,7 +1906,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                         1 => pool.reverse(),
                                         2 => {
                                             let down_start = pool.len();
-                                            let mid: Vec<u8> = pool[1..down_start.saturating_sub(1)].iter().rev().copied().collect();
+                                            let mid: Vec<u8> = pool
+                                                [1..down_start.saturating_sub(1)]
+                                                .iter()
+                                                .rev()
+                                                .copied()
+                                                .collect();
                                             pool.extend_from_slice(&mid);
                                         }
                                         3 => {
@@ -2099,7 +2193,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     per_track_sample[ti]
                                 };
                                 // Use pre-smoothed params if available, else raw snapshot
-                                let params_ref: &[(String, f32)] = if ti < smooth_track_fx_params.len()
+                                let params_ref: &[(String, f32)] = if ti
+                                    < smooth_track_fx_params.len()
                                     && fi < smooth_track_fx_params[ti].len()
                                     && smooth_track_fx_params[ti][fi].len() == fx_params.len()
                                 {
@@ -2119,17 +2214,16 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             }
                         }
                         // ── CStrip2 channel strip ──
-                        if ti < track_cstrip.len() {
+                        if ti < track_cstrip.len() && !track.cstrip2_bypass {
                             let cs_raw = &track.cstrip2_params;
                             if !cs_raw.is_empty() {
-                                let cs_params: &[(String, f32)] =
-                                    if ti < smooth_cstrip_params.len()
-                                        && smooth_cstrip_params[ti].len() == cs_raw.len()
-                                    {
-                                        &smooth_cstrip_params[ti]
-                                    } else {
-                                        cs_raw
-                                    };
+                                let cs_params: &[(String, f32)] = if ti < smooth_cstrip_params.len()
+                                    && smooth_cstrip_params[ti].len() == cs_raw.len()
+                                {
+                                    &smooth_cstrip_params[ti]
+                                } else {
+                                    cs_raw
+                                };
                                 let (cl, cr) = track_cstrip[ti].process(
                                     per_track_sample[ti].0,
                                     per_track_sample[ti].1,
@@ -2148,12 +2242,20 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // Grow smoothing arrays to match track count
                     while smooth_pan.len() < num_tracks {
                         let ti = smooth_pan.len();
-                        let init = if ti < snap.tracks.len() { snap.tracks[ti].pan as f64 } else { 0.0 };
+                        let init = if ti < snap.tracks.len() {
+                            snap.tracks[ti].pan as f64
+                        } else {
+                            0.0
+                        };
                         smooth_pan.push(init);
                     }
                     while smooth_vol.len() < num_tracks {
                         let ti = smooth_vol.len();
-                        let init = if ti < snap.tracks.len() { snap.tracks[ti].volume as f64 } else { 1.0 };
+                        let init = if ti < snap.tracks.len() {
+                            snap.tracks[ti].volume as f64
+                        } else {
+                            1.0
+                        };
                         smooth_vol.push(init);
                     }
                     // One-pole smoothing coefficient — ~1 ms time constant @ 44.1kHz
@@ -2253,17 +2355,21 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     mix_l += 1.0e-24;
                     mix_r += 1.0e-24;
 
-                    frame_samples_l[frame_idx] = mix_l.clamp(-1.0, 1.0) as f32;
-                    frame_samples_r[frame_idx] = mix_r.clamp(-1.0, 1.0) as f32;
+                    frame_samples_l[frame_idx] = mix_l as f32;
+                    frame_samples_r[frame_idx] = mix_r as f32;
 
                     // Accumulate post-everything stereo RMS (final output)
-                    master_rms_post_l_accum += frame_samples_l[frame_idx] * frame_samples_l[frame_idx];
-                    master_rms_post_r_accum += frame_samples_r[frame_idx] * frame_samples_r[frame_idx];
+                    master_rms_post_l_accum +=
+                        frame_samples_l[frame_idx] * frame_samples_l[frame_idx];
+                    master_rms_post_r_accum +=
+                        frame_samples_r[frame_idx] * frame_samples_r[frame_idx];
 
                     // Accumulate per-track squared samples for RMS (mono + stereo)
                     // Use post-pan levels so track meters match what goes into master bus
                     for ti in 0..num_tracks {
-                        if ti >= snap.tracks.len() { break; }
+                        if ti >= snap.tracks.len() {
+                            break;
+                        }
                         let (tl, tr) = per_track_sample[ti];
                         let vol = smooth_vol.get(ti).copied().unwrap_or(1.0);
                         let pan = smooth_pan.get(ti).copied().unwrap_or(0.0);
@@ -2292,6 +2398,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 // Preview plays even when transport is stopped.
                 // Preview is mono — add equally to both channels.
                 let mut preview_pos_local = snap.preview_pos;
+                let mut preview_sample_rms_accum_l = 0.0_f32;
+                let mut preview_sample_rms_accum_r = 0.0_f32;
                 if snap.preview_playing && !snap.preview_samples.is_empty() {
                     let preview_ratio = snap.preview_sample_rate as f64 / sample_rate;
                     let preview_end = snap.preview_end_sample; // 0 = play to file end
@@ -2325,8 +2433,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 let frac = (src_pos2 - src_pos2.floor()) as f32;
                                 let interp = s0 + (s1 - s0) * frac;
                                 let ps = (interp * snap.master_volume).clamp(-1.0, 1.0);
-                                frame_samples_l[fi] = (frame_samples_l[fi] + ps).clamp(-1.0, 1.0);
-                                frame_samples_r[fi] = (frame_samples_r[fi] + ps).clamp(-1.0, 1.0);
+                                frame_samples_l[fi] += ps;
+                                frame_samples_r[fi] += ps;
+                                preview_sample_rms_accum_l += ps * ps;
+                                preview_sample_rms_accum_r += ps * ps;
                                 preview_pos_local += 1;
                                 continue;
                             } else {
@@ -2342,10 +2452,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         let frac = (src_pos - src_pos.floor()) as f32;
                         let interp = s0 + (s1 - s0) * frac;
                         let preview_sample = interp * snap.master_volume;
-                        frame_samples_l[fi] =
-                            (frame_samples_l[fi] + preview_sample).clamp(-1.0, 1.0);
-                        frame_samples_r[fi] =
-                            (frame_samples_r[fi] + preview_sample).clamp(-1.0, 1.0);
+                        frame_samples_l[fi] += preview_sample;
+                        frame_samples_r[fi] += preview_sample;
+                        preview_sample_rms_accum_l += preview_sample * preview_sample;
+                        preview_sample_rms_accum_r += preview_sample * preview_sample;
                         preview_pos_local += 1;
                     }
                 }
@@ -2424,17 +2534,25 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         // Master stereo RMS
                         let ml = (master_rms_l_accum / rms_frame_count as f32).sqrt();
                         s.master_rms_l = s.master_rms_l * 0.85 + ml * 0.15;
-                        if s.master_rms_l < 0.0005 { s.master_rms_l = 0.0; }
+                        if s.master_rms_l < 0.0005 {
+                            s.master_rms_l = 0.0;
+                        }
                         let mr = (master_rms_r_accum / rms_frame_count as f32).sqrt();
                         s.master_rms_r = s.master_rms_r * 0.85 + mr * 0.15;
-                        if s.master_rms_r < 0.0005 { s.master_rms_r = 0.0; }
+                        if s.master_rms_r < 0.0005 {
+                            s.master_rms_r = 0.0;
+                        }
                         // Master post-everything stereo RMS
                         let mpl = (master_rms_post_l_accum / rms_frame_count as f32).sqrt();
                         s.master_rms_post_l = s.master_rms_post_l * 0.85 + mpl * 0.15;
-                        if s.master_rms_post_l < 0.0005 { s.master_rms_post_l = 0.0; }
+                        if s.master_rms_post_l < 0.0005 {
+                            s.master_rms_post_l = 0.0;
+                        }
                         let mpr = (master_rms_post_r_accum / rms_frame_count as f32).sqrt();
                         s.master_rms_post_r = s.master_rms_post_r * 0.85 + mpr * 0.15;
-                        if s.master_rms_post_r < 0.0005 { s.master_rms_post_r = 0.0; }
+                        if s.master_rms_post_r < 0.0005 {
+                            s.master_rms_post_r = 0.0;
+                        }
                     } else {
                         s.master_rms *= 0.85;
                         s.master_rms_pre *= 0.85;
@@ -2445,26 +2563,48 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
 
                     // Per-track stereo RMS
-                    if s.track_rms_l.len() != n { s.track_rms_l.resize(n, 0.0); }
-                    if s.track_rms_r.len() != n { s.track_rms_r.resize(n, 0.0); }
+                    if s.track_rms_l.len() != n {
+                        s.track_rms_l.resize(n, 0.0);
+                    }
+                    if s.track_rms_r.len() != n {
+                        s.track_rms_r.resize(n, 0.0);
+                    }
                     if rms_frame_count > 0 {
                         for (i, v) in s.track_rms_l.iter_mut().enumerate() {
                             let r = if i < track_rms_l_accum.len() {
                                 (track_rms_l_accum[i] / rms_frame_count as f32).sqrt()
-                            } else { 0.0 };
+                            } else {
+                                0.0
+                            };
                             *v = *v * 0.85 + r * 0.15;
-                            if *v < 0.0005 { *v = 0.0; }
+                            if *v < 0.0005 {
+                                *v = 0.0;
+                            }
                         }
                         for (i, v) in s.track_rms_r.iter_mut().enumerate() {
                             let r = if i < track_rms_r_accum.len() {
                                 (track_rms_r_accum[i] / rms_frame_count as f32).sqrt()
-                            } else { 0.0 };
+                            } else {
+                                0.0
+                            };
                             *v = *v * 0.85 + r * 0.15;
-                            if *v < 0.0005 { *v = 0.0; }
+                            if *v < 0.0005 {
+                                *v = 0.0;
+                            }
                         }
                     } else {
-                        for v in s.track_rms_l.iter_mut() { *v *= 0.85; if *v < 0.0005 { *v = 0.0; } }
-                        for v in s.track_rms_r.iter_mut() { *v *= 0.85; if *v < 0.0005 { *v = 0.0; } }
+                        for v in s.track_rms_l.iter_mut() {
+                            *v *= 0.85;
+                            if *v < 0.0005 {
+                                *v = 0.0;
+                            }
+                        }
+                        for v in s.track_rms_r.iter_mut() {
+                            *v *= 0.85;
+                            if *v < 0.0005 {
+                                *v = 0.0;
+                            }
+                        }
                     }
 
                     // Per-effect gain reduction for master rack
@@ -2506,6 +2646,29 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             && !s.preview_loop_enabled
                         {
                             s.preview_playing = false;
+                        }
+                    }
+
+                    // Preview sample RMS (playing path)
+                    if frames > 0 {
+                        let prv_l = (preview_sample_rms_accum_l / frames as f32).sqrt();
+                        let prv_r = (preview_sample_rms_accum_r / frames as f32).sqrt();
+                        s.preview_rms_l = s.preview_rms_l * 0.85 + prv_l * 0.15;
+                        s.preview_rms_r = s.preview_rms_r * 0.85 + prv_r * 0.15;
+                        if s.preview_rms_l < 0.0005 {
+                            s.preview_rms_l = 0.0;
+                        }
+                        if s.preview_rms_r < 0.0005 {
+                            s.preview_rms_r = 0.0;
+                        }
+                    } else {
+                        s.preview_rms_l *= 0.85;
+                        s.preview_rms_r *= 0.85;
+                        if s.preview_rms_l < 0.0005 {
+                            s.preview_rms_l = 0.0;
+                        }
+                        if s.preview_rms_r < 0.0005 {
+                            s.preview_rms_r = 0.0;
                         }
                     }
                 }

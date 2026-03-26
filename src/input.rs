@@ -363,8 +363,6 @@ impl InputState {
             // that widgets can detect click completion (pressed + released on same widget).
             // active_widget is cleared at the START of the next frame in begin_frame().
         }
-
-
     }
 
     pub fn on_key_down(&mut self, key: sdl2::keyboard::Keycode) {
