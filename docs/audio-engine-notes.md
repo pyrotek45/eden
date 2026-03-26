@@ -88,12 +88,38 @@
 
 - Runs after effect chain, before pan/volume
 - 10 parameters: Treble, Mid, Bass, TrebFreq, BassFreq, LoCap, HiCap, Compress, CompSpd, Output
-- Defaults at neutral (no coloring): all EQ at 0.5, LoCap=1.0, HiCap=0.0, Compress=0.0, Output=0.33
+- Defaults at neutral (no coloring): all EQ at 0.5, LoCap=0.0, HiCap=0.0, Compress=0.0, Output=0.33
+- LoCap: 0.0 = off, 1.0 = full high-pass cut (matches HiCap direction)
+- HiCap: 0.0 = off, 1.0 = full low-pass cut
 - 6-pole RC hi-pass + lo-pass (capacitor filters)
 - 3-band Triplet EQ (IIR first-order crossover)
+  - bass_coef = bass_frq² × 0.499 + 0.001 (default bass_frq=0.15, coef≈0.012)
+  - treb_coef = treb_frq² × 0.499 + 0.001 (default treb_frq=0.55, coef≈0.152)
+  - Mid band = LP(treb_coef) - LP(bass_coef)
 - ButterComp dual-rail compressor
 - Spiral soft-clip output saturation
 - All params smoothed per-callback (same one-pole as FX params)
+
+## Seek Note Catching
+
+- On first frame after seek/play, notes that span the seek position are triggered
+- Catch window: `clip_pos >= note_start && clip_pos < note_start + note.length_beats`
+- Prevents silent notes when seeking into the middle of a long note
+- Duplicate voice check: skips if a matching unreleased voice already exists
+
+## Metering
+
+- Peak: instant attack, release `0.9997^frames`
+- RMS: `sum_sq / frame_count` per callback
+- Thread-safe: `AtomicU32` with `f32::to_bits` / `from_bits`
+- VU peak needle: fast attack (coeff 0.6), slow linear decay (0.012/frame ≈ 3s full)
+- Track meters show post-pan, pre-master-effects level
+
+## Audio Engine Reset
+
+- Options menu: "Reset Audio Engine" button
+- Sets `panic` flag on AudioShared — clears all voices immediately
+- Use as fallback if audio freezes or stuck notes occur
 
 ## Status
 
@@ -116,6 +142,9 @@
 | Anti-click seek fade | Done | audio.rs |
 | Export fade-in/out | Done | render.rs |
 | Pre-allocation | Done | audio.rs |
+| Seek note catching | Done | audio.rs |
+| Audio engine reset (panic) | Done | views.rs, audio.rs |
+| VU peak needle metering | Done | main.rs, widgets.rs |
 | Dither on 16-bit export | TODO | render.rs |
 | Lookahead limiter | TODO | — |
 | Crossfades between clips | TODO | — |

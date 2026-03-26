@@ -2467,6 +2467,7 @@ pub fn vu_meter(
     theme: &Theme,
     x: i32, y: i32, w: i32, h: i32,
     needle_pos: f32,
+    peak_pos: f32,
 ) {
     use sdl2::gfx::primitives::DrawRenderer;
     if w < 30 || h < 20 { return; }
@@ -2598,6 +2599,26 @@ pub fn vu_meter(
     // The visible pivot is at the bottom of the widget inner area.
     let vis_pivot_y = (inner_y + inner_h - 3) as f64;
     let vis_pivot_x = cx; // bottom center
+
+    // ── Peak hold needle (red, slow decay) ──
+    {
+        let pp = (peak_pos as f64).clamp(0.0, 1.0);
+        let peak_angle_deg = start_deg + pp * sweep;
+        let peak_angle_rad = peak_angle_deg.to_radians();
+        let peak_len = arc_r - 7.0;
+        let pkx = cx + peak_len * peak_angle_rad.cos();
+        let pky = arc_cy + peak_len * peak_angle_rad.sin();
+        let pdx = pkx - vis_pivot_x;
+        let pdy = pky - vis_pivot_y;
+        let pdist = (pdx * pdx + pdy * pdy).sqrt();
+        if pdist > 2.0 && pp > 0.01 {
+            let _ = canvas.aa_line(
+                vis_pivot_x as i16, vis_pivot_y as i16,
+                pkx as i16, pky as i16,
+                sdl2::pixels::Color::RGBA(200, 40, 30, 120));
+        }
+    }
+
     // But the needle line should point toward (nx, ny) from the visible pivot
     // Direction from vis_pivot to the arc point
     let dx = nx - vis_pivot_x;

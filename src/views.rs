@@ -4778,7 +4778,8 @@ fn draw_bottom_mixer(
         return;
     }
 
-    let strip_w = 260i32;
+    let strip_w_full = 260i32;
+    let strip_w_slim = 60i32;
     let strip_gap = 6i32;
     let track_count = state.project.tracks.len();
     let scrollbar_h = 14i32;
@@ -4791,7 +4792,17 @@ fn draw_bottom_mixer(
         .iter()
         .filter(|t| t.track_type != crate::models::TrackType::Automation)
         .count() as i32;
-    let total_content_w = non_auto_count * (strip_w + strip_gap) + 12;
+    let _ = non_auto_count; // used only for legacy uniform-width fallback
+    // Compute total width accounting for slim tracks
+    let total_content_w = {
+        let mut tw = 12i32;
+        for t in &state.project.tracks {
+            if t.track_type == crate::models::TrackType::Automation { continue; }
+            let sw = if state.mixer_slim_tracks.contains(&t.id) { strip_w_slim } else { strip_w_full };
+            tw += sw + strip_gap;
+        }
+        tw
+    };
     let needs_scroll = total_content_w > content_w;
     let max_scroll = if needs_scroll {
         (total_content_w - content_w).max(0) as f32
@@ -4880,6 +4891,39 @@ fn draw_bottom_mixer(
         }
     }
 
+    /// Draw dB labels to the right of a stereo meter pair.
+    /// `label_x` is the x position where labels start (right edge of right meter + gap).
+    fn draw_meter_db_labels(
+        canvas: &mut Canvas<Window>, theme: &Theme,
+        label_x: i32, y: i32, h_px: i32, max_label_w: i32,
+    ) {
+        const DB_FLOOR: f64 = -60.0;
+        const DB_CEIL:  f64 =  12.0;
+        const DB_RANGE: f64 = DB_CEIL - DB_FLOOR;
+        let label_scale = 1i32; // tiny pixel font
+        let gh = 5 * label_scale; // glyph height at scale=1
+        // Draw labels at 0, -10, -20, -30, -40, -50, +10
+        for &db in &[0.0_f64, -10.0, -20.0, -30.0, -40.0, -50.0, 10.0] {
+            let frac = ((db - DB_FLOOR) / DB_RANGE) as f32;
+            let ty = y + h_px - (frac * h_px as f32) as i32;
+            if ty > y + gh / 2 && ty < y + h_px - gh / 2 {
+                let label = if db == 0.0 {
+                    " 0".to_string()
+                } else {
+                    format!("{}", db as i32)
+                };
+                let lx = label_x;
+                let ly = ty - gh / 2; // vertically center on the tick
+                let col = if db >= 0.0 {
+                    sdl2::pixels::Color::RGBA(220, 90, 70, 180)
+                } else {
+                    sdl2::pixels::Color::RGBA(120, 130, 140, 140)
+                };
+                draw_pixel_label_scaled(canvas, theme, &label, lx, ly, max_label_w, col, label_scale);
+            }
+        }
+    }
+
     // Helper: draw peak hold line on a meter
     fn draw_peak_hold(canvas: &mut Canvas<Window>, ph: f32, x: i32, y: i32, w_px: u32, h_px: i32) {
         const DB_FLOOR: f64 = -60.0;
@@ -4902,13 +4946,16 @@ fn draw_bottom_mixer(
     }
 
     // ── Per-track strips ──
-    let mut strip_idx = 0;
+    let mut _strip_idx = 0;
+    let mut strip_x_accum = 8i32; // accumulated x position for variable-width strips
     for i in 0..track_count {
         if state.project.tracks[i].track_type == crate::models::TrackType::Automation {
             continue;
         }
 
-        let x = 8 + strip_idx * (strip_w + strip_gap) - scroll_offset;
+        let is_slim = state.mixer_slim_tracks.contains(&state.project.tracks[i].id);
+        let strip_w = if is_slim { strip_w_slim } else { strip_w_full };
+        let x = strip_x_accum - scroll_offset;
         let sy = top + 4;
         let sh = (h - 8).max(10);
         let track_id = state.project.tracks[i].id;
@@ -4992,11 +5039,12 @@ fn draw_bottom_mixer(
         let content_bottom = sy + sh - bottom_bar_h;
         let avail_h = (content_bottom - content_top).max(10);
 
-        // ── VU meter gauge (top of content area, full width) ──
-        let vu_h = 73i32.min(avail_h / 3);
-        if vu_h >= 30 {
+        // ── VU meter gauge (top of content area, full width) — skip in slim mode ──
+        let vu_h = if !is_slim { 73i32.min(avail_h / 3) } else { 0 };
+        if vu_h >= 30 && !is_slim {
             let vu_pos = state.meters.vu_needle.get(i).copied().unwrap_or(0.0);
-            vu_meter(canvas, &state.theme, x + 6, content_top, strip_w - 12, vu_h, vu_pos);
+            let vu_peak = state.meters.vu_peak_needle.get(i).copied().unwrap_or(0.0);
+            vu_meter(canvas, &state.theme, x + 6, content_top, strip_w - 12, vu_h, vu_pos, vu_peak);
         }
 
         let below_vu = content_top + if vu_h >= 30 { vu_h + 8 } else { 0 }; // more padding after VU
@@ -5093,6 +5141,16 @@ fn draw_bottom_mixer(
         draw_peak_hold(canvas, ph_l, meter_x, below_vu, meter_bar_w, fader_h);
         draw_peak_hold(canvas, ph_r, meter_x + meter_bar_w as i32 + meter_gap, below_vu, meter_bar_w, fader_h);
 
+        // dB labels to the right of the meters
+        // dB labels — skip in slim mode
+        if !is_slim {
+            let labels_x = meter_x + meter_bar_w as i32 * 2 + meter_gap + 2;
+            let label_max_w = strip_w as i32 - (labels_x - x) - 2;
+            if label_max_w > 8 {
+                draw_meter_db_labels(canvas, &state.theme, labels_x, below_vu, fader_h, label_max_w);
+            }
+        }
+
         // Clip LEDs above meters
         for (ch, mx_off) in [(0i32, 0i32), (1i32, meter_bar_w as i32 + meter_gap)] {
             let clip_flag = if ch == 0 {
@@ -5123,10 +5181,10 @@ fn draw_bottom_mixer(
             meter_x + meter_bar_w as i32 + meter_gap, below_vu + fader_h + 1, meter_bar_w as i32,
             sdl2::pixels::Color::RGBA(100, 110, 120, 140), 1);
 
-        // ── Right column: CStrip2 knobs + EQ + Comp curve ──
+        // ── Right column: CStrip2 knobs + EQ + Comp curve (skip in slim mode) ──
         let right_x = x + 8 + left_col_w + 10;
         let right_w = strip_w - (right_x - x) - 6;
-        if right_w > 40 && below_vu_avail > 60 {
+        if !is_slim && right_w > 40 && below_vu_avail > 60 {
             let cs_descs = crate::modules::get_param_descs("CStrip2");
             if state.project.tracks[i].cstrip2_params.is_empty() && !cs_descs.is_empty() {
                 state.project.tracks[i].cstrip2_params = cs_descs
@@ -5168,26 +5226,6 @@ fn draw_bottom_mixer(
                 draw_pixel_label(canvas, &state.theme, desc.name,
                     kx - cell_w / 2, ky - knob_r - 9, cell_w,
                     sdl2::pixels::Color::RGBA(130, 135, 145, 170));
-                // dB value below gain knobs
-                let db_text: Option<String> = match desc.id {
-                    "treble" | "mid" | "bass" => {
-                        let gain = (val * 2.0 - 1.0) * 0.5 + 1.0;
-                        let db = 20.0 * gain.log10();
-                        if db.abs() < 0.05 { Some("0.0dB".into()) }
-                        else { Some(format!("{:+.1}dB", db)) }
-                    }
-                    "output" => {
-                        let db = (val - 0.5) * 100.0;
-                        if db.abs() < 0.05 { Some("0.0dB".into()) }
-                        else { Some(format!("{:+.1}dB", db)) }
-                    }
-                    _ => None,
-                };
-                if let Some(ref txt) = db_text {
-                    draw_pixel_label_scaled(canvas, &state.theme, txt,
-                        kx - cell_w / 2, ky + knob_r + 2, cell_w,
-                        sdl2::pixels::Color::RGBA(160, 170, 180, 200), 1);
-                }
                 if changed {
                     let delta = val - cur_val;
                     if let Some(entry) = state.project.tracks[i]
@@ -5234,11 +5272,11 @@ fn draw_bottom_mixer(
                 let bass = state.project.tracks[i].cstrip2_params.iter()
                     .find(|(id, _)| id == "bass").map(|(_, v)| *v).unwrap_or(0.5);
                 let treb_frq = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "treb_frq").map(|(_, v)| *v).unwrap_or(0.5);
+                    .find(|(id, _)| id == "treb_frq").map(|(_, v)| *v).unwrap_or(0.55);
                 let bass_frq = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "bass_frq").map(|(_, v)| *v).unwrap_or(0.5);
+                    .find(|(id, _)| id == "bass_frq").map(|(_, v)| *v).unwrap_or(0.15);
                 let lo_cap = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == "lo_cap").map(|(_, v)| *v).unwrap_or(1.0);
+                    .find(|(id, _)| id == "lo_cap").map(|(_, v)| *v).unwrap_or(0.0);
                 let hi_cap = state.project.tracks[i].cstrip2_params.iter()
                     .find(|(id, _)| id == "hi_cap").map(|(_, v)| *v).unwrap_or(0.0);
 
@@ -5251,14 +5289,14 @@ fn draw_bottom_mixer(
                 let sr = 44100.0_f64;
 
                 // Filter coefficients (matching DSP)
-                let hp_coef = if lo_cap < 1.0 {
-                    (1.0 - lo_cap as f64).powf(2.0) * 0.4995 + 0.0001
+                let hp_coef = if lo_cap > 0.0 {
+                    (lo_cap as f64).powf(2.0) * 0.4995 + 0.0001
                 } else { 0.0 };
                 let lp_coef = if hi_cap > 0.0 {
                     (hi_cap as f64).powf(2.0) * 0.4995 + 0.0001
                 } else { 0.0 };
                 let bass_coef = (bass_frq as f64) * (bass_frq as f64) * 0.499 + 0.001;
-                let treb_coef = (1.0 - treb_frq as f64) * (1.0 - treb_frq as f64) * 0.499 + 0.001;
+                let treb_coef = treb_frq as f64 * treb_frq as f64 * 0.499 + 0.001;
                 let bass_g  = ((bass as f64)   * 2.0 - 1.0) * 0.5 + 1.0;
                 let mid_g   = ((mid as f64)    * 2.0 - 1.0) * 0.5 + 1.0;
                 let treb_g  = ((treble as f64) * 2.0 - 1.0) * 0.5 + 1.0;
@@ -5441,13 +5479,14 @@ fn draw_bottom_mixer(
 
         // Pan knob with label
         if bottom_bar_h >= 28 {
+            let pan_knob_x = if is_slim { x + strip_w / 2 } else { x + 20 };
             let pan_knob_y = bottom_y + 14;
             let mut pan_val = state.project.tracks[i].pan;
             let mixer_pan_id = input.next_id();
             let pan_changed = knob(
                 canvas, input, &state.theme,
                 &KnobParams {
-                    id: mixer_pan_id, x: x + 20, y: pan_knob_y, radius: 10,
+                    id: mixer_pan_id, x: pan_knob_x, y: pan_knob_y, radius: 10,
                     min: -1.0, max: 1.0, sensitivity: 0.008,
                     label: None, bipolar: true, default_value: Some(0.0),
                     hint: Some("Pan".into()), snap_points: vec![0.0],
@@ -5487,11 +5526,19 @@ fn draw_bottom_mixer(
         {
             let mute_on = state.project.tracks[i].mute;
             let solo_on = state.project.tracks[i].solo;
-            let btn_y = bottom_y + 10;
+            let (mute_x, solo_x, btn_y, btn_sz) = if is_slim {
+                // In slim mode: M and S side by side, centered, below pan
+                let bsz = 14i32;
+                let total = bsz * 2 + 4;
+                let start_x = x + (strip_w - total) / 2;
+                (start_x, start_x + bsz + 4, bottom_y + 26, bsz)
+            } else {
+                (x + 42, x + 64, bottom_y + 10, 18i32)
+            };
             let mix_mute_id = input.next_id();
             let mute_clicked = toggle_button(
                 canvas, input, &state.theme,
-                x + 42, btn_y, 18,
+                mute_x, btn_y, btn_sz,
                 state.theme.mute_on, mute_on, mix_mute_id, "M", Some("Mute track"),
             );
             if mute_clicked {
@@ -5516,7 +5563,7 @@ fn draw_bottom_mixer(
             let mix_solo_id = input.next_id();
             let solo_clicked = toggle_button(
                 canvas, input, &state.theme,
-                x + 64, btn_y, 18,
+                solo_x, btn_y, btn_sz,
                 state.theme.solo_on, solo_on, mix_solo_id, "S", Some("Solo track"),
             );
             if solo_clicked {
@@ -5547,6 +5594,36 @@ fn draw_bottom_mixer(
             }
         }
 
+        // ── Slim / Expand toggle button (bottom of strip) ──
+        {
+            let toggle_y = sy + sh - 16;
+            let toggle_w = if is_slim { strip_w - 4 } else { 24 };
+            let toggle_x = x + (strip_w - toggle_w) / 2;
+            let slim_btn_id = input.next_id();
+            let label = if is_slim { "+" } else { "-" };
+            let hint = if is_slim { "Expand strip" } else { "Collapse to slim" };
+            let clicked = button(
+                canvas, input, &state.theme,
+                &ButtonParams {
+                    id: slim_btn_id,
+                    x: toggle_x, y: toggle_y,
+                    width: toggle_w, height: 14,
+                    label: label.into(),
+                    toggled: is_slim,
+                    icon: ButtonIcon::None,
+                    hint: Some(hint.into()),
+                    ..Default::default()
+                },
+            );
+            if clicked {
+                if is_slim {
+                    state.mixer_slim_tracks.remove(&track_id);
+                } else {
+                    state.mixer_slim_tracks.insert(track_id);
+                }
+            }
+        }
+
         // Strip border
         let border_col = if selected {
             Theme::c(state.theme.accent)
@@ -5560,7 +5637,8 @@ fn draw_bottom_mixer(
         canvas.set_draw_color(border_col);
         let _ = canvas.draw_rect(Rect::new(x, sy, strip_w as u32, sh as u32));
 
-        strip_idx += 1;
+        strip_x_accum += strip_w + strip_gap;
+        _strip_idx += 1;
     }
 
     canvas.set_clip_rect(None);
@@ -5676,6 +5754,15 @@ fn draw_bottom_mixer(
     draw_peak_hold(canvas, state.meters.master_peak_hold_l, m_meter_x, m_fader_top, m_meter_bar_w, m_fader_h);
     draw_peak_hold(canvas, state.meters.master_peak_hold_r,
         m_meter_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
+
+    // dB labels to the right of master meters
+    {
+        let m_labels_x = m_meter_x + m_meter_bar_w as i32 * 2 + m_meter_gap + 2;
+        let m_label_max_w = mx + master_strip_w - m_labels_x - 4;
+        if m_label_max_w > 8 {
+            draw_meter_db_labels(canvas, &state.theme, m_labels_x, m_fader_top, m_fader_h, m_label_max_w);
+        }
+    }
 
     // Master clip LEDs
     for (ch, (flag, mx_off)) in [
@@ -11030,7 +11117,9 @@ fn draw_left_panel_themes(
         input.scroll_y = 0;
     }
 
-    // Clip drawing to available area
+    // Clip drawing to the content area below the header
+    canvas.set_clip_rect(Rect::new(0, list_top, w as u32, available_h as u32));
+
     for (i, theme) in all_themes.iter().enumerate() {
         let iy = list_top + i as i32 * (item_h + 4) - state.theme_scroll;
         if iy + item_h < list_top {
@@ -11186,6 +11275,9 @@ fn draw_left_panel_themes(
             state.set_theme_by_name(&theme.name.clone());
         }
     }
+
+    // Remove clip rect before drawing scrollbar (which may extend into header)
+    canvas.set_clip_rect(None);
 
     // ── Scrollbar indicator ──
     if total_content_h > available_h && available_h > 10 {
@@ -14503,7 +14595,7 @@ fn draw_midi_export_popup(
 fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
     let w = state.window_width as i32;
     let popup_w = 340i32;
-    let popup_h = 500i32;
+    let popup_h = 560i32;
     let popup_x = w / 2 - popup_w / 2;
     let popup_y = 60i32;
 
@@ -14932,6 +15024,39 @@ fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
                 Theme::c(state.theme.text_dim),
             );
         }
+    }
+
+    // ── Reset Audio Engine ──
+    let reset_y = row4_y + 70;
+    draw_pixel_label(
+        canvas,
+        &state.theme,
+        "AUDIO ENGINE",
+        popup_x + 12,
+        reset_y + 4,
+        140,
+        Theme::c(state.theme.text_secondary),
+    );
+    let reset_audio_id = input.next_id();
+    let reset_clicked = button(
+        canvas,
+        input,
+        &state.theme,
+        &ButtonParams {
+            id: reset_audio_id,
+            x: popup_x + 12,
+            y: reset_y + 18,
+            width: popup_w - 24,
+            height: 22,
+            label: "Reset Audio Engine".into(),
+            toggled: false,
+            icon: ButtonIcon::None,
+            hint: Some("Kill all voices and reset audio state (use if audio freezes)".into()),
+            ..Default::default()
+        },
+    );
+    if reset_clicked {
+        state.panic_triggered = true;
     }
 
     // Click outside to dismiss
@@ -22123,13 +22248,47 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 false,
             ),
             ("", "", false),
+            ("── Slim Track Mode ──", "", true),
+            (
+                "Slim / Expand button",
+                "Toggle at bottom of each strip",
+                false,
+            ),
+            (
+                "  Slim mode shows",
+                "Volume, pan, meter, mute/solo only",
+                false,
+            ),
+            (
+                "  Expand mode shows",
+                "Full CStrip2 EQ, compressor, rack",
+                false,
+            ),
+            ("", "", false),
+            ("── VU Meters ──", "", true),
+            (
+                "Green/yellow/red bar",
+                "Current RMS level with fast attack",
+                false,
+            ),
+            (
+                "Red peak needle",
+                "Slow-decay peak indicator for easy reading",
+                false,
+            ),
+            (
+                "dB labels",
+                "0, -10, -20, -30, -40, -50, +10 dB marks",
+                false,
+            ),
+            ("", "", false),
             ("── CStrip2 (per-track) ──", "", true),
             ("Treble", "High-frequency EQ gain (0.5 = unity)", false),
             ("Mid", "Mid-frequency EQ gain (0.5 = unity)", false),
             ("Bass", "Low-frequency EQ gain (0.5 = unity)", false),
             ("TrebFreq", "Treble band crossover frequency", false),
             ("BassFreq", "Bass band crossover frequency", false),
-            ("LoCap", "Hi-pass filter (1.0 = off, 0.0 = full cut)", false),
+            ("LoCap", "Hi-pass filter (0.0 = off, 1.0 = full cut)", false),
             ("HiCap", "Lo-pass filter (0.0 = off, 1.0 = full cut)", false),
             ("Compress", "Compressor amount (0.0 = off)", false),
             ("CompSpd", "Compressor speed / attack", false),
@@ -22153,6 +22312,13 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 false,
             ),
             ("Right-click knob", "Assign knob to automation lane", false),
+            ("", "", false),
+            ("── Audio Engine ──", "", true),
+            (
+                "Options > Reset Audio",
+                "Kill all voices if audio freezes",
+                false,
+            ),
             ("", "", false),
             ("── Automation ──", "", true),
             ("Click automation lane", "Add control point", false),

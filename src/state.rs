@@ -273,6 +273,8 @@ pub struct MeterState {
     // ── VU ballistic state (GUI-side, per track) ──
     /// VU needle position per track (0.0–1.0, with ballistic smoothing).
     pub vu_needle: Vec<f32>,
+    /// VU peak hold needle per track (0.0–1.0, slow-decay red indicator).
+    pub vu_peak_needle: Vec<f32>,
     // ── Master stereo metering ──
     pub master_rms_l: f32,
     pub master_rms_r: f32,
@@ -559,6 +561,8 @@ pub struct AppState {
     pub mixer_scroll_x: f32,
     /// Horizontal scroll offset for bottom panel mixer (pixels)
     pub bottom_mixer_scroll_x: f32,
+    /// Tracks in slim mixer mode (show only vol, pan, meter)
+    pub mixer_slim_tracks: std::collections::HashSet<u32>,
     /// Index of rack slot being dragged for reordering (source index)
     pub rack_reorder_drag: Option<usize>,
     /// Target insertion index while dragging
@@ -901,6 +905,7 @@ impl AppState {
             rack_scroll_x: 0.0,
             mixer_scroll_x: 0.0,
             bottom_mixer_scroll_x: 0.0,
+            mixer_slim_tracks: std::collections::HashSet::new(),
             rack_reorder_drag: None,
             rack_reorder_target: None,
             focused_panel: FocusedPanel::Arrangement,

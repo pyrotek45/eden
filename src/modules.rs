@@ -4586,9 +4586,9 @@ static CSTRIP2_PARAMS: &[ParamDesc] = &[
     ParamDesc { id: "treble",   name: "Treble",   default: 0.5, min: 0.0, max: 1.0, options: None },
     ParamDesc { id: "mid",      name: "Mid",      default: 0.5, min: 0.0, max: 1.0, options: None },
     ParamDesc { id: "bass",     name: "Bass",     default: 0.5, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "treb_frq", name: "TrebFreq", default: 0.5, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "bass_frq", name: "BassFreq", default: 0.5, min: 0.0, max: 1.0, options: None },
-    ParamDesc { id: "lo_cap",   name: "LoCap",    default: 1.0, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "treb_frq", name: "TrebFreq", default: 0.55, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "bass_frq", name: "BassFreq", default: 0.15, min: 0.0, max: 1.0, options: None },
+    ParamDesc { id: "lo_cap",   name: "LoCap",    default: 0.0, min: 0.0, max: 1.0, options: None },
     ParamDesc { id: "hi_cap",   name: "HiCap",    default: 0.0, min: 0.0, max: 1.0, options: None },
     ParamDesc { id: "compress", name: "Compress", default: 0.0, min: 0.0, max: 1.0, options: None },
     ParamDesc { id: "comp_spd", name: "CompSpd",  default: 0.0, min: 0.0, max: 1.0, options: None },
@@ -4603,18 +4603,18 @@ impl EffectModule for CStrip2 {
         let treble   = param_val(params, "treble",   0.5) as f64;
         let mid      = param_val(params, "mid",      0.5) as f64;
         let bass     = param_val(params, "bass",     0.5) as f64;
-        let treb_frq = param_val(params, "treb_frq", 0.5) as f64;
-        let bass_frq = param_val(params, "bass_frq", 0.5) as f64;
-        let lo_cap   = param_val(params, "lo_cap",   1.0) as f64;
+        let treb_frq = param_val(params, "treb_frq", 0.55) as f64;
+        let bass_frq = param_val(params, "bass_frq", 0.15) as f64;
+        let lo_cap   = param_val(params, "lo_cap",   0.0) as f64;
         let hi_cap   = param_val(params, "hi_cap",   0.0) as f64;
         let compress = param_val(params, "compress", 0.0) as f64;
         let comp_spd = param_val(params, "comp_spd", 0.0) as f64;
         let output   = param_val(params, "output",   0.5) as f64;
 
         // ── Hi-pass cap (lo_cap) ─────────────────────────────────────────
-        // lo_cap=1.0 → no HP filter; 0.0 → aggressive cut
-        let hp_coef = if lo_cap < 1.0 {
-            (1.0 - lo_cap).powf(2.0) * 0.4995 + 0.0001
+        // lo_cap=0.0 → no HP filter; 1.0 → aggressive HP cut
+        let hp_coef = if lo_cap > 0.0 {
+            lo_cap.powf(2.0) * 0.4995 + 0.0001
         } else {
             0.0
         };
@@ -4645,7 +4645,7 @@ impl EffectModule for CStrip2 {
         // Bass: first-order IIR; treble is complementary; mid fills the gap
         // bass_frq 0..1 → LP cutoff coeff 0.001 .. 0.499
         let bass_coef = bass_frq * bass_frq * 0.499 + 0.001;
-        let treb_coef = (1.0 - treb_frq) * (1.0 - treb_frq) * 0.499 + 0.001;
+        let treb_coef = treb_frq * treb_frq * 0.499 + 0.001;
 
         // Low band (LP)
         self.tri_la = self.tri_la * (1.0 - bass_coef) + l * bass_coef;

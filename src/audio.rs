@@ -1561,7 +1561,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     prev_clip_pos < note_start && clip_pos >= note_start;
                                 let catch_on_start = is_first_frame
                                     && clip_pos >= note_start
-                                    && clip_pos < note_start + beats_per_sample * 2.0
+                                    && clip_pos < note_start + note.length_beats
                                     && !voices.iter().any(|v| {
                                         v.track_idx == ti
                                             && v.original_pitch == note.pitch
@@ -2056,10 +2056,13 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
 
                     // ── Apply master rack effects to the stereo mix ──
-                    // Capture pre-effect master level
+                    // Capture pre-effect master level (stereo L/R meters use this
+                    // so they match the track meters which are also pre-master-effects)
                     {
                         let ms = (mix_l + mix_r) * 0.5;
                         master_rms_pre_accum += (ms * ms) as f32;
+                        master_rms_l_accum += (mix_l * mix_l) as f32;
+                        master_rms_r_accum += (mix_r * mix_r) as f32;
                     }
                     for (fi, (_, fx_params)) in snap.master_effects.iter().enumerate() {
                         if fi < master_effects.len() {
@@ -2087,8 +2090,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     {
                         let ms = (mix_l + mix_r) * 0.5;
                         master_rms_accum += (ms * ms) as f32;
-                        master_rms_l_accum += (mix_l * mix_l) as f32;
-                        master_rms_r_accum += (mix_r * mix_r) as f32;
                     }
 
                     mix_l *= smooth_master_vol;
