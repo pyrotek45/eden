@@ -266,6 +266,9 @@ pub struct MeterState {
     pub track_peak_hold_l: Vec<f32>,
     /// Per-track right-channel peak hold (slow decay).
     pub track_peak_hold_r: Vec<f32>,
+    /// Hold timer per track L/R: frames remaining before peak hold starts decaying.
+    pub track_peak_hold_frames_l: Vec<u32>,
+    pub track_peak_hold_frames_r: Vec<u32>,
     /// Per-track left-channel clip flag.
     pub track_clipping_l: Vec<bool>,
     /// Per-track right-channel clip flag.
@@ -287,6 +290,9 @@ pub struct MeterState {
     pub master_peak_r: f32,
     pub master_peak_hold_l: f32,
     pub master_peak_hold_r: f32,
+    /// Hold timer (UI frames) before the master pre peak hold starts decaying.
+    pub master_peak_hold_frames_l: u32,
+    pub master_peak_hold_frames_r: u32,
     /// Peak-hold for the post-everything (Out) meter pair.
     pub master_peak_hold_post_l: f32,
     pub master_peak_hold_post_r: f32,

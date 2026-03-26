@@ -27,7 +27,7 @@ use crate::widgets::*;
 // f(pos) = 1.0 + (pos - 0.75) / 0.25 * 1.0          → maps [0.75, 1.0] to [1.0, 2.0]
 
 /// Convert a slider position [0,1] to a gain multiplier [0,2].
-fn vol_pos_to_gain(pos: f32) -> f32 {
+pub(crate) fn vol_pos_to_gain(pos: f32) -> f32 {
     if pos <= 0.75 {
         // Cubic ramp from 0 to 1.0
         let t = pos / 0.75; // 0..1
@@ -39,7 +39,7 @@ fn vol_pos_to_gain(pos: f32) -> f32 {
 }
 
 /// Convert a gain multiplier [0,2] to a slider position [0,1].
-fn vol_gain_to_pos(gain: f32) -> f32 {
+pub(crate) fn vol_gain_to_pos(gain: f32) -> f32 {
     if gain <= 1.0 {
         // Inverse cubic
         0.75 * gain.max(0.0).cbrt()
@@ -50,7 +50,7 @@ fn vol_gain_to_pos(gain: f32) -> f32 {
 }
 
 /// Format a gain value as a dB string for display.
-fn gain_to_db_label(gain: f32) -> String {
+pub(crate) fn gain_to_db_label(gain: f32) -> String {
     if gain < 1e-6 {
         "-∞ dB".to_string()
     } else {
@@ -3051,34 +3051,35 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             let meter_h = (track_height - 6).max(2);
             let meter_x = w - meter_w - 2;
             let meter_y = y + 3;
-            // Background
+            // Use the same algorithm as draw_meter_bar / mixer meters:
+            //   DB_FLOOR = -60, DB_CEIL = +12  (72 dB range)
+            //   Colour via meter_color() for a consistent gradient everywhere.
+            const DB_FLOOR: f64 = -60.0;
+            const DB_CEIL: f64 = 12.0;
+            const DB_RANGE: f64 = DB_CEIL - DB_FLOOR; // 72
+                                                      // Background
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 20, 160));
             let _ = canvas.fill_rect(Rect::new(meter_x, meter_y, meter_w as u32, meter_h as u32));
-            // Level fill — dB-scaled for better visual range
-            // Convert linear RMS to dB, then map:
-            //   -60dB..0dB → 0.0..0.8  (0dB at 80% of meter height)
-            //   0dB..+6dB  → 0.8..1.0  (above 0dB = red zone)
             let db = if rms > 1e-6 {
                 20.0 * (rms as f64).log10()
             } else {
-                -60.0
+                DB_FLOOR
             };
-            let meter_frac = if db <= 0.0 {
-                ((db + 60.0) / 60.0).clamp(0.0, 0.8) as f32 * 1.0 // 0..0.8
-            } else {
-                (0.8 + (db / 6.0).min(1.0) * 0.2) as f32 // 0.8..1.0
-            };
-            let fill_h = (meter_frac * meter_h as f32) as i32;
-            let fill_y = meter_y + meter_h - fill_h;
-            let col = if db >= 0.0 {
-                sdl2::pixels::Color::RGBA(230, 60, 40, 220)
-            } else if meter_frac > 0.6 {
-                sdl2::pixels::Color::RGBA(220, 200, 40, 200)
-            } else {
-                sdl2::pixels::Color::RGBA(60, 200, 80, 200)
-            };
-            canvas.set_draw_color(col);
-            let _ = canvas.fill_rect(Rect::new(meter_x, fill_y, meter_w as u32, fill_h as u32));
+            let db_clamped = db.clamp(DB_FLOOR, DB_CEIL);
+            let frac = ((db_clamped - DB_FLOOR) / DB_RANGE) as f32; // 0.0 → 1.0
+            let fill_h = (frac * meter_h as f32) as i32;
+            // Segmented fill with meter_color(), same as draw_meter_bar
+            for row in 0..fill_h {
+                let py = meter_y + meter_h - 1 - row;
+                let row_frac = row as f64 / meter_h as f64;
+                let row_db = DB_FLOOR + row_frac * DB_RANGE;
+                let col = meter_color(row_db);
+                canvas.set_draw_color(col);
+                let _ = canvas.draw_line(
+                    sdl2::rect::Point::new(meter_x, py),
+                    sdl2::rect::Point::new(meter_x + meter_w - 1, py),
+                );
+            }
             // Clip indicator dot
             if state
                 .meters
@@ -4767,7 +4768,7 @@ pub fn draw_bottom_panel(
 }
 
 // ── Helper: dB-scaled meter color (module-level) ──
-fn meter_color(db: f64) -> sdl2::pixels::Color {
+pub(crate) fn meter_color(db: f64) -> sdl2::pixels::Color {
     if db >= 0.0 {
         sdl2::pixels::Color::RGBA(220, 40, 30, 240)
     } else {
@@ -5023,13 +5024,49 @@ fn draw_bottom_mixer(
         } else {
             sdl2::pixels::Color::RGBA(190, 195, 200, 220)
         };
+        // ── Expand / Slim toggle button (top-right corner of strip) ──
+        let expand_btn_sz = 14i32;
+        let expand_btn_x = x + strip_w - expand_btn_sz - 4;
+        let expand_btn_y = sy + cap_h as i32 + 1;
+        let expand_btn_id = input.next_id();
+        let expand_label = if is_slim { "+" } else { "-" };
+        let expand_hint = if is_slim {
+            "Expand strip"
+        } else {
+            "Collapse to slim"
+        };
+        let expand_clicked = button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: expand_btn_id,
+                x: expand_btn_x,
+                y: expand_btn_y,
+                width: expand_btn_sz,
+                height: expand_btn_sz,
+                label: expand_label.into(),
+                toggled: is_slim,
+                icon: ButtonIcon::None,
+                hint: Some(expand_hint.into()),
+                ..Default::default()
+            },
+        );
+        if expand_clicked {
+            if is_slim {
+                state.mixer_slim_tracks.remove(&track_id);
+            } else {
+                state.mixer_slim_tracks.insert(track_id);
+            }
+        }
+
         draw_pixel_label(
             canvas,
             &state.theme,
             &state.project.tracks[i].name.clone(),
             x + 6,
             name_y,
-            strip_w - 26,
+            strip_w - expand_btn_sz - 12,
             name_col,
         );
 
@@ -5323,54 +5360,12 @@ fn draw_bottom_mixer(
                     .collect();
             }
 
-            // ── CStrip2 bypass toggle ──
-            let bypass_on = state.project.tracks[i].cstrip2_bypass;
-            let byp_btn_x = right_x;
-            let byp_btn_y = below_vu + 4;
-            let byp_btn_w = 32i32;
-            let byp_btn_h = 14i32;
-            let byp_col = if bypass_on {
-                sdl2::pixels::Color::RGBA(220, 160, 50, 240)
-            } else {
-                sdl2::pixels::Color::RGBA(60, 65, 75, 200)
-            };
-            canvas.set_draw_color(byp_col);
-            let _ = canvas.fill_rect(Rect::new(
-                byp_btn_x,
-                byp_btn_y,
-                byp_btn_w as u32,
-                byp_btn_h as u32,
-            ));
-            let byp_label = if bypass_on { "BYP" } else { "CS" };
-            let byp_text_col = if bypass_on {
-                sdl2::pixels::Color::RGBA(30, 20, 10, 255)
-            } else {
-                sdl2::pixels::Color::RGBA(140, 150, 160, 200)
-            };
-            draw_pixel_label(
-                canvas,
-                &state.theme,
-                byp_label,
-                byp_btn_x + 3,
-                byp_btn_y + 3,
-                byp_btn_w - 6,
-                byp_text_col,
-            );
-            if input.mouse_pressed
-                && input.mouse_x >= byp_btn_x
-                && input.mouse_x < byp_btn_x + byp_btn_w
-                && input.mouse_y >= byp_btn_y
-                && input.mouse_y < byp_btn_y + byp_btn_h
-            {
-                state.project.tracks[i].cstrip2_bypass = !bypass_on;
-                state.dirty = true;
-            }
+            // ── CStrip2 bypass is now in the bottom bar (right of Solo) ──
 
             let knob_r = 13i32;
             let cell_w = (right_w / 2).max(30);
             let cell_h = 42i32;
-            // Push knobs down so they don't overlap the bypass button (button ends at +18)
-            let knob_base_y = below_vu + byp_btn_h + 10;
+            let knob_base_y = below_vu + 4;
 
             for (pi, desc) in cs_descs.iter().enumerate() {
                 let col = (pi / 5) as i32;
@@ -5851,38 +5846,37 @@ fn draw_bottom_mixer(
                 }
             }
 
-            // ── Slim / Expand toggle button (right of Solo) ──
-            let slim_x = solo_x + btn_sz + 4;
-            let slim_btn_id = input.next_id();
-            let slim_label = if is_slim { "+" } else { "-" };
-            let slim_hint = if is_slim {
-                "Expand strip"
+            // ── CStrip2 bypass toggle (right of Solo) ──
+            let byp_x = solo_x + btn_sz + 4;
+            let bypass_on = state.project.tracks[i].cstrip2_bypass;
+            let byp_btn_id = input.next_id();
+            let byp_label = if bypass_on { "B" } else { "C" };
+            let byp_hint = if bypass_on {
+                "Channel strip bypassed — click to enable"
             } else {
-                "Collapse to slim"
+                "Channel strip active — click to bypass"
             };
-            let slim_clicked = button(
+            let byp_color = if bypass_on {
+                state.theme.mute_on // yellow-ish to indicate bypassed
+            } else {
+                [60, 65, 75, 200]
+            };
+            let byp_clicked = toggle_button(
                 canvas,
                 input,
                 &state.theme,
-                &ButtonParams {
-                    id: slim_btn_id,
-                    x: slim_x,
-                    y: btn_y,
-                    width: btn_sz,
-                    height: btn_sz,
-                    label: slim_label.into(),
-                    toggled: is_slim,
-                    icon: ButtonIcon::None,
-                    hint: Some(slim_hint.into()),
-                    ..Default::default()
-                },
+                byp_x,
+                btn_y,
+                btn_sz,
+                byp_color,
+                bypass_on,
+                byp_btn_id,
+                byp_label,
+                Some(byp_hint),
             );
-            if slim_clicked {
-                if is_slim {
-                    state.mixer_slim_tracks.remove(&track_id);
-                } else {
-                    state.mixer_slim_tracks.insert(track_id);
-                }
+            if byp_clicked {
+                state.project.tracks[i].cstrip2_bypass = !bypass_on;
+                state.dirty = true;
             }
         }
 

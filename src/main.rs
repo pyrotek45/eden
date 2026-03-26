@@ -1779,12 +1779,15 @@ fn main() {
                     if state.meters.vu_peak_hold_frames.len() != n {
                         state.meters.vu_peak_hold_frames.resize(n, 0);
                     }
+                    // ── Unified peak-hold constants (used by ALL meters) ──
+                    // Instant attack (jump to new peak), hold for ~1.5 s, then
+                    // slow linear decay so the red line drifts down identically
+                    // everywhere.
+                    const PEAK_HOLD_FRAMES: u32 = 90; // ~1.5 s @ 60 fps
+                    const PEAK_DECAY: f32 = 0.008; // per-frame linear decay
+
                     // VU ballistic: ~300ms integration (attack ≈ decay ≈ 0.1 per frame @ 60fps)
                     let vu_coeff = 0.10_f32;
-                    // Peak needle: fast attack (~instant), very slow decay
-                    let peak_attack = 0.6_f32; // fast rise
-                    let peak_decay = 0.008_f32; // slow fall (~5s from 1→0 @ 60fps)
-                    let peak_hold_time = 90u32; // ~1.5s hold at 60fps before decay starts
                     for i in 0..n {
                         let rms = state.meters.track_rms.get(i).copied().unwrap_or(0.0);
                         // Convert to VU scale: 0dBVU ≈ 0.3162 (~-10dBFS), needle 0–1
@@ -1797,36 +1800,38 @@ fn main() {
                         let vu_pos = ((vu_db + 20.0) / 23.0).clamp(0.0, 1.0);
                         state.meters.vu_needle[i] +=
                             (vu_pos - state.meters.vu_needle[i]) * vu_coeff;
-                        // Peak needle: jumps up quickly, holds, then decays very slowly
+                        // Peak needle: instant jump, hold, slow linear decay
                         if vu_pos > state.meters.vu_peak_needle[i] {
-                            state.meters.vu_peak_needle[i] +=
-                                (vu_pos - state.meters.vu_peak_needle[i]) * peak_attack;
-                            state.meters.vu_peak_hold_frames[i] = peak_hold_time;
-                        // reset hold
+                            state.meters.vu_peak_needle[i] = vu_pos;
+                            state.meters.vu_peak_hold_frames[i] = PEAK_HOLD_FRAMES;
                         } else if state.meters.vu_peak_hold_frames[i] > 0 {
-                            // Holding at peak — don't decay yet
                             state.meters.vu_peak_hold_frames[i] -= 1;
                         } else {
-                            // Hold expired, start slow decay
-                            state.meters.vu_peak_needle[i] -= peak_decay;
-                            if state.meters.vu_peak_needle[i] < 0.0 {
-                                state.meters.vu_peak_needle[i] = 0.0;
-                            }
+                            state.meters.vu_peak_needle[i] =
+                                (state.meters.vu_peak_needle[i] - PEAK_DECAY).max(0.0);
                         }
                     }
-                    // Master stereo peak-hold + clipping
+                    // Master stereo peak-hold + clipping (Pre pair)
                     let ml = state.meters.master_rms_l;
                     let mr = state.meters.master_rms_r;
-                    state.meters.master_peak_hold_l = if ml > state.meters.master_peak_hold_l {
-                        ml
+                    if ml > state.meters.master_peak_hold_l {
+                        state.meters.master_peak_hold_l = ml;
+                        state.meters.master_peak_hold_frames_l = PEAK_HOLD_FRAMES;
+                    } else if state.meters.master_peak_hold_frames_l > 0 {
+                        state.meters.master_peak_hold_frames_l -= 1;
                     } else {
-                        (state.meters.master_peak_hold_l - 0.002).max(0.0)
-                    };
-                    state.meters.master_peak_hold_r = if mr > state.meters.master_peak_hold_r {
-                        mr
+                        state.meters.master_peak_hold_l =
+                            (state.meters.master_peak_hold_l - PEAK_DECAY).max(0.0);
+                    }
+                    if mr > state.meters.master_peak_hold_r {
+                        state.meters.master_peak_hold_r = mr;
+                        state.meters.master_peak_hold_frames_r = PEAK_HOLD_FRAMES;
+                    } else if state.meters.master_peak_hold_frames_r > 0 {
+                        state.meters.master_peak_hold_frames_r -= 1;
                     } else {
-                        (state.meters.master_peak_hold_r - 0.002).max(0.0)
-                    };
+                        state.meters.master_peak_hold_r =
+                            (state.meters.master_peak_hold_r - PEAK_DECAY).max(0.0);
+                    }
                     state.meters.master_peak_l = ml.max(state.meters.master_peak_l * 0.995);
                     state.meters.master_peak_r = mr.max(state.meters.master_peak_r * 0.995);
                     if ml >= 0.98 {
@@ -1837,28 +1842,26 @@ fn main() {
                     }
                     // Post-output (Out pair) peak hold — driven from true instantaneous
                     // peak so the user can verify the limiter ceiling is being honoured.
-                    // Uses the same hold-then-decay pattern as the track VU peak needles.
+                    // Uses the same unified PEAK_HOLD_FRAMES / PEAK_DECAY constants.
                     let pl = state.meters.master_true_peak_post_l;
                     let pr = state.meters.master_true_peak_post_r;
-                    const OUT_PEAK_HOLD_FRAMES: u32 = 90;
-                    const OUT_PEAK_DECAY: f32 = 0.002;
                     if pl > state.meters.master_peak_hold_post_l {
                         state.meters.master_peak_hold_post_l = pl;
-                        state.meters.master_peak_hold_post_frames_l = OUT_PEAK_HOLD_FRAMES;
+                        state.meters.master_peak_hold_post_frames_l = PEAK_HOLD_FRAMES;
                     } else if state.meters.master_peak_hold_post_frames_l > 0 {
                         state.meters.master_peak_hold_post_frames_l -= 1;
                     } else {
                         state.meters.master_peak_hold_post_l =
-                            (state.meters.master_peak_hold_post_l - OUT_PEAK_DECAY).max(0.0);
+                            (state.meters.master_peak_hold_post_l - PEAK_DECAY).max(0.0);
                     }
                     if pr > state.meters.master_peak_hold_post_r {
                         state.meters.master_peak_hold_post_r = pr;
-                        state.meters.master_peak_hold_post_frames_r = OUT_PEAK_HOLD_FRAMES;
+                        state.meters.master_peak_hold_post_frames_r = PEAK_HOLD_FRAMES;
                     } else if state.meters.master_peak_hold_post_frames_r > 0 {
                         state.meters.master_peak_hold_post_frames_r -= 1;
                     } else {
                         state.meters.master_peak_hold_post_r =
-                            (state.meters.master_peak_hold_post_r - OUT_PEAK_DECAY).max(0.0);
+                            (state.meters.master_peak_hold_post_r - PEAK_DECAY).max(0.0);
                     }
                     // Master VU ballistic needle — driven from post-effect RMS
                     // so it matches the output bar meters.
@@ -1874,20 +1877,17 @@ fn main() {
                         };
                         let m_vu_pos = ((m_vu_db + 20.0) / 23.0).clamp(0.0, 1.0);
                         let vu_coeff = 0.10_f32;
-                        let peak_attack = 0.6_f32;
-                        let peak_decay = 0.008_f32;
-                        let peak_hold_time = 90u32;
                         state.meters.master_vu_needle +=
                             (m_vu_pos - state.meters.master_vu_needle) * vu_coeff;
+                        // Peak needle: instant jump, hold, slow linear decay
                         if m_vu_pos > state.meters.master_vu_peak_needle {
-                            state.meters.master_vu_peak_needle +=
-                                (m_vu_pos - state.meters.master_vu_peak_needle) * peak_attack;
-                            state.meters.master_vu_peak_hold_frames = peak_hold_time;
+                            state.meters.master_vu_peak_needle = m_vu_pos;
+                            state.meters.master_vu_peak_hold_frames = PEAK_HOLD_FRAMES;
                         } else if state.meters.master_vu_peak_hold_frames > 0 {
                             state.meters.master_vu_peak_hold_frames -= 1;
                         } else {
                             state.meters.master_vu_peak_needle =
-                                (state.meters.master_vu_peak_needle - peak_decay).max(0.0);
+                                (state.meters.master_vu_peak_needle - PEAK_DECAY).max(0.0);
                         }
                     }
                     // Stereo correlation: cos(angle between L and R vectors) ≈ (L·R) / (|L|·|R|)
@@ -1912,6 +1912,12 @@ fn main() {
                     if state.meters.track_peak_hold_r.len() != n {
                         state.meters.track_peak_hold_r.resize(n, 0.0);
                     }
+                    if state.meters.track_peak_hold_frames_l.len() != n {
+                        state.meters.track_peak_hold_frames_l.resize(n, 0);
+                    }
+                    if state.meters.track_peak_hold_frames_r.len() != n {
+                        state.meters.track_peak_hold_frames_r.resize(n, 0);
+                    }
                     if state.meters.track_clipping_l.len() != n {
                         state.meters.track_clipping_l.resize(n, false);
                     }
@@ -1921,18 +1927,26 @@ fn main() {
                     for i in 0..n {
                         let tl = state.meters.track_rms_l.get(i).copied().unwrap_or(0.0);
                         let tr = state.meters.track_rms_r.get(i).copied().unwrap_or(0.0);
-                        state.meters.track_peak_hold_l[i] =
-                            if tl > state.meters.track_peak_hold_l[i] {
-                                tl
-                            } else {
-                                (state.meters.track_peak_hold_l[i] - 0.003).max(0.0)
-                            };
-                        state.meters.track_peak_hold_r[i] =
-                            if tr > state.meters.track_peak_hold_r[i] {
-                                tr
-                            } else {
-                                (state.meters.track_peak_hold_r[i] - 0.003).max(0.0)
-                            };
+                        // L channel — unified hold-then-decay
+                        if tl > state.meters.track_peak_hold_l[i] {
+                            state.meters.track_peak_hold_l[i] = tl;
+                            state.meters.track_peak_hold_frames_l[i] = PEAK_HOLD_FRAMES;
+                        } else if state.meters.track_peak_hold_frames_l[i] > 0 {
+                            state.meters.track_peak_hold_frames_l[i] -= 1;
+                        } else {
+                            state.meters.track_peak_hold_l[i] =
+                                (state.meters.track_peak_hold_l[i] - PEAK_DECAY).max(0.0);
+                        }
+                        // R channel — unified hold-then-decay
+                        if tr > state.meters.track_peak_hold_r[i] {
+                            state.meters.track_peak_hold_r[i] = tr;
+                            state.meters.track_peak_hold_frames_r[i] = PEAK_HOLD_FRAMES;
+                        } else if state.meters.track_peak_hold_frames_r[i] > 0 {
+                            state.meters.track_peak_hold_frames_r[i] -= 1;
+                        } else {
+                            state.meters.track_peak_hold_r[i] =
+                                (state.meters.track_peak_hold_r[i] - PEAK_DECAY).max(0.0);
+                        }
                         if tl >= 0.98 {
                             state.meters.track_clipping_l[i] = true;
                         }

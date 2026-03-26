@@ -2489,12 +2489,12 @@ pub fn vu_meter(
     let _ = canvas.fill_rect(Rect::new(x, y, w as u32, h as u32));
 
     // ── Geometry: wide shallow arc ──
-    // We want the arc chord to span the full inner width.
-    // The arc is from a large circle, pivot (cx, cy) is far below the widget.
-    // Half the chord = inner_w / 2. We choose sagitta (arc height) to be ~40% of inner_h.
-    let half_chord = inner_w as f64 / 2.0;
-    let sagitta = (inner_h as f64 * 0.35).max(8.0); // how tall the arc bulge is
-                                                    // From chord and sagitta: radius = (half_chord^2 + sagitta^2) / (2 * sagitta)
+    // Inset the arc horizontally so the end-labels ("-20" and "+3") don't clip
+    // outside the widget bounds.
+    let arc_inset = 20i32;
+    let arc_w = (inner_w - arc_inset * 2).max(20);
+    let half_chord = arc_w as f64 / 2.0;
+    let sagitta = (inner_h as f64 * 0.35).max(8.0);
     let arc_r = (half_chord * half_chord + sagitta * sagitta) / (2.0 * sagitta);
 
     // Center of the circle is below the widget

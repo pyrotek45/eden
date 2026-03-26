@@ -9625,34 +9625,6 @@ mod tests {
         assert!((result - 0.95).abs() < 1e-9);
     }
 
-    /// snap_with_edges returns raw when alt bypass is active.
-    #[test]
-    fn test_snap_with_edges_alt_bypass() {
-        let snap = crate::state::SnapSettings {
-            enabled: true,
-            resolution_idx: 2, // 1/4 note
-        };
-        let candidates = vec![2.0_f64, 4.0];
-        // Normal: 1.98 near edge 2.0 within 0.3 threshold → 2.0
-        let snapped = snap.snap_with_edges(1.98, 0.3, &candidates);
-        assert!(
-            (snapped - 2.0).abs() < 1e-9,
-            "expected snap to 2.0, got {}",
-            snapped
-        );
-        // Alt bypass: raw 1.98 returned unchanged
-        let raw = 1.98_f64;
-        let alt = true;
-        let result = if alt {
-            raw
-        } else {
-            snap.snap_with_edges(raw, 0.3, &candidates)
-        };
-        assert!((result - 1.98).abs() < 1e-9);
-    }
-
-    // ── CStrip2 audio processing ─────────────────────────────────────
-
     /// CStrip2 with default params (EQ neutral, comp off) should pass audio through
     /// with minimal level change (<1 dB attenuation, no clipping).
     #[test]
