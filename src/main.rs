@@ -1757,6 +1757,8 @@ fn main() {
                 state.meters.master_rms_r = audio.master_rms_r;
                 state.meters.master_rms_post_l = audio.master_rms_post_l;
                 state.meters.master_rms_post_r = audio.master_rms_post_r;
+                state.meters.master_true_peak_post_l = audio.master_true_peak_post_l;
+                state.meters.master_true_peak_post_r = audio.master_true_peak_post_r;
                 state.meters.track_effect_gr = audio.track_effect_gr.clone();
                 state.meters.master_effect_gr = audio.master_effect_gr.clone();
                 state.meters.preview_rms_l = audio.preview_rms_l;
@@ -1830,9 +1832,10 @@ fn main() {
                     if mr >= 0.98 {
                         state.meters.master_clipping_r = true;
                     }
-                    // Post-output (Out pair) peak hold
-                    let pl = state.meters.master_rms_post_l;
-                    let pr = state.meters.master_rms_post_r;
+                    // Post-output (Out pair) peak hold — driven from true instantaneous
+                    // peak so the user can verify the limiter ceiling is being honoured.
+                    let pl = state.meters.master_true_peak_post_l;
+                    let pr = state.meters.master_true_peak_post_r;
                     state.meters.master_peak_hold_post_l =
                         if pl > state.meters.master_peak_hold_post_l {
                             pl

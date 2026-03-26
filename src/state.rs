@@ -290,6 +290,10 @@ pub struct MeterState {
     /// Peak-hold for the post-everything (Out) meter pair.
     pub master_peak_hold_post_l: f32,
     pub master_peak_hold_post_r: f32,
+    /// True instantaneous peak (not RMS) for the post-limiter output, used to
+    /// verify the limiter ceiling is being honoured.
+    pub master_true_peak_post_l: f32,
+    pub master_true_peak_post_r: f32,
     pub master_lufs_short: f32,
     pub master_lufs_momentary: f32,
     pub master_clipping_l: bool,

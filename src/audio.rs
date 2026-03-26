@@ -87,6 +87,9 @@ pub struct AudioShared {
     /// Master bus post-everything stereo RMS (final output after volume, clamp, etc.).
     pub master_rms_post_l: f32,
     pub master_rms_post_r: f32,
+    /// Instantaneous true peak for the post-limiter output (max |sample| in the callback block).
+    pub master_true_peak_post_l: f32,
+    pub master_true_peak_post_r: f32,
     /// Gain reduction in dB per effect slot, per track. track_idx → Vec<f32>.
     pub track_effect_gr: Vec<Vec<f32>>,
     /// Gain reduction in dB per master rack effect slot.
@@ -226,6 +229,8 @@ impl Default for AudioShared {
             master_rms_pre: 0.0,
             master_rms_post_l: 0.0,
             master_rms_post_r: 0.0,
+            master_true_peak_post_l: 0.0,
+            master_true_peak_post_r: 0.0,
             track_effect_gr: Vec::new(),
             master_effect_gr: Vec::new(),
             seek_pending: false,
@@ -1542,6 +1547,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 let mut master_rms_r_accum = 0.0_f32;
                 let mut master_rms_post_l_accum = 0.0_f32;
                 let mut master_rms_post_r_accum = 0.0_f32;
+                let mut master_true_peak_post_l: f32 = 0.0;
+                let mut master_true_peak_post_r: f32 = 0.0;
                 let mut rms_frame_count = 0usize;
 
                 // ── Sync instrument/effect instances ONCE per callback (not per sample) ──
@@ -2327,6 +2334,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         master_rms_accum += (ms * ms) as f32;
                         master_rms_post_l_accum += (mix_l * mix_l) as f32;
                         master_rms_post_r_accum += (mix_r * mix_r) as f32;
+                        // True instantaneous peak — used to verify the limiter ceiling
+                        let al = mix_l.abs() as f32;
+                        let ar = mix_r.abs() as f32;
+                        if al > master_true_peak_post_l { master_true_peak_post_l = al; }
+                        if ar > master_true_peak_post_r { master_true_peak_post_r = ar; }
                     }
 
                     mix_l *= smooth_master_vol;
@@ -2552,6 +2564,9 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         if s.master_rms_post_r < 0.0005 {
                             s.master_rms_post_r = 0.0;
                         }
+                        // True instantaneous peak for the output pair
+                        s.master_true_peak_post_l = master_true_peak_post_l;
+                        s.master_true_peak_post_r = master_true_peak_post_r;
                     } else {
                         s.master_rms *= 0.85;
                         s.master_rms_pre *= 0.85;
@@ -2559,6 +2574,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         s.master_rms_r *= 0.85;
                         s.master_rms_post_l *= 0.85;
                         s.master_rms_post_r *= 0.85;
+                        s.master_true_peak_post_l = 0.0;
+                        s.master_true_peak_post_r = 0.0;
                     }
 
                     // Per-track stereo RMS
