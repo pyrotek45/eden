@@ -1754,6 +1754,8 @@ fn main() {
                 state.meters.master_rms_pre = audio.master_rms_pre;
                 state.meters.master_rms_l = audio.master_rms_l;
                 state.meters.master_rms_r = audio.master_rms_r;
+                state.meters.master_rms_post_l = audio.master_rms_post_l;
+                state.meters.master_rms_post_r = audio.master_rms_post_r;
                 state.meters.track_effect_gr = audio.track_effect_gr.clone();
                 state.meters.master_effect_gr = audio.master_effect_gr.clone();
 
@@ -1766,11 +1768,15 @@ fn main() {
                     if state.meters.vu_peak_needle.len() != n {
                         state.meters.vu_peak_needle.resize(n, 0.0);
                     }
+                    if state.meters.vu_peak_hold_frames.len() != n {
+                        state.meters.vu_peak_hold_frames.resize(n, 0);
+                    }
                     // VU ballistic: ~300ms integration (attack ≈ decay ≈ 0.1 per frame @ 60fps)
                     let vu_coeff = 0.10_f32;
-                    // Peak needle: fast attack (~instant), very slow decay (~3s)
-                    let peak_attack = 0.6_f32;   // fast rise
-                    let peak_decay  = 0.012_f32;  // slow fall (~3s to drop from 1→0 @ 60fps)
+                    // Peak needle: fast attack (~instant), very slow decay
+                    let peak_attack = 0.6_f32;    // fast rise
+                    let peak_decay  = 0.008_f32;   // slow fall (~5s from 1→0 @ 60fps)
+                    let peak_hold_time = 90u32;    // ~1.5s hold at 60fps before decay starts
                     for i in 0..n {
                         let rms = state.meters.track_rms.get(i).copied().unwrap_or(0.0);
                         // Convert to VU scale: 0dBVU ≈ 0.3162 (~-10dBFS), needle 0–1
@@ -1778,10 +1784,15 @@ fn main() {
                         // Map: -20dBFS → 0.0 (left), 0dBFS → ~0.77, +3dBFS → 1.0
                         let vu_pos = ((vu_db + 20.0) / 23.0).clamp(0.0, 1.0);
                         state.meters.vu_needle[i] += (vu_pos - state.meters.vu_needle[i]) * vu_coeff;
-                        // Peak needle: jumps up quickly, decays very slowly
+                        // Peak needle: jumps up quickly, holds, then decays very slowly
                         if vu_pos > state.meters.vu_peak_needle[i] {
                             state.meters.vu_peak_needle[i] += (vu_pos - state.meters.vu_peak_needle[i]) * peak_attack;
+                            state.meters.vu_peak_hold_frames[i] = peak_hold_time; // reset hold
+                        } else if state.meters.vu_peak_hold_frames[i] > 0 {
+                            // Holding at peak — don't decay yet
+                            state.meters.vu_peak_hold_frames[i] -= 1;
                         } else {
+                            // Hold expired, start slow decay
                             state.meters.vu_peak_needle[i] -= peak_decay;
                             if state.meters.vu_peak_needle[i] < 0.0 {
                                 state.meters.vu_peak_needle[i] = 0.0;

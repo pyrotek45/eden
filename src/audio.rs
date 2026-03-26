@@ -84,6 +84,9 @@ pub struct AudioShared {
     pub master_rms: f32,
     /// Master bus pre-effect RMS.
     pub master_rms_pre: f32,
+    /// Master bus post-everything stereo RMS (final output after volume, clamp, etc.).
+    pub master_rms_post_l: f32,
+    pub master_rms_post_r: f32,
     /// Gain reduction in dB per effect slot, per track. track_idx → Vec<f32>.
     pub track_effect_gr: Vec<Vec<f32>>,
     /// Gain reduction in dB per master rack effect slot.
@@ -216,6 +219,8 @@ impl Default for AudioShared {
             osc_write: 0,
             master_rms: 0.0,
             master_rms_pre: 0.0,
+            master_rms_post_l: 0.0,
+            master_rms_post_r: 0.0,
             track_effect_gr: Vec::new(),
             master_effect_gr: Vec::new(),
             seek_pending: false,
@@ -1324,6 +1329,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                 let mut master_rms_pre_accum = 0.0_f32;
                 let mut master_rms_l_accum = 0.0_f32;
                 let mut master_rms_r_accum = 0.0_f32;
+                let mut master_rms_post_l_accum = 0.0_f32;
+                let mut master_rms_post_r_accum = 0.0_f32;
                 let mut rms_frame_count = 0usize;
 
                 // ── Sync instrument/effect instances ONCE per callback (not per sample) ──
@@ -1561,7 +1568,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                     prev_clip_pos < note_start && clip_pos >= note_start;
                                 let catch_on_start = is_first_frame
                                     && clip_pos >= note_start
-                                    && clip_pos < note_start + note.length_beats
+                                    && clip_pos < note_start + beats_per_sample * 2.0
                                     && !voices.iter().any(|v| {
                                         v.track_idx == ti
                                             && v.original_pitch == note.pitch
@@ -2126,6 +2133,10 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     frame_samples_l[frame_idx] = mix_l.clamp(-1.0, 1.0) as f32;
                     frame_samples_r[frame_idx] = mix_r.clamp(-1.0, 1.0) as f32;
 
+                    // Accumulate post-everything stereo RMS (final output)
+                    master_rms_post_l_accum += frame_samples_l[frame_idx] * frame_samples_l[frame_idx];
+                    master_rms_post_r_accum += frame_samples_r[frame_idx] * frame_samples_r[frame_idx];
+
                     // Accumulate per-track squared samples for RMS (mono + stereo)
                     // Use post-pan levels so track meters match what goes into master bus
                     for ti in 0..num_tracks {
@@ -2294,11 +2305,20 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         let mr = (master_rms_r_accum / rms_frame_count as f32).sqrt();
                         s.master_rms_r = s.master_rms_r * 0.85 + mr * 0.15;
                         if s.master_rms_r < 0.0005 { s.master_rms_r = 0.0; }
+                        // Master post-everything stereo RMS
+                        let mpl = (master_rms_post_l_accum / rms_frame_count as f32).sqrt();
+                        s.master_rms_post_l = s.master_rms_post_l * 0.85 + mpl * 0.15;
+                        if s.master_rms_post_l < 0.0005 { s.master_rms_post_l = 0.0; }
+                        let mpr = (master_rms_post_r_accum / rms_frame_count as f32).sqrt();
+                        s.master_rms_post_r = s.master_rms_post_r * 0.85 + mpr * 0.15;
+                        if s.master_rms_post_r < 0.0005 { s.master_rms_post_r = 0.0; }
                     } else {
                         s.master_rms *= 0.85;
                         s.master_rms_pre *= 0.85;
                         s.master_rms_l *= 0.85;
                         s.master_rms_r *= 0.85;
+                        s.master_rms_post_l *= 0.85;
+                        s.master_rms_post_r *= 0.85;
                     }
 
                     // Per-track stereo RMS

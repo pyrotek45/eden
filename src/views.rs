@@ -4957,7 +4957,7 @@ fn draw_bottom_mixer(
         let strip_w = if is_slim { strip_w_slim } else { strip_w_full };
         let x = strip_x_accum - scroll_offset;
         let sy = top + 4;
-        let sh = (h - 8).max(10);
+        let sh = (clip_h - 8).max(10);
         let track_id = state.project.tracks[i].id;
         let track_color = state.project.tracks[i].color;
         let selected = state.selected_tracks.contains(&track_id);
@@ -4992,8 +4992,39 @@ fn draw_bottom_mixer(
         draw_pixel_label(
             canvas, &state.theme,
             &state.project.tracks[i].name.clone(),
-            x + 6, name_y, strip_w - 12, name_col,
+            x + 6, name_y, strip_w - 26, name_col,
         );
+
+        // ── Slim / Expand toggle button (top-right of name bar) ──
+        {
+            let toggle_w = 16i32;
+            let toggle_h = 14i32;
+            let toggle_x = x + strip_w - toggle_w - 2;
+            let toggle_y = name_y - 2;
+            let slim_btn_id = input.next_id();
+            let label = if is_slim { "+" } else { "-" };
+            let hint = if is_slim { "Expand strip" } else { "Collapse to slim" };
+            let clicked = button(
+                canvas, input, &state.theme,
+                &ButtonParams {
+                    id: slim_btn_id,
+                    x: toggle_x, y: toggle_y,
+                    width: toggle_w, height: toggle_h,
+                    label: label.into(),
+                    toggled: is_slim,
+                    icon: ButtonIcon::None,
+                    hint: Some(hint.into()),
+                    ..Default::default()
+                },
+            );
+            if clicked {
+                if is_slim {
+                    state.mixer_slim_tracks.remove(&track_id);
+                } else {
+                    state.mixer_slim_tracks.insert(track_id);
+                }
+            }
+        }
 
         // ── Click to select strip ──
         let name_zone_h = 16i32;
@@ -5182,7 +5213,7 @@ fn draw_bottom_mixer(
             sdl2::pixels::Color::RGBA(100, 110, 120, 140), 1);
 
         // ── Right column: CStrip2 knobs + EQ + Comp curve (skip in slim mode) ──
-        let right_x = x + 8 + left_col_w + 10;
+        let right_x = x + 8 + left_col_w + 30;
         let right_w = strip_w - (right_x - x) - 6;
         if !is_slim && right_w > 40 && below_vu_avail > 60 {
             let cs_descs = crate::modules::get_param_descs("CStrip2");
@@ -5594,36 +5625,6 @@ fn draw_bottom_mixer(
             }
         }
 
-        // ── Slim / Expand toggle button (bottom of strip) ──
-        {
-            let toggle_y = sy + sh - 16;
-            let toggle_w = if is_slim { strip_w - 4 } else { 24 };
-            let toggle_x = x + (strip_w - toggle_w) / 2;
-            let slim_btn_id = input.next_id();
-            let label = if is_slim { "+" } else { "-" };
-            let hint = if is_slim { "Expand strip" } else { "Collapse to slim" };
-            let clicked = button(
-                canvas, input, &state.theme,
-                &ButtonParams {
-                    id: slim_btn_id,
-                    x: toggle_x, y: toggle_y,
-                    width: toggle_w, height: 14,
-                    label: label.into(),
-                    toggled: is_slim,
-                    icon: ButtonIcon::None,
-                    hint: Some(hint.into()),
-                    ..Default::default()
-                },
-            );
-            if clicked {
-                if is_slim {
-                    state.mixer_slim_tracks.remove(&track_id);
-                } else {
-                    state.mixer_slim_tracks.insert(track_id);
-                }
-            }
-        }
-
         // Strip border
         let border_col = if selected {
             Theme::c(state.theme.accent)
@@ -5741,33 +5742,43 @@ fn draw_bottom_mixer(
         if mvol_changed { state.master_volume_ui = vol_pos_to_gain(mvol_pos); }
     }
 
-    // ── Master stereo meters ──
+    // ── Master stereo meters (Pre = pre-volume, Out = post-everything) ──
     let m_meter_x = mx + 38;
-    let m_meter_bar_w = 10u32;
-    let m_meter_gap = 3i32;
+    let m_meter_bar_w = 7u32;
+    let m_meter_gap = 2i32;
+    let m_pair_gap = 4i32; // gap between Pre and Out pairs
+
+    // Pre-effects pair
     let m_rms_l = state.meters.master_rms_l;
     let m_rms_r = state.meters.master_rms_r;
     draw_meter_bar(canvas, m_rms_l, m_meter_x, m_fader_top, m_meter_bar_w, m_fader_h);
     draw_meter_bar(canvas, m_rms_r, m_meter_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
 
-    // Master peak hold
+    // Out (post-everything) pair
+    let m_out_x = m_meter_x + (m_meter_bar_w as i32) * 2 + m_meter_gap + m_pair_gap;
+    let m_out_l = state.meters.master_rms_post_l;
+    let m_out_r = state.meters.master_rms_post_r;
+    draw_meter_bar(canvas, m_out_l, m_out_x, m_fader_top, m_meter_bar_w, m_fader_h);
+    draw_meter_bar(canvas, m_out_r, m_out_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
+
+    // Master peak hold (pre pair)
     draw_peak_hold(canvas, state.meters.master_peak_hold_l, m_meter_x, m_fader_top, m_meter_bar_w, m_fader_h);
     draw_peak_hold(canvas, state.meters.master_peak_hold_r,
         m_meter_x + m_meter_bar_w as i32 + m_meter_gap, m_fader_top, m_meter_bar_w, m_fader_h);
 
-    // dB labels to the right of master meters
+    // dB labels to the right of out meters
     {
-        let m_labels_x = m_meter_x + m_meter_bar_w as i32 * 2 + m_meter_gap + 2;
+        let m_labels_x = m_out_x + m_meter_bar_w as i32 * 2 + m_meter_gap + 2;
         let m_label_max_w = mx + master_strip_w - m_labels_x - 4;
         if m_label_max_w > 8 {
             draw_meter_db_labels(canvas, &state.theme, m_labels_x, m_fader_top, m_fader_h, m_label_max_w);
         }
     }
 
-    // Master clip LEDs
+    // Master clip LEDs (on out pair — final output clipping)
     for (ch, (flag, mx_off)) in [
-        (state.meters.master_clipping_l, 0i32),
-        (state.meters.master_clipping_r, m_meter_bar_w as i32 + m_meter_gap),
+        (state.meters.master_clipping_l, (m_out_x - m_meter_x)),
+        (state.meters.master_clipping_r, (m_out_x - m_meter_x) + m_meter_bar_w as i32 + m_meter_gap),
     ].iter().enumerate() {
         let led_x = m_meter_x + mx_off;
         let led_y = m_fader_top - 7;
@@ -5784,17 +5795,16 @@ fn draw_bottom_mixer(
         }
     }
 
-    // L/R labels
-    draw_pixel_label(canvas, &state.theme, "L",
-        m_meter_x, m_fader_top + m_fader_h + 1, m_meter_bar_w as i32,
-        sdl2::pixels::Color::RGBA(110, 120, 130, 150));
-    draw_pixel_label(canvas, &state.theme, "R",
-        m_meter_x + m_meter_bar_w as i32 + m_meter_gap,
-        m_fader_top + m_fader_h + 1, m_meter_bar_w as i32,
-        sdl2::pixels::Color::RGBA(110, 120, 130, 150));
+    // Pre / Out labels above meter pairs
+    draw_pixel_label(canvas, &state.theme, "Pre",
+        m_meter_x, m_fader_top + m_fader_h + 1, m_meter_bar_w as i32 * 2 + m_meter_gap,
+        sdl2::pixels::Color::RGBA(100, 110, 130, 150));
+    draw_pixel_label(canvas, &state.theme, "Out",
+        m_out_x, m_fader_top + m_fader_h + 1, m_meter_bar_w as i32 * 2 + m_meter_gap,
+        sdl2::pixels::Color::RGBA(140, 180, 120, 180));
 
     // ── Master info column (right of meters) ──
-    let info_x = m_meter_x + (m_meter_bar_w as i32) * 2 + m_meter_gap + 10;
+    let info_x = m_out_x + (m_meter_bar_w as i32) * 2 + m_meter_gap + 10;
     let info_w = master_strip_w - (info_x - mx) - 8;
     if info_w > 20 {
         let peak = state.meters.master_peak_l.max(state.meters.master_peak_r);

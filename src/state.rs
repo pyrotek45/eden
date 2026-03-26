@@ -275,9 +275,14 @@ pub struct MeterState {
     pub vu_needle: Vec<f32>,
     /// VU peak hold needle per track (0.0–1.0, slow-decay red indicator).
     pub vu_peak_needle: Vec<f32>,
+    /// Hold timer per track: frames remaining before peak needle starts decaying.
+    pub vu_peak_hold_frames: Vec<u32>,
     // ── Master stereo metering ──
     pub master_rms_l: f32,
     pub master_rms_r: f32,
+    /// Post-effects (final output) stereo RMS.
+    pub master_rms_post_l: f32,
+    pub master_rms_post_r: f32,
     pub master_peak_l: f32,
     pub master_peak_r: f32,
     pub master_peak_hold_l: f32,
