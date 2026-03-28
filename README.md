@@ -4,7 +4,7 @@
 
 A minimal digital audio workstation built with Rust and SDL2.
 
-> **⚠️ Disclaimer:** This project is almost entirely AI-programmed (via GitHub Copilot) as a personal experiment and for fun. It is **not** production software — use at your own risk and have fun exploring!
+> **⚠️ Disclaimer:** All code in this project is AI-generated (via GitHub Copilot). The design, features, and creative direction are by **pyrotek45** — the AI just writes the code. This is a personal experiment and passion project, **not** production software. Use at your own risk and have fun exploring!
 
 ## Features
 
