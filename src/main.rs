@@ -2,14 +2,10 @@
 // SDL2 window, event loop, audio engine, everything wired together.
 #![allow(dead_code)]
 
-mod commands;
-mod config;
+mod app;
 mod dsp;
 mod engine;
-mod input;
-mod models;
 mod modules;
-mod state;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -19,9 +15,9 @@ mod widgets;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 
+use crate::app::input::InputState;
+use crate::app::state::*;
 use crate::engine::start_audio_engine;
-use crate::input::InputState;
-use crate::state::*;
 
 /// Map QWERTY keyboard keys to semitone offsets (relative to current octave).
 /// Bottom row (ZSXDCVGBHNJM) = lower octave, top row (Q2W3ER5T6Y7U) = upper octave.
@@ -132,7 +128,7 @@ fn main() {
     let mut input = InputState::default();
 
     // Load user config
-    let user_config = config::UserConfig::load();
+    let user_config = app::config::UserConfig::load();
     state.set_theme_by_name(&user_config.theme_name);
     state.auto_return = user_config.auto_return;
     state.ui_scale = user_config.ui_scale;
@@ -140,7 +136,7 @@ fn main() {
     state.snap.enabled = user_config.snap_enabled;
     state.snap.resolution_idx = user_config
         .snap_resolution_idx
-        .min(crate::state::SNAP_RESOLUTIONS.len() - 1);
+        .min(crate::app::state::SNAP_RESOLUTIONS.len() - 1);
     state.sample_browser_open = user_config.sample_browser_open;
     state.sample_browser_width = user_config.sample_browser_width;
     state.bottom_panel_open = user_config.bottom_panel_open;
@@ -149,10 +145,10 @@ fn main() {
     state.sample_auto_play = user_config.sample_auto_play;
     state.audio_device_idx = user_config.audio_device_idx;
     state.left_panel_tab = match user_config.left_panel_tab {
-        1 => state::LeftPanelTab::Clips,
-        2 => state::LeftPanelTab::Instruments,
-        3 => state::LeftPanelTab::Themes,
-        _ => state::LeftPanelTab::Files,
+        1 => app::state::LeftPanelTab::Clips,
+        2 => app::state::LeftPanelTab::Instruments,
+        3 => app::state::LeftPanelTab::Themes,
+        _ => app::state::LeftPanelTab::Files,
     };
     // Load favorite folders into sample browser
     for folder in &user_config.favorite_folders {
@@ -169,10 +165,10 @@ fn main() {
     state.autosave_enabled = user_config.autosave_enabled;
     state.autosave_interval_idx = user_config
         .autosave_interval_idx
-        .min(crate::config::AUTOSAVE_INTERVALS.len() - 1);
+        .min(crate::app::config::AUTOSAVE_INTERVALS.len() - 1);
     // Initialize autosave countdown based on config interval
     if state.autosave_enabled {
-        let (_, secs) = crate::config::AUTOSAVE_INTERVALS[state.autosave_interval_idx];
+        let (_, secs) = crate::app::config::AUTOSAVE_INTERVALS[state.autosave_interval_idx];
         state.autosave_countdown = secs * 60; // frames (assuming ~60fps)
     }
 
@@ -196,7 +192,7 @@ fn main() {
             Ok(()) => {
                 println!("[session] Loaded {}", default_save);
                 // Keep mode as ProjectManager so the startup screen shows
-                state.mode = crate::state::AppMode::ProjectManager;
+                state.mode = crate::app::state::AppMode::ProjectManager;
             }
             Err(e) => eprintln!("[session] Load error: {}", e),
         }
@@ -254,10 +250,10 @@ fn main() {
             win_w: state.window_width,
             win_h: state.window_height,
             left_tab: match state.left_panel_tab {
-                state::LeftPanelTab::Files => 0,
-                state::LeftPanelTab::Clips => 1,
-                state::LeftPanelTab::Instruments => 2,
-                state::LeftPanelTab::Themes => 3,
+                app::state::LeftPanelTab::Files => 0,
+                app::state::LeftPanelTab::Clips => 1,
+                app::state::LeftPanelTab::Instruments => 2,
+                app::state::LeftPanelTab::Themes => 3,
             },
             sample_auto: state.sample_auto_play,
             audio_dev: state.audio_device_idx,
@@ -338,7 +334,7 @@ fn main() {
                                         state.mode = AppMode::Arrangement;
                                     }
                                 } else if state.focused_panel
-                                    == crate::state::FocusedPanel::AudioEditor
+                                    == crate::app::state::FocusedPanel::AudioEditor
                                     && state.audio_editor_selection.is_some()
                                 {
                                     state.audio_editor_selection = None;
@@ -363,7 +359,9 @@ fn main() {
                             _ if state.mode == AppMode::ProjectManager => {}
                             Keycode::Space => {
                                 // If audio editor is focused, Space controls its own playback
-                                if state.focused_panel == crate::state::FocusedPanel::AudioEditor {
+                                if state.focused_panel
+                                    == crate::app::state::FocusedPanel::AudioEditor
+                                {
                                     if state.audio_editor_playing {
                                         // Stop audio editor playback
                                         state.audio_editor_playing = false;
@@ -382,7 +380,9 @@ fn main() {
                                                     .find(|t| t.id == tid)
                                                     .and_then(|t| t.clips.get(cidx))
                                                     .and_then(|c| {
-                                                        if let crate::models::Clip::Audio(ac) = c {
+                                                        if let crate::app::models::Clip::Audio(ac) =
+                                                            c
+                                                        {
                                                             Some(ac.source_file.clone())
                                                         } else {
                                                             None
@@ -495,7 +495,7 @@ fn main() {
                                 if input.ctrl()
                                     && input.shift()
                                     && state.focused_panel
-                                        == crate::state::FocusedPanel::AudioEditor =>
+                                        == crate::app::state::FocusedPanel::AudioEditor =>
                             {
                                 // Audio editor redo
                                 if let Some((src, backup, desc, proj_snapshot)) =
@@ -547,7 +547,7 @@ fn main() {
                             Keycode::Z
                                 if input.ctrl()
                                     && state.focused_panel
-                                        == crate::state::FocusedPanel::AudioEditor =>
+                                        == crate::app::state::FocusedPanel::AudioEditor =>
                             {
                                 // Audio editor undo
                                 if let Some((src, backup, desc, proj_snapshot)) =
@@ -618,7 +618,7 @@ fn main() {
                             Keycode::A
                                 if !input.ctrl()
                                     && state.focused_panel
-                                        == crate::state::FocusedPanel::AudioEditor =>
+                                        == crate::app::state::FocusedPanel::AudioEditor =>
                             {
                                 // Select All — select the entire waveform
                                 let total = state.selected_clip.and_then(|(tid, cidx)| {
@@ -629,7 +629,7 @@ fn main() {
                                         .find(|t| t.id == tid)
                                         .and_then(|t| t.clips.get(cidx))
                                         .and_then(|c| {
-                                            if let crate::models::Clip::Audio(ac) = c {
+                                            if let crate::app::models::Clip::Audio(ac) = c {
                                                 let path = std::path::Path::new(&ac.source_file);
                                                 crate::engine::load_audio_interleaved(path)
                                                     .ok()
@@ -650,7 +650,7 @@ fn main() {
                             Keycode::S
                                 if !input.ctrl()
                                     && state.focused_panel
-                                        == crate::state::FocusedPanel::AudioEditor =>
+                                        == crate::app::state::FocusedPanel::AudioEditor =>
                             {
                                 // Toggle audio editor snap
                                 state.audio_editor_snap_enabled = !state.audio_editor_snap_enabled;
@@ -665,14 +665,14 @@ fn main() {
                                 if !input.ctrl()
                                     && !piano_consumes
                                     && state.focused_panel
-                                        == crate::state::FocusedPanel::AudioEditor =>
+                                        == crate::app::state::FocusedPanel::AudioEditor =>
                             {
                                 state.push_status("Press TRIM button or use toolbar");
                             }
                             Keycode::N
                                 if !input.ctrl()
                                     && state.focused_panel
-                                        == crate::state::FocusedPanel::AudioEditor =>
+                                        == crate::app::state::FocusedPanel::AudioEditor =>
                             {
                                 state.push_status("Press NORM button or use toolbar");
                             }
@@ -682,7 +682,7 @@ fn main() {
                             Keycode::Up
                                 if input.shift()
                                     && state.focused_panel
-                                        != crate::state::FocusedPanel::PianoRoll =>
+                                        != crate::app::state::FocusedPanel::PianoRoll =>
                             {
                                 if let Some(id) = state.selected_track {
                                     if let Some(i) =
@@ -699,7 +699,7 @@ fn main() {
                             Keycode::Down
                                 if input.shift()
                                     && state.focused_panel
-                                        != crate::state::FocusedPanel::PianoRoll =>
+                                        != crate::app::state::FocusedPanel::PianoRoll =>
                             {
                                 if let Some(id) = state.selected_track {
                                     if let Some(i) =
@@ -742,7 +742,7 @@ fn main() {
                                         groups.into_iter().filter(|(_, v)| v.len() >= 2).collect();
                                     if !join_groups.is_empty() {
                                         state.commands.execute(
-                                            Box::new(crate::commands::JoinClips {
+                                            Box::new(crate::app::commands::JoinClips {
                                                 groups: join_groups,
                                             }),
                                             &mut state.project,
@@ -762,7 +762,7 @@ fn main() {
                                 input.consume_key(Keycode::J);
                             }
                             Keycode::Delete | Keycode::Backspace => {
-                                use crate::state::FocusedPanel;
+                                use crate::app::state::FocusedPanel;
                                 match state.focused_panel {
                                     FocusedPanel::PianoRoll => {
                                         // Delete selected MIDI notes in the piano roll
@@ -770,7 +770,7 @@ fn main() {
                                             if !state.piano_roll_selected_notes.is_empty() {
                                                 let notes_to_delete: Vec<(
                                                     usize,
-                                                    crate::models::MidiNote,
+                                                    crate::app::models::MidiNote,
                                                 )> = state
                                                     .piano_roll_selected_notes
                                                     .iter()
@@ -783,7 +783,9 @@ fn main() {
                                                             .find(|t| t.id == tid)
                                                             .and_then(|t| t.clips.get(ci))
                                                             .and_then(|c| {
-                                                                if let models::Clip::Midi(m) = c {
+                                                                if let app::models::Clip::Midi(m) =
+                                                                    c
+                                                                {
                                                                     m.notes
                                                                         .get(ni)
                                                                         .cloned()
@@ -797,7 +799,7 @@ fn main() {
                                                 if !notes_to_delete.is_empty() {
                                                     state.commands.execute(
                                                         Box::new(
-                                                            crate::commands::DeleteMidiNotes {
+                                                            crate::app::commands::DeleteMidiNotes {
                                                                 track_id: tid,
                                                                 clip_idx: ci,
                                                                 notes: notes_to_delete,
@@ -821,25 +823,28 @@ fn main() {
                                             }
                                         }
                                         if !to_remove.is_empty() {
-                                            let clips_placeholder: Vec<(u32, usize, models::Clip)> =
-                                                to_remove
-                                                    .iter()
-                                                    .filter_map(|&(tid, ci)| {
-                                                        state
-                                                            .project
-                                                            .tracks
-                                                            .iter()
-                                                            .find(|t| t.id == tid)
-                                                            .and_then(|t| {
-                                                                t.clips
-                                                                    .get(ci)
-                                                                    .cloned()
-                                                                    .map(|c| (tid, ci, c))
-                                                            })
-                                                    })
-                                                    .collect();
+                                            let clips_placeholder: Vec<(
+                                                u32,
+                                                usize,
+                                                app::models::Clip,
+                                            )> = to_remove
+                                                .iter()
+                                                .filter_map(|&(tid, ci)| {
+                                                    state
+                                                        .project
+                                                        .tracks
+                                                        .iter()
+                                                        .find(|t| t.id == tid)
+                                                        .and_then(|t| {
+                                                            t.clips
+                                                                .get(ci)
+                                                                .cloned()
+                                                                .map(|c| (tid, ci, c))
+                                                        })
+                                                })
+                                                .collect();
                                             state.commands.execute(
-                                                Box::new(crate::commands::DeleteClips {
+                                                Box::new(crate::app::commands::DeleteClips {
                                                     clips: clips_placeholder,
                                                 }),
                                                 &mut state.project,
@@ -857,7 +862,7 @@ fn main() {
                             Keycode::C if input.ctrl() => {
                                 // Copy selected clips to clipboard
                                 state.clipboard.clear();
-                                let mut clips: Vec<(u32, crate::models::Clip)> = Vec::new();
+                                let mut clips: Vec<(u32, crate::app::models::Clip)> = Vec::new();
                                 for (tid, ci) in &state.selected_clips {
                                     if let Some(track) =
                                         state.project.tracks.iter().find(|t| t.id == *tid)
@@ -896,14 +901,14 @@ fn main() {
                                     for (tid, clip) in clipboard_copy {
                                         // Determine the clip's required track type
                                         let required_type = match &clip {
-                                            crate::models::Clip::Midi(_) => {
-                                                crate::models::TrackType::Midi
+                                            crate::app::models::Clip::Midi(_) => {
+                                                crate::app::models::TrackType::Midi
                                             }
-                                            crate::models::Clip::Audio(_) => {
-                                                crate::models::TrackType::Audio
+                                            crate::app::models::Clip::Audio(_) => {
+                                                crate::app::models::TrackType::Audio
                                             }
-                                            crate::models::Clip::Automation(_) => {
-                                                crate::models::TrackType::Automation
+                                            crate::app::models::Clip::Automation(_) => {
+                                                crate::app::models::TrackType::Automation
                                             }
                                         };
                                         // Try original track first, then first track of same type
@@ -925,13 +930,13 @@ fn main() {
                                             let new_start =
                                                 (new_clip.start_time() + offset).max(0.0);
                                             match &mut new_clip {
-                                                crate::models::Clip::Midi(c) => {
+                                                crate::app::models::Clip::Midi(c) => {
                                                     c.start_time = new_start
                                                 }
-                                                crate::models::Clip::Audio(c) => {
+                                                crate::app::models::Clip::Audio(c) => {
                                                     c.start_time = new_start
                                                 }
-                                                crate::models::Clip::Automation(c) => {
+                                                crate::app::models::Clip::Automation(c) => {
                                                     c.start_time = new_start
                                                 }
                                             }
@@ -958,7 +963,7 @@ fn main() {
                                         }
 
                                         state.commands.execute(
-                                            Box::new(crate::commands::AddClips {
+                                            Box::new(crate::app::commands::AddClips {
                                                 clips: new_clips,
                                                 added_indices: Vec::new(),
                                             }),
@@ -969,13 +974,13 @@ fn main() {
                                 }
                             }
                             Keycode::D if input.ctrl() => {
-                                use crate::state::FocusedPanel;
+                                use crate::app::state::FocusedPanel;
                                 match state.focused_panel {
                                     FocusedPanel::PianoRoll => {
                                         // Duplicate selected notes in the piano roll (undoable)
                                         if let Some((tid, ci)) = state.selected_clip {
                                             if !state.piano_roll_selected_notes.is_empty() {
-                                                let notes: Vec<crate::models::MidiNote> = state
+                                                let notes: Vec<crate::app::models::MidiNote> = state
                                                     .piano_roll_selected_notes
                                                     .iter()
                                                     .filter_map(|&ni| {
@@ -986,7 +991,7 @@ fn main() {
                                                             .find(|t| t.id == tid)
                                                             .and_then(|t| t.clips.get(ci))
                                                             .and_then(|c| {
-                                                                if let crate::models::Clip::Midi(
+                                                                if let crate::app::models::Clip::Midi(
                                                                     m,
                                                                 ) = c
                                                                 {
@@ -1008,15 +1013,16 @@ fn main() {
                                                         .map(|n| n.start + n.length)
                                                         .fold(0.0_f64, f64::max);
                                                     let offset = (max_end - min_start).max(0.25);
-                                                    let new_notes: Vec<crate::models::MidiNote> =
-                                                        notes
-                                                            .iter()
-                                                            .map(|note| {
-                                                                let mut dup = note.clone();
-                                                                dup.start += offset;
-                                                                dup
-                                                            })
-                                                            .collect();
+                                                    let new_notes: Vec<
+                                                        crate::app::models::MidiNote,
+                                                    > = notes
+                                                        .iter()
+                                                        .map(|note| {
+                                                            let mut dup = note.clone();
+                                                            dup.start += offset;
+                                                            dup
+                                                        })
+                                                        .collect();
                                                     let count = new_notes.len();
                                                     // Get current note count for selecting new notes after command
                                                     let base = state
@@ -1026,7 +1032,9 @@ fn main() {
                                                         .find(|t| t.id == tid)
                                                         .and_then(|t| t.clips.get(ci))
                                                         .and_then(|c| {
-                                                            if let crate::models::Clip::Midi(m) = c
+                                                            if let crate::app::models::Clip::Midi(
+                                                                m,
+                                                            ) = c
                                                             {
                                                                 Some(m.notes.len())
                                                             } else {
@@ -1035,12 +1043,14 @@ fn main() {
                                                         })
                                                         .unwrap_or(0);
                                                     state.commands.execute(
-                                                        Box::new(crate::commands::DuplicateNotes {
-                                                            track_id: tid,
-                                                            clip_idx: ci,
-                                                            new_notes,
-                                                            count: 0,
-                                                        }),
+                                                        Box::new(
+                                                            crate::app::commands::DuplicateNotes {
+                                                                track_id: tid,
+                                                                clip_idx: ci,
+                                                                new_notes,
+                                                                count: 0,
+                                                            },
+                                                        ),
                                                         &mut state.project,
                                                     );
                                                     // Select the new notes
@@ -1099,13 +1109,13 @@ fn main() {
                                                     let new_start = orig.start_time() + dup_offset;
                                                     let mut dup = orig.clone();
                                                     match &mut dup {
-                                                        crate::models::Clip::Midi(c) => {
+                                                        crate::app::models::Clip::Midi(c) => {
                                                             c.start_time = new_start
                                                         }
-                                                        crate::models::Clip::Audio(c) => {
+                                                        crate::app::models::Clip::Audio(c) => {
                                                             c.start_time = new_start
                                                         }
-                                                        crate::models::Clip::Automation(c) => {
+                                                        crate::app::models::Clip::Automation(c) => {
                                                             c.start_time = new_start
                                                         }
                                                     }
@@ -1134,7 +1144,7 @@ fn main() {
                                             }
 
                                             state.commands.execute(
-                                                Box::new(crate::commands::AddClips {
+                                                Box::new(crate::app::commands::AddClips {
                                                     clips: new_clips,
                                                     added_indices: Vec::new(),
                                                 }),
@@ -1146,7 +1156,7 @@ fn main() {
                                 } // end match focused_panel
                             }
                             Keycode::A if input.ctrl() => {
-                                use crate::state::FocusedPanel;
+                                use crate::app::state::FocusedPanel;
                                 match state.focused_panel {
                                     FocusedPanel::Arrangement => {
                                         // Select all clips across all tracks
@@ -1271,22 +1281,22 @@ fn main() {
                     // Render MIDI through default Analog synth for preview
                     let path_str = path.to_string_lossy().to_string();
                     let bpm = state.project.tempo_map.bpm_at(0.0);
-                    match crate::models::import_midi_file(&path_str, bpm) {
+                    match crate::app::models::import_midi_file(&path_str, bpm) {
                         Ok(tracks_data) => {
                             // Build a temporary project with the imported MIDI
-                            let mut preview_proj = crate::models::Project::default();
+                            let mut preview_proj = crate::app::models::Project::default();
                             if let Some(entry) = preview_proj.tempo_map.changes.first_mut() {
                                 entry.bpm = bpm;
                             }
                             for (i, (track_name, midi_clip)) in tracks_data.into_iter().enumerate()
                             {
-                                let mut t = crate::models::Track::new(
+                                let mut t = crate::app::models::Track::new(
                                     (i + 1) as u32,
                                     &track_name,
-                                    crate::models::TrackType::Midi,
+                                    crate::app::models::TrackType::Midi,
                                 );
-                                t.rack = vec![crate::models::RackSlot::subtractive_synth(1)];
-                                t.clips.push(crate::models::Clip::Midi(midi_clip));
+                                t.rack = vec![crate::app::models::RackSlot::subtractive_synth(1)];
+                                t.clips.push(crate::app::models::Clip::Midi(midi_clip));
                                 preview_proj.tracks.push(t);
                             }
                             // Render to a temporary WAV file
@@ -1360,7 +1370,7 @@ fn main() {
                                 audio.preview_loop_enabled = state.audio_editor_loop_enabled
                                     && state.audio_editor_loop_end > state.audio_editor_loop_start
                                     && state.focused_panel
-                                        == crate::state::FocusedPanel::AudioEditor;
+                                        == crate::app::state::FocusedPanel::AudioEditor;
                                 audio.preview_loop_start = if audio.preview_loop_enabled {
                                     (state.audio_editor_loop_start * (*sr) as f64) as usize
                                 } else {
@@ -1416,10 +1426,12 @@ fn main() {
                 .project
                 .tracks
                 .iter()
-                .filter(|t| t.track_type == models::TrackType::Automation && t.automation_enabled)
+                .filter(|t| {
+                    t.track_type == app::models::TrackType::Automation && t.automation_enabled
+                })
                 .flat_map(|t| {
                     t.clips.iter().filter_map(|c| {
-                        if let models::Clip::Automation(ac) = c {
+                        if let app::models::Clip::Automation(ac) = c {
                             let clip_end = ac.start_time + ac.length;
                             if cur_pos < ac.start_time || cur_pos > clip_end {
                                 return None;
@@ -1589,9 +1601,9 @@ fn main() {
                     modules::ModuleExtra::default()
                 };
 
-                if track.track_type == models::TrackType::Midi {
+                if track.track_type == app::models::TrackType::Midi {
                     for clip in &track.clips {
-                        if let models::Clip::Midi(mc) = clip {
+                        if let app::models::Clip::Midi(mc) = clip {
                             let notes = mc
                                 .notes
                                 .iter()
@@ -1611,7 +1623,7 @@ fn main() {
                     }
                 }
                 for clip in &track.clips {
-                    if let models::Clip::Audio(ac) = clip {
+                    if let app::models::Clip::Audio(ac) = clip {
                         if ac.source_file.is_empty() {
                             continue;
                         }
@@ -1654,7 +1666,7 @@ fn main() {
                     pan: track.pan,
                     mute: track.mute,
                     solo: track.solo,
-                    is_automation: track.track_type == models::TrackType::Automation,
+                    is_automation: track.track_type == app::models::TrackType::Automation,
                     midi_clips,
                     audio_clips: audio_clips_vec,
                     instrument_module,
@@ -2033,10 +2045,10 @@ fn main() {
                 win_w: state.window_width,
                 win_h: state.window_height,
                 left_tab: match state.left_panel_tab {
-                    state::LeftPanelTab::Files => 0,
-                    state::LeftPanelTab::Clips => 1,
-                    state::LeftPanelTab::Instruments => 2,
-                    state::LeftPanelTab::Themes => 3,
+                    app::state::LeftPanelTab::Files => 0,
+                    app::state::LeftPanelTab::Clips => 1,
+                    app::state::LeftPanelTab::Instruments => 2,
+                    app::state::LeftPanelTab::Themes => 3,
                 },
                 sample_auto: state.sample_auto_play,
                 audio_dev: state.audio_device_idx,
@@ -2052,7 +2064,7 @@ fn main() {
                 state.config_save_countdown -= 1;
             }
             if state.config_save_countdown == 0 {
-                let cfg = config::UserConfig {
+                let cfg = app::config::UserConfig {
                     theme_name: state.theme.name.clone(),
                     favorite_folders: state.favorite_folders.clone(),
                     auto_return: state.auto_return,
@@ -2067,10 +2079,10 @@ fn main() {
                     window_width: state.window_width,
                     window_height: state.window_height,
                     left_panel_tab: match state.left_panel_tab {
-                        state::LeftPanelTab::Files => 0,
-                        state::LeftPanelTab::Clips => 1,
-                        state::LeftPanelTab::Instruments => 2,
-                        state::LeftPanelTab::Themes => 3,
+                        app::state::LeftPanelTab::Files => 0,
+                        app::state::LeftPanelTab::Clips => 1,
+                        app::state::LeftPanelTab::Instruments => 2,
+                        app::state::LeftPanelTab::Themes => 3,
                     },
                     sample_auto_play: state.sample_auto_play,
                     audio_device_idx: state.audio_device_idx,
@@ -2130,7 +2142,7 @@ fn main() {
                     Err(e) => state.push_status(format!("Autosave failed: {}", e)),
                 }
                 // Reset countdown
-                let (_, secs) = crate::config::AUTOSAVE_INTERVALS[state.autosave_interval_idx];
+                let (_, secs) = crate::app::config::AUTOSAVE_INTERVALS[state.autosave_interval_idx];
                 state.autosave_countdown = secs * 60;
             }
         }
@@ -2157,7 +2169,7 @@ fn main() {
 
     // Save user config on exit
     {
-        let cfg = config::UserConfig {
+        let cfg = app::config::UserConfig {
             theme_name: state.theme.name.clone(),
             favorite_folders: state.favorite_folders.clone(),
             auto_return: state.auto_return,
@@ -2172,10 +2184,10 @@ fn main() {
             window_width: state.window_width,
             window_height: state.window_height,
             left_panel_tab: match state.left_panel_tab {
-                state::LeftPanelTab::Files => 0,
-                state::LeftPanelTab::Clips => 1,
-                state::LeftPanelTab::Instruments => 2,
-                state::LeftPanelTab::Themes => 3,
+                app::state::LeftPanelTab::Files => 0,
+                app::state::LeftPanelTab::Clips => 1,
+                app::state::LeftPanelTab::Instruments => 2,
+                app::state::LeftPanelTab::Themes => 3,
             },
             sample_auto_play: state.sample_auto_play,
             audio_device_idx: state.audio_device_idx,

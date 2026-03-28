@@ -4,7 +4,7 @@ use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::input::{InputState, WidgetId};
+use crate::app::input::{InputState, WidgetId};
 use crate::theme::Theme;
 use crate::widgets::{draw_pixel_label, draw_thick_arc, inv_lerp, lerp};
 

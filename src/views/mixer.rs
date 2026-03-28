@@ -5,9 +5,9 @@ use sdl2::render::Canvas;
 use sdl2::video::Window;
 
 use super::{vol_gain_to_pos, vol_pos_to_gain};
-use crate::input::{InputState, WidgetId};
-use crate::models::create_rack_slot_for_module;
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::models::create_rack_slot_for_module;
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -188,14 +188,14 @@ pub(super) fn draw_bottom_mixer(
         .project
         .tracks
         .iter()
-        .filter(|t| t.track_type != crate::models::TrackType::Automation)
+        .filter(|t| t.track_type != crate::app::models::TrackType::Automation)
         .count() as i32;
     let _ = non_auto_count; // used only for legacy uniform-width fallback
                             // Compute total width accounting for slim tracks
     let total_content_w = {
         let mut tw = 12i32;
         for t in &state.project.tracks {
-            if t.track_type == crate::models::TrackType::Automation {
+            if t.track_type == crate::app::models::TrackType::Automation {
                 continue;
             }
             let sw = if state.mixer_slim_tracks.contains(&t.id) {
@@ -221,7 +221,7 @@ pub(super) fn draw_bottom_mixer(
     let mut _strip_idx = 0;
     let mut strip_x_accum = 8i32; // accumulated x position for variable-width strips
     for i in 0..track_count {
-        if state.project.tracks[i].track_type == crate::models::TrackType::Automation {
+        if state.project.tracks[i].track_type == crate::app::models::TrackType::Automation {
             continue;
         }
 
@@ -328,7 +328,7 @@ pub(super) fn draw_bottom_mixer(
                     .project
                     .tracks
                     .iter()
-                    .filter(|t| t.track_type != crate::models::TrackType::Automation)
+                    .filter(|t| t.track_type != crate::app::models::TrackType::Automation)
                     .map(|t| t.id)
                     .collect();
                 if let Some(clicked_idx) = track_ids.iter().position(|&tid| tid == track_id) {
@@ -470,7 +470,7 @@ pub(super) fn draw_bottom_mixer(
             let new_gain = state.project.tracks[i].volume;
             if (old_gain - new_gain).abs() > 1e-4 {
                 state.commands.execute(
-                    Box::new(crate::commands::SetTrackVolume {
+                    Box::new(crate::app::commands::SetTrackVolume {
                         track_id,
                         old_value: old_gain,
                         new_value: new_gain,
@@ -981,7 +981,7 @@ pub(super) fn draw_bottom_mixer(
                 let old_pan = input.drag_start_value as f32;
                 if (old_pan - pan_val).abs() > 1e-4 {
                     state.commands.execute(
-                        Box::new(crate::commands::SetTrackPan {
+                        Box::new(crate::app::commands::SetTrackPan {
                             track_id,
                             old_value: old_pan,
                             new_value: pan_val,
@@ -1022,7 +1022,7 @@ pub(super) fn draw_bottom_mixer(
             if mute_clicked {
                 let new_mute = !mute_on;
                 state.commands.execute(
-                    Box::new(crate::commands::SetTrackMute {
+                    Box::new(crate::app::commands::SetTrackMute {
                         track_id,
                         new_value: new_mute,
                         old_value: mute_on,
@@ -1067,7 +1067,7 @@ pub(super) fn draw_bottom_mixer(
                 } else {
                     let new_solo = !solo_on;
                     state.commands.execute(
-                        Box::new(crate::commands::SetTrackSolo {
+                        Box::new(crate::app::commands::SetTrackSolo {
                             track_id,
                             new_value: new_solo,
                             old_value: solo_on,
@@ -1835,7 +1835,7 @@ pub(super) fn draw_bottom_mixer(
 
 pub(super) fn draw_instrument_rack(
     canvas: &mut Canvas<Window>,
-    input: &mut crate::input::InputState,
+    input: &mut crate::app::input::InputState,
     state: &mut AppState,
     top: i32,
     w: i32,
@@ -1851,9 +1851,9 @@ pub(super) fn draw_instrument_rack(
     let (rack_label, track_type) = if let Some(ti) = sel_track_idx {
         let t = &state.project.tracks[ti];
         let chain_label = match t.track_type {
-            crate::models::TrackType::Midi => "MIDI -> Instrument -> FX -> Out",
-            crate::models::TrackType::Audio => "Audio -> FX -> Out",
-            crate::models::TrackType::Automation => "Automation (no rack)",
+            crate::app::models::TrackType::Midi => "MIDI -> Instrument -> FX -> Out",
+            crate::app::models::TrackType::Audio => "Audio -> FX -> Out",
+            crate::app::models::TrackType::Automation => "Automation (no rack)",
         };
         (
             format!("RACK - {} [{}]", t.name, chain_label),
@@ -1874,7 +1874,7 @@ pub(super) fn draw_instrument_rack(
     );
 
     // Automation tracks have no rack
-    if track_type == Some(crate::models::TrackType::Automation) || sel_track_idx.is_none() {
+    if track_type == Some(crate::app::models::TrackType::Automation) || sel_track_idx.is_none() {
         draw_pixel_label(
             canvas,
             &state.theme,
@@ -2015,7 +2015,7 @@ pub(super) fn draw_instrument_rack(
         if toggle_clicked {
             let track_id = state.project.tracks[ti].id;
             state.commands.execute(
-                Box::new(crate::commands::RackSlotToggle {
+                Box::new(crate::app::commands::RackSlotToggle {
                     track_id,
                     slot_idx,
                     old_enabled: slot_enabled,
@@ -2047,7 +2047,7 @@ pub(super) fn draw_instrument_rack(
         if del_clicked {
             let track_id = state.project.tracks[ti].id;
             state.commands.execute(
-                Box::new(crate::commands::RackSlotRemove {
+                Box::new(crate::app::commands::RackSlotRemove {
                     track_id,
                     slot_idx,
                     removed_slot: None,
@@ -2258,7 +2258,7 @@ pub(super) fn draw_instrument_rack(
                     if (old_val - val).abs() > 1e-4 {
                         let track_id = state.project.tracks[ti].id;
                         state.commands.execute(
-                            Box::new(crate::commands::SetRackParam {
+                            Box::new(crate::app::commands::SetRackParam {
                                 track_id,
                                 slot_idx,
                                 param_idx: pi,
@@ -2292,7 +2292,7 @@ pub(super) fn draw_instrument_rack(
                         if old_idx != new_idx {
                             let track_id = state.project.tracks[ti].id;
                             state.commands.execute(
-                                Box::new(crate::commands::SetRackParam {
+                                Box::new(crate::app::commands::SetRackParam {
                                     track_id,
                                     slot_idx,
                                     param_idx: pi,
@@ -2340,7 +2340,7 @@ pub(super) fn draw_instrument_rack(
                     if (old_val - val).abs() > 1e-4 {
                         let track_id = state.project.tracks[ti].id;
                         state.commands.execute(
-                            Box::new(crate::commands::SetRackParam {
+                            Box::new(crate::app::commands::SetRackParam {
                                 track_id,
                                 slot_idx,
                                 param_idx: pi,
@@ -2395,7 +2395,7 @@ pub(super) fn draw_instrument_rack(
                         if (old_val - val).abs() > 1e-4 {
                             let track_id = state.project.tracks[ti].id;
                             state.commands.execute(
-                                Box::new(crate::commands::SetRackParam {
+                                Box::new(crate::app::commands::SetRackParam {
                                     track_id,
                                     slot_idx,
                                     param_idx: pi,
@@ -2424,9 +2424,9 @@ pub(super) fn draw_instrument_rack(
 
                 // Check if an automation track for this target already exists
                 let already_exists = state.project.tracks.iter().any(|t| {
-                    t.track_type == crate::models::TrackType::Automation
+                    t.track_type == crate::app::models::TrackType::Automation
                         && t.clips.iter().any(|c| {
-                            if let crate::models::Clip::Automation(ac) = c {
+                            if let crate::app::models::Clip::Automation(ac) = c {
                                 ac.target_param == target_key
                             } else {
                                 false
@@ -2438,10 +2438,10 @@ pub(super) fn draw_instrument_rack(
                     let new_id = state.project.tracks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
                     let track_name = state.project.tracks[ti].name.clone();
                     let auto_name = format!("{} - {}", track_name, param_name_str);
-                    let mut auto_track = crate::models::Track::new(
+                    let mut auto_track = crate::app::models::Track::new(
                         new_id,
                         &auto_name,
-                        crate::models::TrackType::Automation,
+                        crate::app::models::TrackType::Automation,
                     );
                     // Normalize current value to 0–1 range for automation
                     let p_min = state.project.tracks[ti].rack[slot_idx].params[pi].min;
@@ -2452,14 +2452,14 @@ pub(super) fn draw_instrument_rack(
                         0.5
                     };
                     // Add a default automation clip spanning 16 beats
-                    auto_track.clips.push(crate::models::Clip::Automation(
-                        crate::models::AutomationClip {
+                    auto_track.clips.push(crate::app::models::Clip::Automation(
+                        crate::app::models::AutomationClip {
                             points: vec![
-                                crate::models::AutomationPoint {
+                                crate::app::models::AutomationPoint {
                                     time: 0.0,
                                     value: norm_val,
                                 },
-                                crate::models::AutomationPoint {
+                                crate::app::models::AutomationPoint {
                                     time: 16.0,
                                     value: norm_val,
                                 },
@@ -2472,7 +2472,7 @@ pub(super) fn draw_instrument_rack(
                         },
                     ));
                     state.commands.execute(
-                        Box::new(crate::commands::AddTrack { track: auto_track }),
+                        Box::new(crate::app::commands::AddTrack { track: auto_track }),
                         &mut state.project,
                     );
                     state.selected_track = Some(new_id);
@@ -2564,7 +2564,7 @@ pub(super) fn draw_instrument_rack(
                         let track_id = state.project.tracks[ti].id;
                         let old_value = state.project.tracks[ti].sampler_file.clone();
                         state.commands.execute(
-                            Box::new(crate::commands::SetSamplerFile {
+                            Box::new(crate::app::commands::SetSamplerFile {
                                 track_id,
                                 old_value,
                                 new_value: Some(path),
@@ -2584,7 +2584,7 @@ pub(super) fn draw_instrument_rack(
                             let track_id = state.project.tracks[ti].id;
                             let old_value = state.project.tracks[ti].sampler_file.clone();
                             state.commands.execute(
-                                Box::new(crate::commands::SetSamplerFile {
+                                Box::new(crate::app::commands::SetSamplerFile {
                                     track_id,
                                     old_value,
                                     new_value: Some(path),
@@ -2689,20 +2689,21 @@ pub(super) fn draw_instrument_rack(
                 }
 
                 // Helper closure to build choices list
-                let build_sc_choices =
-                    |tracks: &Vec<crate::models::Track>, self_id: u32| -> Vec<Option<u32>> {
-                        std::iter::once(None)
-                            .chain(
-                                tracks
-                                    .iter()
-                                    .filter(|t| {
-                                        t.id != self_id
-                                            && t.track_type != crate::models::TrackType::Automation
-                                    })
-                                    .map(|t| Some(t.id)),
-                            )
-                            .collect()
-                    };
+                let build_sc_choices = |tracks: &Vec<crate::app::models::Track>,
+                                        self_id: u32|
+                 -> Vec<Option<u32>> {
+                    std::iter::once(None)
+                        .chain(
+                            tracks
+                                .iter()
+                                .filter(|t| {
+                                    t.id != self_id
+                                        && t.track_type != crate::app::models::TrackType::Automation
+                                })
+                                .map(|t| Some(t.id)),
+                        )
+                        .collect()
+                };
 
                 // Drag: move up/down to change selection
                 if sc_dragging && input.mouse_down {
@@ -2725,7 +2726,7 @@ pub(super) fn draw_instrument_rack(
                         let new_sc = choices[new_idx];
                         if new_sc != cur_sc {
                             state.commands.execute(
-                                Box::new(crate::commands::SetRackSidechain {
+                                Box::new(crate::app::commands::SetRackSidechain {
                                     track_id: track_id_cur,
                                     slot_idx,
                                     old_sc: cur_sc,
@@ -2768,7 +2769,7 @@ pub(super) fn draw_instrument_rack(
                     let new_sc = choices[next_idx];
 
                     state.commands.execute(
-                        Box::new(crate::commands::SetRackSidechain {
+                        Box::new(crate::app::commands::SetRackSidechain {
                             track_id: track_id_cur,
                             slot_idx,
                             old_sc: sc_track_id,
@@ -3612,7 +3613,7 @@ pub(super) fn draw_instrument_rack(
             let _is_audio_effect = crate::modules::is_effect(&module_name);
 
             let (valid, reason) = match track_type {
-                crate::models::TrackType::Midi => {
+                crate::app::models::TrackType::Midi => {
                     // MIDI tracks: signal flow is MIDI Effects → Instruments → Audio FX
                     // Determine where this module should go based on what's already in the rack
                     let rack = &state.project.tracks[ti].rack;
@@ -3764,7 +3765,7 @@ pub(super) fn draw_instrument_rack(
                         }
                     }
                 }
-                crate::models::TrackType::Audio => {
+                crate::app::models::TrackType::Audio => {
                     if is_midi_effect {
                         (
                             false,
@@ -3785,7 +3786,7 @@ pub(super) fn draw_instrument_rack(
                         (true, String::new()) // audio effects are fine on audio tracks
                     }
                 }
-                crate::models::TrackType::Automation => {
+                crate::app::models::TrackType::Automation => {
                     (false, "Cannot add modules to automation tracks".to_string())
                 }
             };
@@ -3805,7 +3806,7 @@ pub(super) fn draw_instrument_rack(
                     if replace_idx < state.project.tracks[ti].rack.len() {
                         // Remove old slot, then add new one at same position
                         state.commands.execute(
-                            Box::new(crate::commands::RackSlotRemove {
+                            Box::new(crate::app::commands::RackSlotRemove {
                                 track_id,
                                 slot_idx: replace_idx,
                                 removed_slot: None,
@@ -3814,7 +3815,7 @@ pub(super) fn draw_instrument_rack(
                         );
                         let slot = create_rack_slot_for_module(&module_name, next_id);
                         state.commands.execute(
-                            Box::new(crate::commands::RackSlotAdd {
+                            Box::new(crate::app::commands::RackSlotAdd {
                                 track_id,
                                 slot,
                                 insert_at: Some(replace_idx),
@@ -3832,7 +3833,7 @@ pub(super) fn draw_instrument_rack(
                     let insert_idx = state.module_drag_insert_idx.take();
                     let slot = create_rack_slot_for_module(&module_name, next_id);
                     state.commands.execute(
-                        Box::new(crate::commands::RackSlotAdd {
+                        Box::new(crate::app::commands::RackSlotAdd {
                             track_id,
                             slot,
                             insert_at: insert_idx,
@@ -3875,7 +3876,7 @@ pub(super) fn draw_instrument_rack(
                     // Validate signal flow order after reorder
                     let module_name = state.project.tracks[ti].rack[src].plugin_name.clone();
                     let is_midi_track =
-                        state.project.tracks[ti].track_type == crate::models::TrackType::Midi;
+                        state.project.tracks[ti].track_type == crate::app::models::TrackType::Midi;
                     let insert_at = if dst > src {
                         (dst - 1).min(state.project.tracks[ti].rack.len())
                     } else {
@@ -4012,7 +4013,7 @@ pub(super) fn draw_instrument_rack(
 
         let mut choices: Vec<(Option<u32>, String)> = vec![(None, "Self".to_string())];
         for t in &state.project.tracks {
-            if t.id != self_id && t.track_type != crate::models::TrackType::Automation {
+            if t.id != self_id && t.track_type != crate::app::models::TrackType::Automation {
                 let label = if t.name.is_empty() {
                     format!("Track {}", t.id)
                 } else {
@@ -4084,7 +4085,7 @@ pub(super) fn draw_instrument_rack(
             {
                 let track_id = state.project.tracks[popup_ti].id;
                 state.commands.execute(
-                    Box::new(crate::commands::SetRackSidechain {
+                    Box::new(crate::app::commands::SetRackSidechain {
                         track_id,
                         slot_idx: popup_si,
                         old_sc: cur_sc,
@@ -4117,7 +4118,7 @@ pub(super) fn draw_instrument_rack(
 /// Draw the master output effects rack — uses the same visual style as the track rack.
 pub(super) fn draw_master_rack(
     canvas: &mut Canvas<Window>,
-    input: &mut crate::input::InputState,
+    input: &mut crate::app::input::InputState,
     state: &mut AppState,
     top: i32,
     w: i32,
@@ -4406,7 +4407,7 @@ pub(super) fn draw_master_rack(
                         state.dirty = true;
                         if old_idx != new_idx {
                             state.commands.execute(
-                                Box::new(crate::commands::SetMasterRackParam {
+                                Box::new(crate::app::commands::SetMasterRackParam {
                                     slot_idx,
                                     param_idx: pi,
                                     old_value: old_val,
@@ -4444,7 +4445,7 @@ pub(super) fn draw_master_rack(
                     input.consume();
                     if (old_val - val).abs() > 1e-4 {
                         state.commands.execute(
-                            Box::new(crate::commands::SetMasterRackParam {
+                            Box::new(crate::app::commands::SetMasterRackParam {
                                 slot_idx,
                                 param_idx: pi,
                                 old_value: old_val,
@@ -4484,7 +4485,7 @@ pub(super) fn draw_master_rack(
                     let old_val = input.drag_start_value as f32;
                     if (old_val - val).abs() > 1e-4 {
                         state.commands.execute(
-                            Box::new(crate::commands::SetMasterRackParam {
+                            Box::new(crate::app::commands::SetMasterRackParam {
                                 slot_idx,
                                 param_idx: pi,
                                 old_value: old_val,
@@ -5247,7 +5248,7 @@ pub(super) fn draw_master_rack(
         },
     );
     if add_btn_clicked {
-        state.left_panel_tab = crate::state::LeftPanelTab::Instruments;
+        state.left_panel_tab = crate::app::state::LeftPanelTab::Instruments;
         if state.sample_browser_width < 10 {
             state.sample_browser_width = 220;
         }

@@ -8,8 +8,8 @@ use super::audio_editor::draw_audio_editor;
 use super::automation_editor::draw_automation_editor;
 use super::mixer::{draw_bottom_mixer, draw_instrument_rack, draw_master_rack};
 use super::piano_roll::draw_piano_roll_at;
-use crate::input::InputState;
-use crate::state::*;
+use crate::app::input::InputState;
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -90,7 +90,7 @@ pub fn draw_bottom_panel(
     };
     if close_clicked {
         state.bottom_panel_open = false;
-        state.focused_panel = crate::state::FocusedPanel::Arrangement;
+        state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
     }
 
     // Drag to resize (only when close wasn't clicked AND mouse is not over a tab button)
@@ -113,7 +113,7 @@ pub fn draw_bottom_panel(
     }
     // On release: act if it wasn't a drag (single) or regardless of drift (double)
     if handle_click_zone && input.mouse_released && !input.consumed {
-        if state.bottom_panel_click_type == Some(crate::input::ClickType::Double) {
+        if state.bottom_panel_click_type == Some(crate::app::input::ClickType::Double) {
             input.consumed = true;
             if state.bottom_panel_open {
                 // Open (any height) → maximize to top (X button handles closing)
@@ -123,7 +123,7 @@ pub fn draw_bottom_panel(
                 state.bottom_panel_height = state.bottom_panel_max_h();
                 state.bottom_panel_open = true;
             }
-        } else if state.bottom_panel_click_type == Some(crate::input::ClickType::Single)
+        } else if state.bottom_panel_click_type == Some(crate::app::input::ClickType::Single)
             && !input.dragging
             && dots_zone
             && !state.bottom_panel_open
@@ -147,7 +147,7 @@ pub fn draw_bottom_panel(
             state.bottom_panel_height = new_h.clamp(min_h, state.bottom_panel_max_h());
         } else {
             state.bottom_panel_open = false;
-            state.focused_panel = crate::state::FocusedPanel::Arrangement;
+            state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
         }
     }
     if !input.mouse_down {
@@ -226,9 +226,9 @@ pub fn draw_bottom_panel(
                         .find(|t| t.id == tid)
                         .and_then(|t| t.clips.get(ci))
                         .map(|c| match c {
-                            crate::models::Clip::Midi(_) => 0,
-                            crate::models::Clip::Audio(_) => 1,
-                            crate::models::Clip::Automation(_) => 2,
+                            crate::app::models::Clip::Midi(_) => 0,
+                            crate::app::models::Clip::Audio(_) => 1,
+                            crate::app::models::Clip::Automation(_) => 2,
                         })
                 });
                 match clip_type {

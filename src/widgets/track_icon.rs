@@ -6,14 +6,14 @@ use sdl2::video::Window;
 
 pub fn draw_track_type_icon(
     canvas: &mut Canvas<Window>,
-    track_type: &crate::models::TrackType,
+    track_type: &crate::app::models::TrackType,
     x: i32,
     y: i32,
     size: i32,
     color: sdl2::pixels::Color,
 ) {
     match track_type {
-        crate::models::TrackType::Midi => {
+        crate::app::models::TrackType::Midi => {
             let kw = (size / 4).max(2);
             let kh = size - 1;
             let bh = kh * 6 / 10;
@@ -30,7 +30,7 @@ pub fn draw_track_type_icon(
                 let _ = canvas.fill_rect(Rect::new(bx, y, bw as u32, bh as u32));
             }
         }
-        crate::models::TrackType::Audio => {
+        crate::app::models::TrackType::Audio => {
             canvas.set_draw_color(color);
             let mid = y + size / 2;
             let amp = size / 2 - 1;
@@ -46,7 +46,7 @@ pub fn draw_track_type_icon(
                 );
             }
         }
-        crate::models::TrackType::Automation => {
+        crate::app::models::TrackType::Automation => {
             canvas.set_draw_color(color);
             let _ = canvas.draw_line(
                 sdl2::rect::Point::new(x, y + size - 2),

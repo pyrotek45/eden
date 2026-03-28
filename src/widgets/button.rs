@@ -5,7 +5,7 @@ use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::input::{InputState, WidgetId};
+use crate::app::input::{InputState, WidgetId};
 use crate::theme::Theme;
 use crate::widgets::{draw_pixel_label, get_font_scale};
 

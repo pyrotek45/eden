@@ -4,8 +4,8 @@ use sdl2::render::Canvas;
 use sdl2::video::Window;
 
 use super::overlays::{draw_file_browser_popup, draw_new_project_popup};
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -139,7 +139,7 @@ pub fn draw_project_manager(
             },
         );
         if continue_clicked {
-            state.mode = crate::state::AppMode::Arrangement;
+            state.mode = crate::app::state::AppMode::Arrangement;
         }
         // Accent highlight on the continue button border
         canvas.set_draw_color(Theme::c(state.theme.accent));
@@ -282,11 +282,11 @@ pub fn draw_project_manager(
                 let path_clone = path.clone();
                 match state.load_project(&path_clone) {
                     Ok(()) => {
-                        state.mode = crate::state::AppMode::Arrangement;
+                        state.mode = crate::app::state::AppMode::Arrangement;
                     }
                     Err(e) => {
                         state.push_status(format!("Failed to load: {}", e));
-                        state.mode = crate::state::AppMode::Arrangement;
+                        state.mode = crate::app::state::AppMode::Arrangement;
                     }
                 }
             }
@@ -310,7 +310,7 @@ pub fn draw_project_manager(
         if !state.file_browser_open {
             let start_path = state.project_browser_path.clone();
             state.open_file_browser(
-                crate::state::FileBrowserCaller::OpenProject,
+                crate::app::state::FileBrowserCaller::OpenProject,
                 "Open Project",
                 ".eden.json",
                 false,
@@ -324,7 +324,7 @@ pub fn draw_project_manager(
                 match state.load_project(&path_str) {
                     Ok(()) => {
                         state.project_browser_open = false;
-                        state.mode = crate::state::AppMode::Arrangement;
+                        state.mode = crate::app::state::AppMode::Arrangement;
                     }
                     Err(e) => {
                         state.push_status(format!("Failed to load: {}", e));

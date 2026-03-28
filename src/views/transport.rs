@@ -4,8 +4,8 @@ use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -325,7 +325,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
                         if let Some(first) = state.project.tempo_map.changes.first_mut() {
                             first.bpm = new_bpm;
                         }
-                        crate::commands::rescale_audio_clips_pub(
+                        crate::app::commands::rescale_audio_clips_pub(
                             &mut state.project,
                             old_bpm,
                             new_bpm,
@@ -343,7 +343,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         let inp = layers.below();
         if inp.mouse_in_rect(262, 10, 72, 28)
             && inp.mouse_pressed
-            && inp.click_type == Some(crate::input::ClickType::Double)
+            && inp.click_type == Some(crate::app::input::ClickType::Double)
         {
             state.text_field_active_id = bpm_tf_id;
             state.text_field_buffer = format!("{:.1}", bpm_val);
@@ -374,7 +374,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
                 if let Some(first) = state.project.tempo_map.changes.first_mut() {
                     first.bpm = bpm_val;
                 }
-                crate::commands::rescale_audio_clips_pub(&mut state.project, old_bpm, bpm_val);
+                crate::app::commands::rescale_audio_clips_pub(&mut state.project, old_bpm, bpm_val);
             }
             // Commit BPM change on mouse release
             if inp.mouse_released {
@@ -640,7 +640,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             },
         );
         if home_clicked {
-            state.mode = crate::state::AppMode::ProjectManager;
+            state.mode = crate::app::state::AppMode::ProjectManager;
         }
 
         // Options
@@ -980,7 +980,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
 
     // ── Clicking the transport bar (anywhere not consumed) focuses arrangement ──
     if input.mouse_pressed && !input.consumed && input.mouse_in_rect(0, 0, w, h) {
-        state.focused_panel = crate::state::FocusedPanel::Arrangement;
+        state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
     }
 }
 
@@ -1136,13 +1136,13 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
         }
 
         if ruler_area && input.right_mouse_pressed {
-            state.focused_panel = crate::state::FocusedPanel::Arrangement;
+            state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
             state.project.transport.loop_enabled = false;
             input.consume();
         }
 
         if ruler_area && input.mouse_pressed && !near_end && input.drag_widget == WidgetId::None {
-            state.focused_panel = crate::state::FocusedPanel::Arrangement;
+            state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
             if near_start {
                 state.loop_drag_orig = Some((loop_start, loop_end));
                 input.drag_widget = WidgetId::LoopStart;
@@ -1172,7 +1172,7 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
             && !near_start
             && input.drag_widget == WidgetId::None
         {
-            state.focused_panel = crate::state::FocusedPanel::Arrangement;
+            state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
             state.loop_drag_orig = Some((loop_start, loop_end));
             input.drag_widget = WidgetId::LoopEnd;
             input.active_widget = WidgetId::LoopEnd;
@@ -1209,7 +1209,7 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
         // Allow drawing new loop region when disabled
         let ruler_area = input.mouse_in_rect(header_w, y, w - header_w, h);
         if ruler_area && input.mouse_pressed && input.drag_widget == WidgetId::None {
-            state.focused_panel = crate::state::FocusedPanel::Arrangement;
+            state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
             state.loop_drag_orig = Some((
                 state.project.transport.loop_region.start,
                 state.project.transport.loop_region.end,
@@ -1237,7 +1237,7 @@ pub fn draw_loop_ruler(canvas: &mut Canvas<Window>, input: &mut InputState, stat
                 state.project.transport.loop_region.start = old_start;
                 state.project.transport.loop_region.end = old_end;
                 state.commands.execute(
-                    Box::new(crate::commands::SetLoopRegion {
+                    Box::new(crate::app::commands::SetLoopRegion {
                         new_start,
                         new_end,
                         old_start: 0.0,
@@ -1332,7 +1332,7 @@ pub fn draw_timeline_ruler(
     let ruler_area = input.mouse_in_rect(header_w, y, w - header_w, h);
     let not_blocked = input.mouse_y < state.bottom_panel_y();
     if ruler_area && input.mouse_pressed && not_blocked {
-        state.focused_panel = crate::state::FocusedPanel::Arrangement;
+        state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
         let raw = scroll + (input.mouse_x - header_w) as f64 / zoom;
         let beat = state.snap.snap(raw).max(0.0);
         state.project.transport.position = beat;
@@ -1371,7 +1371,7 @@ pub fn draw_timeline_ruler(
 
     // Clicking the timeline ruler header-column area focuses the arrangement
     if input.mouse_pressed && !input.consumed && input.mouse_in_rect(0, y, header_w, h) {
-        state.focused_panel = crate::state::FocusedPanel::Arrangement;
+        state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
     }
 }
 

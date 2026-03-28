@@ -4,7 +4,7 @@ use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::input::InputState;
+use crate::app::input::InputState;
 use crate::theme::Theme;
 
 pub const CLIP_HANDLE_W: i32 = 6;

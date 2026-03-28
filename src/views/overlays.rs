@@ -4,8 +4,8 @@ use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -23,7 +23,7 @@ pub(super) fn draw_overlays(
     let layer = state.active_layer();
 
     // Dropdown for snap resolution — only when no popup is shadowing it
-    if layer == crate::state::UiLayer::Base && state.dropdown_open_id == 200 {
+    if layer == crate::app::state::UiLayer::Base && state.dropdown_open_id == 200 {
         let snap_labels: Vec<&str> = SNAP_RESOLUTIONS.iter().map(|(l, _)| *l).collect();
         let mut snap_idx = state.snap.resolution_idx;
         let changed = dropdown(
@@ -46,10 +46,10 @@ pub(super) fn draw_overlays(
 
     // Clear any hover hints set by background widgets before drawing the active
     // popup so no background tooltip bleeds through the popup backdrop.
-    if layer > crate::state::UiLayer::Base {
+    if layer > crate::app::state::UiLayer::Base {
         input.hover_hint_text = None;
-        input.hover_hint_widget = crate::input::WidgetId::None;
-        input.hot_widget = crate::input::WidgetId::None;
+        input.hover_hint_widget = crate::app::input::WidgetId::None;
+        input.hot_widget = crate::app::input::WidgetId::None;
     }
 
     // Project settings / Options popups (Popup layer)
@@ -120,7 +120,7 @@ pub(super) fn draw_overlays(
     if state.file_browser_open {
         if let Some(selected_path) = draw_file_browser_popup(canvas, input, state) {
             match state.file_browser_caller {
-                Some(crate::state::FileBrowserCaller::AudioExportDir) => {
+                Some(crate::app::state::FileBrowserCaller::AudioExportDir) => {
                     state.audio_export_dir = selected_path.to_string_lossy().to_string();
                     // Update text field buffer if directory field is active
                     if state.text_field_active_id == 303 {
@@ -128,17 +128,17 @@ pub(super) fn draw_overlays(
                         state.text_field_cursor = state.text_field_buffer.len();
                     }
                 }
-                Some(crate::state::FileBrowserCaller::MidiExportDir) => {
+                Some(crate::app::state::FileBrowserCaller::MidiExportDir) => {
                     state.midi_export_dir = selected_path.to_string_lossy().to_string();
                     if state.text_field_active_id == 304 {
                         state.text_field_buffer = state.midi_export_dir.clone();
                         state.text_field_cursor = state.text_field_buffer.len();
                     }
                 }
-                Some(crate::state::FileBrowserCaller::OpenProject) => {
+                Some(crate::app::state::FileBrowserCaller::OpenProject) => {
                     // Handled in draw_home_screen
                 }
-                Some(crate::state::FileBrowserCaller::RenderExportDir) => {
+                Some(crate::app::state::FileBrowserCaller::RenderExportDir) => {
                     state.render_export_dir = selected_path.to_string_lossy().to_string();
                     if state.text_field_active_id == 88002 {
                         state.text_field_buffer = state.render_export_dir.clone();
@@ -372,7 +372,7 @@ pub(super) fn draw_overlays(
         if yes_clicked {
             let id = track_id;
             state.commands.execute(
-                Box::new(crate::commands::RemoveTrack {
+                Box::new(crate::app::commands::RemoveTrack {
                     track_id: id,
                     removed_track: None,
                     index: track_index,
@@ -618,7 +618,7 @@ fn draw_project_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
             if !trimmed.is_empty() {
                 let old_name = state.project.name.clone();
                 state.commands.execute(
-                    Box::new(crate::commands::SetProjectName {
+                    Box::new(crate::app::commands::SetProjectName {
                         old_name,
                         new_name: trimmed,
                     }),
@@ -719,19 +719,19 @@ fn draw_project_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
         .project
         .tracks
         .iter()
-        .filter(|t| t.track_type == crate::models::TrackType::Midi)
+        .filter(|t| t.track_type == crate::app::models::TrackType::Midi)
         .count();
     let audio_count = state
         .project
         .tracks
         .iter()
-        .filter(|t| t.track_type == crate::models::TrackType::Audio)
+        .filter(|t| t.track_type == crate::app::models::TrackType::Audio)
         .count();
     let auto_count = state
         .project
         .tracks
         .iter()
-        .filter(|t| t.track_type == crate::models::TrackType::Automation)
+        .filter(|t| t.track_type == crate::app::models::TrackType::Automation)
         .count();
     let tracks_text = format!(
         "{} total ({} MIDI, {} Audio, {} Auto)",
@@ -1264,12 +1264,12 @@ pub(super) fn draw_new_project_popup(
         } else {
             state.new_project_name_buffer.clone()
         };
-        state.project = crate::models::Project::default();
+        state.project = crate::app::models::Project::default();
         state.project.name = name;
         state.last_save_path = None;
         state.dirty = false;
-        state.commands = crate::commands::CommandManager::new(1000);
-        state.mode = crate::state::AppMode::Arrangement;
+        state.commands = crate::app::commands::CommandManager::new(1000);
+        state.mode = crate::app::state::AppMode::Arrangement;
         state.new_project_popup_open = false;
         state.text_field_active_id = 0;
         state.push_status("New project created");
@@ -1585,7 +1585,7 @@ fn draw_audio_export_popup(
         let start = std::path::PathBuf::from(&dir_clone);
         let start_path = if start.is_dir() { Some(start) } else { None };
         state.open_file_browser(
-            crate::state::FileBrowserCaller::AudioExportDir,
+            crate::app::state::FileBrowserCaller::AudioExportDir,
             "Select Export Folder",
             "",
             true,
@@ -1902,7 +1902,7 @@ fn draw_midi_export_popup(
         let start = std::path::PathBuf::from(&dir_clone);
         let start_path = if start.is_dir() { Some(start) } else { None };
         state.open_file_browser(
-            crate::state::FileBrowserCaller::MidiExportDir,
+            crate::app::state::FileBrowserCaller::MidiExportDir,
             "Select Export Folder",
             "",
             true,
@@ -2088,13 +2088,13 @@ fn draw_midi_export_popup(
         let mut export_result: Result<(), String> = Err("No MIDI clip selected".to_string());
         if let Some((tid, ci)) = state.selected_clip {
             if let Some(track) = state.project.tracks.iter().find(|t| t.id == tid) {
-                if let Some(crate::models::Clip::Midi(m)) = track.clips.get(ci) {
+                if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get(ci) {
                     let clip_name = if m.name.is_empty() {
                         format!("clip_{}", ci)
                     } else {
                         m.name.clone()
                     };
-                    export_result = crate::models::export_midi_file(
+                    export_result = crate::app::models::export_midi_file(
                         m,
                         &export_path.to_string_lossy(),
                         bpm,
@@ -2443,7 +2443,7 @@ fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
     if autosave_clicked {
         state.autosave_enabled = !state.autosave_enabled;
         if state.autosave_enabled {
-            let (_, secs) = crate::config::AUTOSAVE_INTERVALS[state.autosave_interval_idx];
+            let (_, secs) = crate::app::config::AUTOSAVE_INTERVALS[state.autosave_interval_idx];
             state.autosave_countdown = secs * 60;
         }
         state.config_dirty = true;
@@ -2461,7 +2461,7 @@ fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
 
     // Autosave interval dropdown (only when enabled)
     if state.autosave_enabled {
-        let interval_labels: Vec<&str> = crate::config::AUTOSAVE_INTERVALS
+        let interval_labels: Vec<&str> = crate::app::config::AUTOSAVE_INTERVALS
             .iter()
             .map(|(label, _)| *label)
             .collect();
@@ -2480,7 +2480,7 @@ fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &mut state.dropdown_open_id,
         );
         if state.autosave_interval_idx != prev_idx {
-            let (_, secs) = crate::config::AUTOSAVE_INTERVALS[state.autosave_interval_idx];
+            let (_, secs) = crate::app::config::AUTOSAVE_INTERVALS[state.autosave_interval_idx];
             state.autosave_countdown = secs * 60;
             state.config_dirty = true;
             state.config_save_countdown = 60;
@@ -2881,7 +2881,7 @@ fn draw_render_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state:
             std::path::PathBuf::from(&state.render_export_dir)
         };
         state.open_file_browser(
-            crate::state::FileBrowserCaller::RenderExportDir,
+            crate::app::state::FileBrowserCaller::RenderExportDir,
             "Select Export Directory",
             "",
             true,

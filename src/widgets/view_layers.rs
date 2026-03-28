@@ -1,6 +1,6 @@
 // Eden DAW — View-level Input Layer Manager
 
-use crate::input::InputState;
+use crate::app::input::InputState;
 
 pub struct ViewLayers<'a> {
     real: &'a mut InputState,

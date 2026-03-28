@@ -6,8 +6,8 @@ use sdl2::video::Window;
 
 use super::transport::{draw_mode_tabs, draw_transport};
 use super::{gain_to_db_label, vol_gain_to_pos, vol_pos_to_gain};
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -141,7 +141,7 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
                 let new_gain = state.project.tracks[i].volume;
                 if (old_gain - new_gain).abs() > 1e-4 {
                     state.commands.execute(
-                        Box::new(crate::commands::SetTrackVolume {
+                        Box::new(crate::app::commands::SetTrackVolume {
                             track_id,
                             old_value: old_gain,
                             new_value: new_gain,
@@ -213,7 +213,7 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
                 let old_pan = input.drag_start_value as f32;
                 if (old_pan - pan_val).abs() > 1e-4 {
                     state.commands.execute(
-                        Box::new(crate::commands::SetTrackPan {
+                        Box::new(crate::app::commands::SetTrackPan {
                             track_id,
                             old_value: old_pan,
                             new_value: pan_val,
@@ -226,7 +226,7 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
 
         // Mute / Solo (skip for automation tracks)
         let is_auto_track =
-            state.project.tracks[i].track_type == crate::models::TrackType::Automation;
+            state.project.tracks[i].track_type == crate::app::models::TrackType::Automation;
         let mute_on = state.project.tracks[i].mute;
         let solo_on = state.project.tracks[i].solo;
 
@@ -259,7 +259,7 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
                         .push_undo_snapshot(snapshot, "Toggle Mute (multi)");
                 } else {
                     state.commands.execute(
-                        Box::new(crate::commands::SetTrackMute {
+                        Box::new(crate::app::commands::SetTrackMute {
                             track_id,
                             new_value: !mute_on,
                             old_value: mute_on,
@@ -298,7 +298,7 @@ pub fn draw_mixer(canvas: &mut Canvas<Window>, input: &mut InputState, state: &m
                         .push_undo_snapshot(snapshot, "Toggle Solo (multi)");
                 } else {
                     state.commands.execute(
-                        Box::new(crate::commands::SetTrackSolo {
+                        Box::new(crate::app::commands::SetTrackSolo {
                             track_id,
                             new_value: !solo_on,
                             old_value: solo_on,

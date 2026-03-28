@@ -5,8 +5,8 @@ use sdl2::render::Canvas;
 use sdl2::video::Window;
 
 use super::clip_manager::draw_clip_manager;
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -122,7 +122,7 @@ pub(super) fn draw_left_panel(
                 if !trimmed.is_empty() {
                     let old_name = state.project.name.clone();
                     state.commands.execute(
-                        Box::new(crate::commands::SetProjectName {
+                        Box::new(crate::app::commands::SetProjectName {
                             old_name,
                             new_name: trimmed,
                         }),
@@ -622,11 +622,11 @@ fn draw_left_panel_files(
                 && input.active_widget == WidgetId::None
             {
                 // Double-click: add sample to clip manager and open in audio editor
-                if input.click_type == Some(crate::input::ClickType::Double) {
+                if input.click_type == Some(crate::app::input::ClickType::Double) {
                     let file_path = row.path.to_string_lossy().to_string();
                     let file_name = row.name.clone();
                     // Create an AudioClip for the clip library
-                    let new_clip = crate::models::Clip::Audio(crate::models::AudioClip {
+                    let new_clip = crate::app::models::Clip::Audio(crate::app::models::AudioClip {
                         source_file: file_path.clone(),
                         start_time: 0.0,
                         offset: 0.0,
@@ -639,7 +639,7 @@ fn draw_left_panel_files(
                     });
                     // Add to clip library if not already there
                     let already = state.clip_library.iter().any(|(_, lc)| {
-                        if let crate::models::Clip::Audio(ac) = lc {
+                        if let crate::app::models::Clip::Audio(ac) = lc {
                             ac.source_file == file_path
                         } else {
                             false
@@ -880,7 +880,7 @@ fn draw_left_panel_files(
                         if is_midi_drop {
                             // ── MIDI file import ──
                             let bpm = state.project.tempo_map.bpm_at(0.0);
-                            match crate::models::import_midi_file(&file_str, bpm) {
+                            match crate::app::models::import_midi_file(&file_str, bpm) {
                                 Ok(tracks_data) => {
                                     for (track_name, mut midi_clip) in tracks_data {
                                         midi_clip.start_time = beat;
@@ -896,20 +896,22 @@ fn draw_left_panel_files(
                                             .max()
                                             .unwrap_or(0)
                                             + 1;
-                                        let mut new_track = crate::models::Track::new(
+                                        let mut new_track = crate::app::models::Track::new(
                                             new_id,
                                             &track_name,
-                                            crate::models::TrackType::Midi,
+                                            crate::app::models::TrackType::Midi,
                                         );
                                         // Give the track an Analog instrument
                                         new_track.rack =
-                                            vec![crate::models::create_rack_slot_for_module(
+                                            vec![crate::app::models::create_rack_slot_for_module(
                                                 "Analog", 1,
                                             )];
                                         midi_clip.color = new_track.color;
-                                        new_track.clips.push(crate::models::Clip::Midi(midi_clip));
+                                        new_track
+                                            .clips
+                                            .push(crate::app::models::Clip::Midi(midi_clip));
                                         state.commands.execute(
-                                            Box::new(crate::commands::AddTrack {
+                                            Box::new(crate::app::commands::AddTrack {
                                                 track: new_track,
                                             }),
                                             &mut state.project,
@@ -938,7 +940,7 @@ fn draw_left_panel_files(
                                 let th = track.height;
                                 if input.mouse_y >= y_acc && input.mouse_y < y_acc + th {
                                     // Only drop onto Audio tracks
-                                    if track.track_type == crate::models::TrackType::Audio {
+                                    if track.track_type == crate::app::models::TrackType::Audio {
                                         target_row = Some(ti);
                                     }
                                     break;
@@ -951,7 +953,8 @@ fn draw_left_panel_files(
                             if let Some(row) = target_row {
                                 let track = &state.project.tracks[row];
                                 for ci in 0..track.clips.len() {
-                                    if let crate::models::Clip::Audio(ref ac) = track.clips[ci] {
+                                    if let crate::app::models::Clip::Audio(ref ac) = track.clips[ci]
+                                    {
                                         let clip_x =
                                             lane_left + ((ac.start_time - scroll_x) * zoom) as i32;
                                         let clip_w = (ac.length * zoom) as i32;
@@ -968,7 +971,7 @@ fn draw_left_panel_files(
                                             && input.mouse_y < clip_y + clip_h
                                         {
                                             // Replace this clip's source
-                                            if let crate::models::Clip::Audio(ref mut ac_mut) =
+                                            if let crate::app::models::Clip::Audio(ref mut ac_mut) =
                                                 state.project.tracks[row].clips[ci]
                                             {
                                                 ac_mut.source_file = file_str.clone();
@@ -1000,8 +1003,8 @@ fn draw_left_panel_files(
                                 } else {
                                     4.0
                                 };
-                                let mut audio_clip =
-                                    crate::models::Clip::Audio(crate::models::AudioClip {
+                                let mut audio_clip = crate::app::models::Clip::Audio(
+                                    crate::app::models::AudioClip {
                                         source_file: file_str,
                                         start_time: beat,
                                         offset: 0.0,
@@ -1011,19 +1014,21 @@ fn draw_left_panel_files(
                                         color: [100, 160, 255, 255],
                                         fade_in: 0.0,
                                         fade_out: 0.0,
-                                    });
+                                    },
+                                );
 
                                 if let Some(row) = target_row {
                                     // Drop onto existing audio track (empty area)
                                     let track_id = state.project.tracks[row].id;
                                     let track_color = state.project.tracks[row].color;
                                     // Use track color for the new clip
-                                    if let crate::models::Clip::Audio(ref mut ac) = audio_clip {
+                                    if let crate::app::models::Clip::Audio(ref mut ac) = audio_clip
+                                    {
                                         ac.color = track_color;
                                     }
                                     let new_ci = state.project.tracks[row].clips.len();
                                     state.commands.execute(
-                                        Box::new(crate::commands::AddClips {
+                                        Box::new(crate::app::commands::AddClips {
                                             clips: vec![(track_id, audio_clip)],
                                             added_indices: vec![],
                                         }),
@@ -1046,18 +1051,22 @@ fn draw_left_panel_files(
                                         .max()
                                         .unwrap_or(0)
                                         + 1;
-                                    let mut new_track = crate::models::Track::new(
+                                    let mut new_track = crate::app::models::Track::new(
                                         new_id,
                                         &stem,
-                                        crate::models::TrackType::Audio,
+                                        crate::app::models::TrackType::Audio,
                                     );
                                     let mut clip_with_color = audio_clip;
-                                    if let crate::models::Clip::Audio(ac) = &mut clip_with_color {
+                                    if let crate::app::models::Clip::Audio(ac) =
+                                        &mut clip_with_color
+                                    {
                                         ac.color = new_track.color
                                     }
                                     new_track.clips.push(clip_with_color);
                                     state.commands.execute(
-                                        Box::new(crate::commands::AddTrack { track: new_track }),
+                                        Box::new(crate::app::commands::AddTrack {
+                                            track: new_track,
+                                        }),
                                         &mut state.project,
                                     );
                                     // Auto-select the new clip on the new track
@@ -1100,16 +1109,16 @@ fn draw_left_panel_files(
 
                             let new_id =
                                 state.project.tracks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-                            let mut new_track = crate::models::Track::new(
+                            let mut new_track = crate::app::models::Track::new(
                                 new_id,
                                 &stem,
-                                crate::models::TrackType::Midi,
+                                crate::app::models::TrackType::Midi,
                             );
                             // Replace the default rack with a Sampler
-                            new_track.rack = vec![crate::models::RackSlot::sampler(1)];
+                            new_track.rack = vec![crate::app::models::RackSlot::sampler(1)];
                             new_track.sampler_file = Some(file_str);
                             state.commands.execute(
-                                Box::new(crate::commands::AddTrack { track: new_track }),
+                                Box::new(crate::app::commands::AddTrack { track: new_track }),
                                 &mut state.project,
                             );
                             state.selected_track = Some(new_id);
@@ -1201,7 +1210,7 @@ struct FlatTreeRow {
 
 /// Recursively flatten a tree node into displayable rows.
 fn flatten_tree_node(
-    node: &crate::state::SampleTreeNode,
+    node: &crate::app::state::SampleTreeNode,
     indent: usize,
     out: &mut Vec<FlatTreeRow>,
     addr: Vec<usize>,
@@ -1224,7 +1233,7 @@ fn flatten_tree_node(
 }
 
 /// Toggle expand/collapse of a tree node at the given address.
-fn toggle_tree_node(tree: &mut [crate::state::SampleTreeNode], addr: &[usize]) {
+fn toggle_tree_node(tree: &mut [crate::app::state::SampleTreeNode], addr: &[usize]) {
     if addr.is_empty() {
         return;
     }

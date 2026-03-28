@@ -5,8 +5,8 @@ use sdl2::render::Canvas;
 use sdl2::video::Window;
 
 use super::{gain_to_db_label, vol_gain_to_pos, vol_pos_to_gain};
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -48,7 +48,7 @@ pub fn draw_track_headers(
         bool,
         bool,
         [u8; 4],
-        crate::models::TrackType,
+        crate::app::models::TrackType,
     )> = state
         .project
         .tracks
@@ -123,7 +123,7 @@ pub fn draw_track_headers(
         let name_hover = input.mouse_in_rect(name_x, name_y, name_w, name_h);
         if name_hover
             && input.mouse_pressed
-            && input.click_type == Some(crate::input::ClickType::Double)
+            && input.click_type == Some(crate::app::input::ClickType::Double)
         {
             // Start renaming — suppress the header's double-click-to-rack behaviour
             state.text_field_active_id = tf_id;
@@ -162,7 +162,7 @@ pub fn draw_track_headers(
                         let old_name = t.name.clone();
                         if old_name != new_name {
                             state.commands.execute(
-                                Box::new(crate::commands::SetTrackName {
+                                Box::new(crate::app::commands::SetTrackName {
                                     track_id: id,
                                     old_name,
                                     new_name,
@@ -188,7 +188,7 @@ pub fn draw_track_headers(
         }
 
         // Row 2: Volume slider + pan knob (skip for Automation tracks)
-        if track_type != crate::models::TrackType::Automation {
+        if track_type != crate::app::models::TrackType::Automation {
             let vol_y = y + 24;
             let knob_r = 10i32;
             let knob_x = left + header_w - knob_r - 8;
@@ -264,7 +264,7 @@ pub fn draw_track_headers(
                     let old_gain = vol_pos_to_gain(input.drag_start_value as f32);
                     if (old_gain - volume).abs() > 1e-4 {
                         state.commands.execute(
-                            Box::new(crate::commands::SetTrackVolume {
+                            Box::new(crate::app::commands::SetTrackVolume {
                                 track_id: id,
                                 old_value: old_gain,
                                 new_value: volume,
@@ -338,7 +338,7 @@ pub fn draw_track_headers(
                     let old_pan = input.drag_start_value as f32;
                     if (old_pan - pan).abs() > 1e-4 {
                         state.commands.execute(
-                            Box::new(crate::commands::SetTrackPan {
+                            Box::new(crate::app::commands::SetTrackPan {
                                 track_id: id,
                                 old_value: old_pan,
                                 new_value: pan,
@@ -352,7 +352,7 @@ pub fn draw_track_headers(
 
         // Row 3 (bottom): Mute + Solo buttons (not for automation tracks)
         let btn_y = y + height - 26;
-        if track_type != crate::models::TrackType::Automation {
+        if track_type != crate::app::models::TrackType::Automation {
             let mute_id = input.next_id();
             let mute_clicked = toggle_button(
                 canvas,
@@ -384,7 +384,7 @@ pub fn draw_track_headers(
                     state.dirty = true;
                 } else if let Some(t) = state.project.tracks.iter().find(|t| t.id == id) {
                     state.commands.execute(
-                        Box::new(crate::commands::SetTrackMute {
+                        Box::new(crate::app::commands::SetTrackMute {
                             track_id: id,
                             new_value: !t.mute,
                             old_value: t.mute,
@@ -433,7 +433,7 @@ pub fn draw_track_headers(
                         state.dirty = true;
                     } else if let Some(t) = state.project.tracks.iter().find(|t| t.id == id) {
                         state.commands.execute(
-                            Box::new(crate::commands::SetTrackSolo {
+                            Box::new(crate::app::commands::SetTrackSolo {
                                 track_id: id,
                                 new_value: !t.solo,
                                 old_value: t.solo,
@@ -446,7 +446,7 @@ pub fn draw_track_headers(
         } // end non-automation mute/solo
 
         // ── Automation enable/disable toggle (only for Automation tracks) ──
-        if track_type == crate::models::TrackType::Automation {
+        if track_type == crate::app::models::TrackType::Automation {
             let auto_enabled = state
                 .project
                 .tracks
@@ -528,7 +528,7 @@ pub fn draw_track_headers(
         );
         if up_clicked && track_index > 0 {
             state.commands.execute(
-                Box::new(crate::commands::ReorderTrack {
+                Box::new(crate::app::commands::ReorderTrack {
                     track_id: id,
                     old_index: track_index,
                     new_index: track_index - 1,
@@ -558,7 +558,7 @@ pub fn draw_track_headers(
         );
         if down_clicked && track_index + 1 < track_count {
             state.commands.execute(
-                Box::new(crate::commands::ReorderTrack {
+                Box::new(crate::app::commands::ReorderTrack {
                     track_id: id,
                     old_index: track_index,
                     new_index: track_index + 1,
@@ -631,7 +631,7 @@ pub fn draw_track_headers(
                 .unwrap_or(old_h);
             if new_h != old_h {
                 state.commands.execute(
-                    Box::new(crate::commands::ResizeTrack {
+                    Box::new(crate::app::commands::ResizeTrack {
                         track_id: id,
                         old_height: old_h,
                         new_height: new_h,
@@ -644,8 +644,8 @@ pub fn draw_track_headers(
         // ── Track selection (deferred to after all buttons) ──
         // Only select the track if the click was not consumed by a button.
         if header_click && !input.consumed {
-            state.focused_panel = crate::state::FocusedPanel::Arrangement;
-            if input.click_type == Some(crate::input::ClickType::Double) {
+            state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
+            if input.click_type == Some(crate::app::input::ClickType::Double) {
                 // Double-click: open rack panel for this track
                 state.selected_track = Some(id);
                 state.selected_tracks.clear();
@@ -749,9 +749,9 @@ pub fn draw_track_headers(
             let _ = canvas.draw_rect(Rect::new(popup_x, popup_y, popup_w as u32, popup_h as u32));
 
             let types = [
-                ("♪ MIDI Track", crate::models::TrackType::Midi),
-                ("♫ Audio Track", crate::models::TrackType::Audio),
-                ("~ Auto Track", crate::models::TrackType::Automation),
+                ("♪ MIDI Track", crate::app::models::TrackType::Midi),
+                ("♫ Audio Track", crate::app::models::TrackType::Audio),
+                ("~ Auto Track", crate::app::models::TrackType::Automation),
             ];
             for (i, (label, tt)) in types.iter().enumerate() {
                 let ry = popup_y + 2 + i as i32 * 22;
@@ -772,13 +772,13 @@ pub fn draw_track_headers(
                 if hover && input.mouse_pressed {
                     let new_id = state.project.tracks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
                     let name = match tt {
-                        crate::models::TrackType::Midi => format!("MIDI {}", new_id),
-                        crate::models::TrackType::Audio => format!("Audio {}", new_id),
-                        crate::models::TrackType::Automation => format!("Auto {}", new_id),
+                        crate::app::models::TrackType::Midi => format!("MIDI {}", new_id),
+                        crate::app::models::TrackType::Audio => format!("Audio {}", new_id),
+                        crate::app::models::TrackType::Automation => format!("Auto {}", new_id),
                     };
-                    let new_track = crate::models::Track::new(new_id, &name, *tt);
+                    let new_track = crate::app::models::Track::new(new_id, &name, *tt);
                     state.commands.execute(
-                        Box::new(crate::commands::AddTrack { track: new_track }),
+                        Box::new(crate::app::commands::AddTrack { track: new_track }),
                         &mut state.project,
                     );
                     state.selected_track = Some(new_id);
@@ -831,7 +831,7 @@ pub fn draw_track_headers(
             && input.mouse_pressed
             && !input.consumed;
         if empty_header_area {
-            state.focused_panel = crate::state::FocusedPanel::Arrangement;
+            state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
         }
     }
 
@@ -852,15 +852,17 @@ pub fn draw_track_headers(
                 let is_instrument = crate::modules::is_instrument(&module_name);
                 if is_instrument {
                     let new_id = state.project.tracks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-                    let mut new_track = crate::models::Track::new(
+                    let mut new_track = crate::app::models::Track::new(
                         new_id,
                         &module_name,
-                        crate::models::TrackType::Midi,
+                        crate::app::models::TrackType::Midi,
                     );
-                    new_track.rack =
-                        vec![crate::models::create_rack_slot_for_module(&module_name, 1)];
+                    new_track.rack = vec![crate::app::models::create_rack_slot_for_module(
+                        &module_name,
+                        1,
+                    )];
                     state.commands.execute(
-                        Box::new(crate::commands::AddTrack { track: new_track }),
+                        Box::new(crate::app::commands::AddTrack { track: new_track }),
                         &mut state.project,
                     );
                     state.selected_track = Some(new_id);

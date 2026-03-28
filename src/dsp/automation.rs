@@ -1,7 +1,7 @@
 // Eden DAW — DSP automation evaluation & application
 
+use crate::app::models::*;
 use crate::engine::AudioTrack;
-use crate::models::*;
 
 // ── Automation evaluation ────────────────────────────────────────────────────
 

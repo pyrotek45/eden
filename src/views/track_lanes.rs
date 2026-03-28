@@ -5,8 +5,8 @@ use sdl2::render::Canvas;
 use sdl2::video::Window;
 
 use super::mixer::meter_color;
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -196,9 +196,9 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
             // ── Clip body background — type-specific colors ──
             let type_base: [u8; 4] = match &state.project.tracks[track_idx].clips[ci] {
-                crate::models::Clip::Midi(_) => [40, 55, 90, 230], // blue-ish
-                crate::models::Clip::Audio(_) => [35, 65, 45, 230], // green-ish
-                crate::models::Clip::Automation(_) => [70, 60, 30, 230], // amber-ish
+                crate::app::models::Clip::Midi(_) => [40, 55, 90, 230], // blue-ish
+                crate::app::models::Clip::Audio(_) => [35, 65, 45, 230], // green-ish
+                crate::app::models::Clip::Automation(_) => [70, 60, 30, 230], // amber-ish
             };
             let bright = if clip_hover { 20u8 } else { 0u8 };
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(
@@ -262,9 +262,9 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
             // ── Clip type badge (tiny colored block on left) ──
             let badge_color = match &state.project.tracks[track_idx].clips[ci] {
-                crate::models::Clip::Midi(_) => [120, 180, 255, 255],
-                crate::models::Clip::Audio(_) => [100, 230, 140, 255],
-                crate::models::Clip::Automation(_) => [240, 200, 80, 255],
+                crate::app::models::Clip::Midi(_) => [120, 180, 255, 255],
+                crate::app::models::Clip::Audio(_) => [100, 230, 140, 255],
+                crate::app::models::Clip::Automation(_) => [240, 200, 80, 255],
             };
             // Draw type icon in clip header (small, left side)
             let icon_sz = (header_h - 4).clamp(6, 14);
@@ -294,7 +294,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 if header_hover
                     && input.mouse_pressed
                     && !input.consumed
-                    && input.click_type == Some(crate::input::ClickType::Double)
+                    && input.click_type == Some(crate::app::input::ClickType::Double)
                     && max_w > 4
                     && topmost_hovered_ci == Some(ci)
                 {
@@ -337,13 +337,13 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             if old_name != new_name {
                                 let snapshot = state.project.clone();
                                 match state.project.tracks[track_idx].clips.get_mut(ci) {
-                                    Some(crate::models::Clip::Midi(m)) => {
+                                    Some(crate::app::models::Clip::Midi(m)) => {
                                         m.name = new_name;
                                     }
-                                    Some(crate::models::Clip::Audio(a)) => {
+                                    Some(crate::app::models::Clip::Audio(a)) => {
                                         a.name = new_name;
                                     }
-                                    Some(crate::models::Clip::Automation(a)) => {
+                                    Some(crate::app::models::Clip::Automation(a)) => {
                                         a.name = new_name;
                                     }
                                     None => {}
@@ -394,7 +394,9 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             let body_h = (clip_h - header_h).max(1);
             let clip_right = cx + cw;
 
-            if let crate::models::Clip::Midi(ref midi) = state.project.tracks[track_idx].clips[ci] {
+            if let crate::app::models::Clip::Midi(ref midi) =
+                state.project.tracks[track_idx].clips[ci]
+            {
                 for note in &midi.notes {
                     // note positions are relative to the clip's start_time
                     let raw_nx = cx + ((note.start / clip_len) * cw as f64) as i32;
@@ -422,7 +424,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             }
 
             // ── Automation curve mini-preview ──
-            if let crate::models::Clip::Automation(ref auto) =
+            if let crate::app::models::Clip::Automation(ref auto) =
                 state.project.tracks[track_idx].clips[ci]
             {
                 // Clip rendering to clip bounds, clamped to lane area (don't overlap headers)
@@ -490,7 +492,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             }
 
             // ── Audio waveform mini-preview ──
-            if let crate::models::Clip::Audio(ref audio_clip) =
+            if let crate::app::models::Clip::Audio(ref audio_clip) =
                 state.project.tracks[track_idx].clips[ci]
             {
                 let wave_data = state.waveform_cache.get(&audio_clip.source_file);
@@ -582,7 +584,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         input.drag_widget = WidgetId::ClipLeftHandle(track_id, ci);
                         input.drag_start_value = clip_start + clip_len;
                         input.drag_start_value2 = clip_start;
-                        if let crate::models::Clip::Audio(ref ac) =
+                        if let crate::app::models::Clip::Audio(ref ac) =
                             state.project.tracks[track_idx].clips[ci]
                         {
                             state.drag_audio_offset_orig = ac.offset;
@@ -605,7 +607,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         input.drag_widget = WidgetId::ClipRightHandle(track_id, ci);
                         input.drag_start_value = clip_len;
                         input.drag_start_value2 = clip_start;
-                        if let crate::models::Clip::Audio(ref ac) =
+                        if let crate::app::models::Clip::Audio(ref ac) =
                             state.project.tracks[track_idx].clips[ci]
                         {
                             state.drag_audio_offset_orig = ac.offset;
@@ -648,7 +650,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             state.selected_tracks.clear();
                             state.selected_tracks.insert(track_id);
 
-                            if input.click_type == Some(crate::input::ClickType::Double) {
+                            if input.click_type == Some(crate::app::input::ClickType::Double) {
                                 // Double-click header = rename (handled above in text-field block)
                                 input.active_widget = WidgetId::ClipBody(track_id, ci);
                             } else if input.ctrl() || input.alt() {
@@ -685,7 +687,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     ClipHitZone::Body | ClipHitZone::None => {
                         // Double-click on clip body → open the clip in the editor.
                         // Single body clicks pass through (allow rubber-band and lane clicks).
-                        if input.click_type == Some(crate::input::ClickType::Double)
+                        if input.click_type == Some(crate::app::input::ClickType::Double)
                             && topmost_hovered_ci == Some(ci)
                             && !input.consumed
                         {
@@ -698,9 +700,11 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             state.selected_tracks.insert(track_id);
                             // Open the appropriate editor panel tab
                             let tab = match &state.project.tracks[track_idx].clips[ci] {
-                                crate::models::Clip::Midi(_) => BottomPanelTab::PianoRoll,
-                                crate::models::Clip::Audio(_) => BottomPanelTab::PianoRoll,
-                                crate::models::Clip::Automation(_) => BottomPanelTab::PianoRoll,
+                                crate::app::models::Clip::Midi(_) => BottomPanelTab::PianoRoll,
+                                crate::app::models::Clip::Audio(_) => BottomPanelTab::PianoRoll,
+                                crate::app::models::Clip::Automation(_) => {
+                                    BottomPanelTab::PianoRoll
+                                }
                             };
                             state.bottom_panel_tab = tab;
                             if !state.bottom_panel_open {
@@ -830,7 +834,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     // Right-click on clip → delete it (undoable)
                     let clip_data = state.project.tracks[track_idx].clips[ci].clone();
                     state.commands.execute(
-                        Box::new(crate::commands::DeleteClips {
+                        Box::new(crate::app::commands::DeleteClips {
                             clips: vec![(track_id, ci, clip_data)],
                         }),
                         &mut state.project,
@@ -882,7 +886,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             if in_lane
                 && input.mouse_pressed
                 && !input.consumed
-                && input.click_type == Some(crate::input::ClickType::Double)
+                && input.click_type == Some(crate::app::input::ClickType::Double)
             {
                 // Check that no existing clip was hit at this position
                 let mut hit_existing_clip = false;
@@ -907,8 +911,8 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 let clip_name = "Clip".to_string();
                 let track_color = state.project.tracks[track_idx].color;
                 let new_clip = match track_type {
-                    crate::models::TrackType::Midi => {
-                        crate::models::Clip::Midi(crate::models::MidiClip {
+                    crate::app::models::TrackType::Midi => {
+                        crate::app::models::Clip::Midi(crate::app::models::MidiClip {
                             name: clip_name,
                             color: track_color,
                             start_time: start,
@@ -916,8 +920,8 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             notes: Vec::new(),
                         })
                     }
-                    crate::models::TrackType::Audio => {
-                        crate::models::Clip::Audio(crate::models::AudioClip {
+                    crate::app::models::TrackType::Audio => {
+                        crate::app::models::Clip::Audio(crate::app::models::AudioClip {
                             name: clip_name,
                             color: track_color,
                             start_time: start,
@@ -929,8 +933,8 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             fade_out: 0.0,
                         })
                     }
-                    crate::models::TrackType::Automation => {
-                        crate::models::Clip::Automation(crate::models::AutomationClip {
+                    crate::app::models::TrackType::Automation => {
+                        crate::app::models::Clip::Automation(crate::app::models::AutomationClip {
                             name: clip_name,
                             color: track_color,
                             start_time: start,
@@ -941,7 +945,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     }
                 };
                 state.commands.execute(
-                    Box::new(crate::commands::CreateClip {
+                    Box::new(crate::app::commands::CreateClip {
                         track_id,
                         clip: new_clip,
                         added_idx: 0,
@@ -988,15 +992,17 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 let is_instrument = crate::modules::is_instrument(&module_name);
                 if is_instrument {
                     let new_id = state.project.tracks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-                    let mut new_track = crate::models::Track::new(
+                    let mut new_track = crate::app::models::Track::new(
                         new_id,
                         &module_name,
-                        crate::models::TrackType::Midi,
+                        crate::app::models::TrackType::Midi,
                     );
-                    new_track.rack =
-                        vec![crate::models::create_rack_slot_for_module(&module_name, 1)];
+                    new_track.rack = vec![crate::app::models::create_rack_slot_for_module(
+                        &module_name,
+                        1,
+                    )];
                     state.commands.execute(
-                        Box::new(crate::commands::AddTrack { track: new_track }),
+                        Box::new(crate::app::commands::AddTrack { track: new_track }),
                         &mut state.project,
                     );
                     state.selected_track = Some(new_id);
@@ -1218,7 +1224,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
     // ── Focus: clicking in the arrangement lane area claims keyboard focus ─────
     if in_lane_area && input.mouse_pressed && !input.consumed {
-        state.focused_panel = crate::state::FocusedPanel::Arrangement;
+        state.focused_panel = crate::app::state::FocusedPanel::Arrangement;
 
         // Click on empty background (no clip or widget hit) deselects everything
         // unless shift or ctrl is held, or the bottom panel is showing a clip editor.
@@ -1480,9 +1486,9 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             for track in &state.project.tracks {
                 for clip in &track.clips {
                     let end = match clip {
-                        crate::models::Clip::Midi(m) => m.start_time + m.length,
-                        crate::models::Clip::Audio(a) => a.start_time + a.length,
-                        crate::models::Clip::Automation(a) => a.start_time + a.length,
+                        crate::app::models::Clip::Midi(m) => m.start_time + m.length,
+                        crate::app::models::Clip::Audio(a) => a.start_time + a.length,
+                        crate::app::models::Clip::Automation(a) => a.start_time + a.length,
                     };
                     if end > max_b {
                         max_b = end;
@@ -1650,7 +1656,7 @@ fn handle_clip_drag(
             };
             // Build track id list for index-based lookup
             let track_ids: Vec<u32> = state.project.tracks.iter().map(|t| t.id).collect();
-            let track_types: Vec<crate::models::TrackType> =
+            let track_types: Vec<crate::app::models::TrackType> =
                 state.project.tracks.iter().map(|t| t.track_type).collect();
 
             if is_multi {
@@ -1752,7 +1758,7 @@ fn handle_clip_drag(
                         }
                     }
                     // Build clone clips at new positions
-                    let mut new_clips: Vec<(u32, crate::models::Clip)> = Vec::new();
+                    let mut new_clips: Vec<(u32, crate::app::models::Clip)> = Vec::new();
                     for ((t_id, c_idx), _, new_start) in &moves {
                         if let Some(track) = state.project.tracks.iter().find(|t| t.id == *t_id) {
                             if let Some(orig) = track.clips.get(*c_idx).cloned() {
@@ -1780,7 +1786,7 @@ fn handle_clip_drag(
                     }
                     if !new_clips.is_empty() {
                         state.commands.execute(
-                            Box::new(crate::commands::AddClips {
+                            Box::new(crate::app::commands::AddClips {
                                 clips: new_clips,
                                 added_indices: Vec::new(),
                             }),
@@ -1817,7 +1823,7 @@ fn handle_clip_drag(
                             let new_start = moves[0].2;
                             let old_start = moves[0].1;
                             state.commands.execute(
-                                Box::new(crate::commands::MoveClipCrossTrack {
+                                Box::new(crate::app::commands::MoveClipCrossTrack {
                                     src_track_id: tid,
                                     src_clip_idx: ci,
                                     dst_track_id: target_tid,
@@ -1843,9 +1849,9 @@ fn handle_clip_drag(
                             // Multiple clips: move each to its own destination track
                             // based on relative track index offset.
                             // Collect clips to remove and re-add at new positions.
-                            let mut clips_to_delete: Vec<(u32, usize, crate::models::Clip)> =
+                            let mut clips_to_delete: Vec<(u32, usize, crate::app::models::Clip)> =
                                 Vec::new();
-                            let mut clips_to_add: Vec<(u32, crate::models::Clip)> = Vec::new();
+                            let mut clips_to_add: Vec<(u32, crate::app::models::Clip)> = Vec::new();
                             for &((t_id, c_idx), _old, new_start) in &moves {
                                 let dest_tid = if let Some(src_idx) =
                                     track_ids.iter().position(|&id| id == t_id)
@@ -1880,17 +1886,17 @@ fn handle_clip_drag(
                             }
                             if !clips_to_delete.is_empty() {
                                 // Use a composite of Delete + Add for proper undo
-                                let cmds: Vec<Box<dyn crate::commands::Command>> = vec![
-                                    Box::new(crate::commands::DeleteClips {
+                                let cmds: Vec<Box<dyn crate::app::commands::Command>> = vec![
+                                    Box::new(crate::app::commands::DeleteClips {
                                         clips: clips_to_delete,
                                     }),
-                                    Box::new(crate::commands::AddClips {
+                                    Box::new(crate::app::commands::AddClips {
                                         clips: clips_to_add,
                                         added_indices: Vec::new(),
                                     }),
                                 ];
                                 state.commands.execute(
-                                    Box::new(crate::commands::CompositeCommand {
+                                    Box::new(crate::app::commands::CompositeCommand {
                                         desc: "Move Clips Cross-Track".to_string(),
                                         cmds,
                                     }),
@@ -1902,7 +1908,7 @@ fn handle_clip_drag(
                             }
                         }
                     } else {
-                        let move_cmd = crate::commands::MoveClips { moves };
+                        let move_cmd = crate::app::commands::MoveClips { moves };
                         state
                             .commands
                             .execute(Box::new(move_cmd), &mut state.project);
@@ -1962,7 +1968,7 @@ fn handle_clip_drag(
                         }
                     }
                     state.commands.execute(
-                        Box::new(crate::commands::ResizeClips { clips: ops }),
+                        Box::new(crate::app::commands::ResizeClips { clips: ops }),
                         &mut state.project,
                     );
                 } else {
@@ -1977,7 +1983,7 @@ fn handle_clip_drag(
                         .iter()
                         .find(|t| t.id == tid)
                         .and_then(|t| t.clips.get(ci))
-                        .map(|c| matches!(c, crate::models::Clip::Audio(_)))
+                        .map(|c| matches!(c, crate::app::models::Clip::Audio(_)))
                         .unwrap_or(false);
                     // Read the actual current state set by the live update
                     let (actual_new_start, actual_new_len, actual_new_audio_off) = state
@@ -1989,7 +1995,7 @@ fn handle_clip_drag(
                         .map(|c| {
                             let s = c.start_time();
                             let l = c.length();
-                            let off = if let crate::models::Clip::Audio(ac) = c {
+                            let off = if let crate::app::models::Clip::Audio(ac) = c {
                                 ac.offset
                             } else {
                                 0.0
@@ -2003,7 +2009,7 @@ fn handle_clip_drag(
                             if let Some(clip) = track.clips.get_mut(ci) {
                                 clip.set_start_time(orig_start);
                                 clip.set_length(orig_len);
-                                if let crate::models::Clip::Audio(ref mut ac) = clip {
+                                if let crate::app::models::Clip::Audio(ref mut ac) = clip {
                                     ac.offset = old_audio_off;
                                 }
                             }
@@ -2016,7 +2022,7 @@ fn handle_clip_drag(
                             clip.set_length(orig_len);
                         }
                     }
-                    let cmd = crate::commands::ResizeClip {
+                    let cmd = crate::app::commands::ResizeClip {
                         track_id: tid,
                         clip_idx: ci,
                         old_start: orig_start,
@@ -2060,7 +2066,7 @@ fn handle_clip_drag(
                         // Clamp so offset never goes below 0 (can't reveal audio
                         // before the start of the source file).
                         let (new_st, new_ln, new_off) =
-                            if let crate::models::Clip::Audio(ref _ac) = *clip {
+                            if let crate::app::models::Clip::Audio(ref _ac) = *clip {
                                 let bpm = state.project.tempo_map.bpm_at(0.0);
                                 let delta_beats = snapped_start - orig_start;
                                 let delta_secs = delta_beats * 60.0 / bpm;
@@ -2079,7 +2085,8 @@ fn handle_clip_drag(
                             };
                         clip.set_start_time(new_st);
                         clip.set_length(new_ln);
-                        if let (Some(off), crate::models::Clip::Audio(ref mut ac)) = (new_off, clip)
+                        if let (Some(off), crate::app::models::Clip::Audio(ref mut ac)) =
+                            (new_off, clip)
                         {
                             ac.offset = off;
                         }
@@ -2106,7 +2113,7 @@ fn handle_clip_drag(
                     .find(|t| t.id == tid)
                     .and_then(|t| t.clips.get(ci))
                     .and_then(|c| {
-                        if let crate::models::Clip::Audio(ac) = c {
+                        if let crate::app::models::Clip::Audio(ac) = c {
                             if !ac.source_file.is_empty() {
                                 if let Some((_, total_dur)) =
                                     state.waveform_cache.get(&ac.source_file)
@@ -2167,13 +2174,13 @@ fn handle_clip_drag(
                         }
                     }
                     state.commands.execute(
-                        Box::new(crate::commands::ResizeClips { clips: ops }),
+                        Box::new(crate::app::commands::ResizeClips { clips: ops }),
                         &mut state.project,
                     );
                 } else {
                     // Audio offset never changes on right-handle drag
                     let old_offset = Some(state.drag_audio_offset_orig);
-                    let cmd = crate::commands::ResizeClip {
+                    let cmd = crate::app::commands::ResizeClip {
                         track_id: tid,
                         clip_idx: ci,
                         old_start: orig_start,

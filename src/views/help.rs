@@ -4,8 +4,8 @@ use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::input::InputState;
-use crate::state::*;
+use crate::app::input::InputState;
+use crate::app::state::*;
 use crate::widgets::*;
 
 /// Draw a semi-transparent help/shortcut overlay with tabbed sidebar

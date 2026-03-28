@@ -12,8 +12,8 @@
 // BPM only controls where beats fall on the timeline — it does NOT time-stretch
 // audio files. (Time-stretch is a separate, explicit operation.)
 
+use crate::app::models::*;
 use crate::dsp;
-use crate::models::*;
 use crate::modules::{voice_is_done, ModuleVoice};
 
 // ── Render settings ──────────────────────────────────────────────────────────

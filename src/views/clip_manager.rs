@@ -3,8 +3,8 @@
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -74,9 +74,9 @@ pub(super) fn draw_clip_manager(
     let mut all_clips: Vec<(u32, usize, String, [u8; 4], f64, u8, bool)> = Vec::new();
     for (lib_idx, (track_id, clip)) in state.clip_library.iter().enumerate() {
         let (name, color, len, ctype) = match clip {
-            crate::models::Clip::Midi(m) => (m.name.clone(), m.color, m.length, 0u8),
-            crate::models::Clip::Audio(a) => (a.name.clone(), a.color, a.length, 1u8),
-            crate::models::Clip::Automation(a) => (a.name.clone(), a.color, a.length, 2u8),
+            crate::app::models::Clip::Midi(m) => (m.name.clone(), m.color, m.length, 0u8),
+            crate::app::models::Clip::Audio(a) => (a.name.clone(), a.color, a.length, 1u8),
+            crate::app::models::Clip::Automation(a) => (a.name.clone(), a.color, a.length, 2u8),
         };
         let in_arrangement = state
             .project
@@ -221,7 +221,7 @@ pub(super) fn draw_clip_manager(
         let lib_clip_ref = &state.clip_library[lib_idx].1;
         match ctype {
             0 => {
-                if let crate::models::Clip::Midi(mc) = lib_clip_ref {
+                if let crate::app::models::Clip::Midi(mc) = lib_clip_ref {
                     let len_safe = clip_len.max(0.001);
                     canvas.set_draw_color(sdl2::pixels::Color::RGBA(
                         color[0], color[1], color[2], 200,
@@ -242,7 +242,7 @@ pub(super) fn draw_clip_manager(
             }
             1 => {
                 // Real waveform preview from cache
-                let src = if let crate::models::Clip::Audio(ac) = lib_clip_ref {
+                let src = if let crate::app::models::Clip::Audio(ac) = lib_clip_ref {
                     ac.source_file.clone()
                 } else {
                     String::new()
@@ -305,7 +305,7 @@ pub(super) fn draw_clip_manager(
             }
             2 => {
                 canvas.set_draw_color(sdl2::pixels::Color::RGBA(color[0], color[1], color[2], 200));
-                if let crate::models::Clip::Automation(ac) = lib_clip_ref {
+                if let crate::app::models::Clip::Automation(ac) = lib_clip_ref {
                     let len_safe = clip_len.max(0.001);
                     for i in 1..ac.points.len() {
                         let p0 = &ac.points[i - 1];
@@ -395,10 +395,10 @@ pub(super) fn draw_clip_manager(
                 state.selected_track = Some(track_id);
                 state.selected_tracks.clear();
                 state.selected_tracks.insert(track_id);
-                if input.click_type != Some(crate::input::ClickType::Double) {
+                if input.click_type != Some(crate::app::input::ClickType::Double) {
                     state.clip_sidebar_drag = Some((track_id, ci));
                 }
-                if input.click_type == Some(crate::input::ClickType::Double) {
+                if input.click_type == Some(crate::app::input::ClickType::Double) {
                     // Open in editor
                     state.bottom_panel_tab = BottomPanelTab::PianoRoll;
                     if !state.bottom_panel_open {
@@ -407,7 +407,7 @@ pub(super) fn draw_clip_manager(
                     }
                     state.piano_roll_scroll_x = 0.0;
                     if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                        if let Some(crate::models::Clip::Midi(mc)) = track.clips.get(ci) {
+                        if let Some(crate::app::models::Clip::Midi(mc)) = track.clips.get(ci) {
                             if !mc.notes.is_empty() {
                                 let avg_pitch =
                                     mc.notes.iter().map(|n| n.pitch as f64).sum::<f64>()
@@ -422,11 +422,11 @@ pub(super) fn draw_clip_manager(
                 }
             } else {
                 // Not in arrangement — double-click to restore, single-click starts a "place" drag
-                if input.click_type == Some(crate::input::ClickType::Double) {
+                if input.click_type == Some(crate::app::input::ClickType::Double) {
                     let clip_to_add = state.clip_library[lib_idx].1.clone();
                     if state.project.tracks.iter().any(|t| t.id == track_id) {
                         state.commands.execute(
-                            Box::new(crate::commands::AddClips {
+                            Box::new(crate::app::commands::AddClips {
                                 clips: vec![(track_id, clip_to_add)],
                                 added_indices: Vec::new(),
                             }),
@@ -460,7 +460,7 @@ pub(super) fn draw_clip_manager(
         if li < state.clip_library.len() {
             let (rem_tid, ref rem_clip) = state.clip_library[li].clone();
             // Find matching arrangement clips and remove via command (undoable)
-            let mut to_delete: Vec<(u32, usize, crate::models::Clip)> = Vec::new();
+            let mut to_delete: Vec<(u32, usize, crate::app::models::Clip)> = Vec::new();
             if let Some(track) = state.project.tracks.iter().find(|t| t.id == rem_tid) {
                 for (ci, c) in track.clips.iter().enumerate() {
                     if c.name() == rem_clip.name()
@@ -472,7 +472,7 @@ pub(super) fn draw_clip_manager(
             }
             if !to_delete.is_empty() {
                 state.commands.execute(
-                    Box::new(crate::commands::DeleteClips { clips: to_delete }),
+                    Box::new(crate::app::commands::DeleteClips { clips: to_delete }),
                     &mut state.project,
                 );
             }

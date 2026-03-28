@@ -3,8 +3,8 @@
 
 use std::collections::HashSet;
 
-use crate::commands::CommandManager;
-use crate::models::*;
+use crate::app::commands::CommandManager;
+use crate::app::models::*;
 use crate::theme::Theme;
 
 use serde::{Deserialize, Serialize};
@@ -392,7 +392,7 @@ pub struct AppState {
     /// Whether the user is currently dragging the bottom panel resize handle
     pub bottom_panel_dragging: bool,
     /// Remembered click type from mouse-press, held until mouse-release fires
-    pub bottom_panel_click_type: Option<crate::input::ClickType>,
+    pub bottom_panel_click_type: Option<crate::app::input::ClickType>,
     // ── Audio metering ───────────────────────────────────────────────
     pub meters: MeterState,
     /// Master output volume (UI-side, synced to audio thread each frame)
@@ -730,7 +730,7 @@ pub struct AppState {
     /// How many frames the cursor has been hovering over the same widget
     pub hover_timer: u32,
     /// Which widget was hovered last frame (for timer tracking)
-    pub hover_last_widget: crate::input::WidgetId,
+    pub hover_last_widget: crate::app::input::WidgetId,
     // ── Waveform cache ───────────────────────────────────────────────
     /// Cache of audio waveform peak data per source file path.
     /// Key = source_file string, Value = (peaks, total_duration_seconds).
@@ -771,9 +771,9 @@ pub struct AppState {
     /// Stack of undo snapshots: (source_file_path, backup_file_path, description, project_snapshot).
     /// Each destructive operation saves a backup of the file before modifying it.
     /// The optional project snapshot restores clip metadata (offset, length) changed alongside the file.
-    pub audio_undo_stack: Vec<(String, String, String, Option<crate::models::Project>)>,
+    pub audio_undo_stack: Vec<(String, String, String, Option<crate::app::models::Project>)>,
     /// Redo stack (same format as undo). Cleared on new destructive operation.
-    pub audio_redo_stack: Vec<(String, String, String, Option<crate::models::Project>)>,
+    pub audio_redo_stack: Vec<(String, String, String, Option<crate::app::models::Project>)>,
     // ── Audio editor effects ────────────────────────────────────────
     /// Currently selected effect index in the audio editor effects dropdown
     pub audio_editor_effect_idx: usize,
@@ -997,7 +997,7 @@ impl AppState {
             hover_hint: None,
             hover_hint_pos: (0, 0),
             hover_timer: 0,
-            hover_last_widget: crate::input::WidgetId::None,
+            hover_last_widget: crate::app::input::WidgetId::None,
             waveform_cache: std::collections::HashMap::new(),
             waveform_stereo_cache: std::collections::HashMap::new(),
             waveform_raw_cache: std::collections::HashMap::new(),
@@ -1139,8 +1139,8 @@ impl AppState {
 
     /// Immediately persist the current user config to disk.
     pub fn save_config_now(&self) {
-        use crate::config::UserConfig;
-        use crate::state::LeftPanelTab;
+        use crate::app::config::UserConfig;
+        use crate::app::state::LeftPanelTab;
         let cfg = UserConfig {
             theme_name: self.theme.name.clone(),
             favorite_folders: self.favorite_folders.clone(),
@@ -1287,25 +1287,25 @@ impl AppState {
 
     /// Returns the highest-priority UI layer that is currently active.
     /// The layer that owns input this frame — everything below it gets a dead input.
-    pub fn active_layer(&self) -> crate::state::UiLayer {
+    pub fn active_layer(&self) -> crate::app::state::UiLayer {
         // Confirm dialogs are highest priority
         if self.clip_lib_confirm_delete.is_some()
             || self.track_confirm_delete.is_some()
             || self.track_confirm_multi_delete.is_some()
         {
-            return crate::state::UiLayer::ConfirmDialog;
+            return crate::app::state::UiLayer::ConfirmDialog;
         }
         if self.render_popup_open {
-            return crate::state::UiLayer::RenderDialog;
+            return crate::app::state::UiLayer::RenderDialog;
         }
         if self.project_popup_open
             || self.options_open
             || self.new_project_popup_open
             || self.save_as_popup_open
         {
-            return crate::state::UiLayer::Popup;
+            return crate::app::state::UiLayer::Popup;
         }
-        crate::state::UiLayer::Base
+        crate::app::state::UiLayer::Base
     }
 
     /// Cycle through available themes.

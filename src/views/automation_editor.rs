@@ -4,8 +4,8 @@ use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -64,7 +64,7 @@ pub(super) fn draw_automation_editor(
             .find(|t| t.id == track_id)
             .and_then(|t| t.clips.get(clip_idx))
             .and_then(|c| {
-                if let crate::models::Clip::Automation(ac) = c {
+                if let crate::app::models::Clip::Automation(ac) = c {
                     Some((ac.target_param.clone(), ac.start_time, ac.length))
                 } else {
                     None
@@ -142,7 +142,7 @@ pub(super) fn draw_automation_editor(
                         if !state.bottom_panel_open {
                             state.bottom_panel_open = true;
                         }
-                        state.mode = crate::state::AppMode::Edit;
+                        state.mode = crate::app::state::AppMode::Edit;
                         // Also select this track in the project so the rack shows
                         let _ = ti; // Silence unused warning
                     }
@@ -447,7 +447,7 @@ pub(super) fn draw_automation_editor(
     {
         let track = state.project.tracks.iter().find(|t| t.id == track_id);
         if let Some(track) = track {
-            if let Some(crate::models::Clip::Automation(auto)) = track.clips.get(clip_idx) {
+            if let Some(crate::app::models::Clip::Automation(auto)) = track.clips.get(clip_idx) {
                 canvas.set_draw_color(Theme::c(state.theme.clip_automation));
                 for i in 1..auto.points.len() {
                     let p0 = &auto.points[i - 1];
@@ -522,7 +522,7 @@ pub(super) fn draw_automation_editor(
     let my = input.mouse_y;
     if in_grid {
         if input.mouse_pressed || input.mouse_down {
-            state.focused_panel = crate::state::FocusedPanel::AutomationEditor;
+            state.focused_panel = crate::app::state::FocusedPanel::AutomationEditor;
         }
         let beat = x_to_beat(mx);
         let val = y_to_val(my);
@@ -536,7 +536,7 @@ pub(super) fn draw_automation_editor(
                 to_del.dedup();
                 for idx in to_del.into_iter().rev() {
                     state.commands.execute(
-                        Box::new(crate::commands::DeleteAutomationPoint {
+                        Box::new(crate::app::commands::DeleteAutomationPoint {
                             track_id,
                             clip_idx,
                             point_idx: idx,
@@ -551,7 +551,7 @@ pub(super) fn draw_automation_editor(
                 let delete_info = {
                     let mut info = None;
                     if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                        if let Some(crate::models::Clip::Automation(auto)) =
+                        if let Some(crate::app::models::Clip::Automation(auto)) =
                             track.clips.get(clip_idx)
                         {
                             let close_idx = auto
@@ -577,7 +577,7 @@ pub(super) fn draw_automation_editor(
                 };
                 if let Some(idx) = delete_info {
                     state.commands.execute(
-                        Box::new(crate::commands::DeleteAutomationPoint {
+                        Box::new(crate::app::commands::DeleteAutomationPoint {
                             track_id,
                             clip_idx,
                             point_idx: idx,
@@ -596,7 +596,9 @@ pub(super) fn draw_automation_editor(
             let to_delete: Vec<usize> = {
                 let mut indices = Vec::new();
                 if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Automation(auto)) = track.clips.get(clip_idx) {
+                    if let Some(crate::app::models::Clip::Automation(auto)) =
+                        track.clips.get(clip_idx)
+                    {
                         for (i, p) in auto.points.iter().enumerate() {
                             let dx = beat_to_x(p.time) - mx;
                             let dy = val_to_y(p.value) - my;
@@ -611,7 +613,7 @@ pub(super) fn draw_automation_editor(
             // Delete from highest index to lowest to preserve indices
             for idx in to_delete.into_iter().rev() {
                 state.commands.execute(
-                    Box::new(crate::commands::DeleteAutomationPoint {
+                    Box::new(crate::app::commands::DeleteAutomationPoint {
                         track_id,
                         clip_idx,
                         point_idx: idx,
@@ -629,7 +631,9 @@ pub(super) fn draw_automation_editor(
             let close_idx = {
                 let mut found = None;
                 if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Automation(auto)) = track.clips.get(clip_idx) {
+                    if let Some(crate::app::models::Clip::Automation(auto)) =
+                        track.clips.get(clip_idx)
+                    {
                         found = auto
                             .points
                             .iter()
@@ -670,7 +674,7 @@ pub(super) fn draw_automation_editor(
                     // Store original positions of all selected points
                     state.automation_group_drag_orig.clear();
                     if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                        if let Some(crate::models::Clip::Automation(auto)) =
+                        if let Some(crate::app::models::Clip::Automation(auto)) =
                             track.clips.get(clip_idx)
                         {
                             for &si in &state.automation_selected {
@@ -691,7 +695,7 @@ pub(super) fn draw_automation_editor(
                     state.automation_selected.clear();
                     state.automation_drag_idx = Some(ci);
                     if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                        if let Some(crate::models::Clip::Automation(auto)) =
+                        if let Some(crate::app::models::Clip::Automation(auto)) =
                             track.clips.get(clip_idx)
                         {
                             if ci < auto.points.len() {
@@ -715,10 +719,10 @@ pub(super) fn draw_automation_editor(
                         beat.max(0.0)
                     };
                     state.commands.execute(
-                        Box::new(crate::commands::AddAutomationPoint {
+                        Box::new(crate::app::commands::AddAutomationPoint {
                             track_id,
                             clip_idx,
-                            point: crate::models::AutomationPoint {
+                            point: crate::app::models::AutomationPoint {
                                 time: snapped_beat,
                                 value: val,
                             },
@@ -744,7 +748,8 @@ pub(super) fn draw_automation_editor(
             let v_hi = rb_val.max(cur_val);
             state.automation_selected.clear();
             if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                if let Some(crate::models::Clip::Automation(auto)) = track.clips.get(clip_idx) {
+                if let Some(crate::app::models::Clip::Automation(auto)) = track.clips.get(clip_idx)
+                {
                     for (i, p) in auto.points.iter().enumerate() {
                         if p.time >= b_lo && p.time <= b_hi && p.value >= v_lo && p.value <= v_hi {
                             state.automation_selected.push(i);
@@ -766,7 +771,8 @@ pub(super) fn draw_automation_editor(
         let dx_beats = x_to_beat(input.mouse_x) - x_to_beat(input.drag_start_x);
         let dy_val = y_to_val(input.mouse_y) - y_to_val(input.drag_start_y);
         if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-            if let Some(crate::models::Clip::Automation(auto)) = track.clips.get_mut(clip_idx) {
+            if let Some(crate::app::models::Clip::Automation(auto)) = track.clips.get_mut(clip_idx)
+            {
                 for (oi, &si) in state.automation_selected.iter().enumerate() {
                     if si < auto.points.len() && oi < state.automation_group_drag_orig.len() {
                         let (orig_t, orig_v) = state.automation_group_drag_orig[oi];
@@ -791,7 +797,7 @@ pub(super) fn draw_automation_editor(
                 let beat = x_to_beat(input.mouse_x);
                 let val = y_to_val(input.mouse_y);
                 if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Automation(auto)) =
+                    if let Some(crate::app::models::Clip::Automation(auto)) =
                         track.clips.get_mut(clip_idx)
                     {
                         if drag_idx < auto.points.len() {
@@ -835,7 +841,7 @@ pub(super) fn draw_automation_editor(
             if !state.automation_group_drag_orig.is_empty() {
                 // Group drag release: sort points, clear group drag state
                 if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Automation(auto)) =
+                    if let Some(crate::app::models::Clip::Automation(auto)) =
                         track.clips.get_mut(clip_idx)
                     {
                         auto.points
@@ -849,7 +855,7 @@ pub(super) fn draw_automation_editor(
                 // Commit single MoveAutomationPoint command on release
                 if let Some((old_time, old_value)) = state.automation_drag_orig.take() {
                     if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                        if let Some(crate::models::Clip::Automation(auto)) =
+                        if let Some(crate::app::models::Clip::Automation(auto)) =
                             track.clips.get(clip_idx)
                         {
                             if drag_idx < auto.points.len() {
@@ -863,7 +869,7 @@ pub(super) fn draw_automation_editor(
                                     if let Some(track_m) =
                                         state.project.tracks.iter_mut().find(|t| t.id == track_id)
                                     {
-                                        if let Some(crate::models::Clip::Automation(auto_m)) =
+                                        if let Some(crate::app::models::Clip::Automation(auto_m)) =
                                             track_m.clips.get_mut(clip_idx)
                                         {
                                             if drag_idx < auto_m.points.len() {
@@ -881,8 +887,9 @@ pub(super) fn draw_automation_editor(
                                         if let Some(track) =
                                             state.project.tracks.iter().find(|t| t.id == track_id)
                                         {
-                                            if let Some(crate::models::Clip::Automation(auto)) =
-                                                track.clips.get(clip_idx)
+                                            if let Some(crate::app::models::Clip::Automation(
+                                                auto,
+                                            )) = track.clips.get(clip_idx)
                                             {
                                                 if let Some(i) = auto.points.iter().position(|p| {
                                                     (p.time - old_time).abs() < 1e-9
@@ -895,7 +902,7 @@ pub(super) fn draw_automation_editor(
                                         idx
                                     };
                                     state.commands.execute(
-                                        Box::new(crate::commands::MoveAutomationPoint {
+                                        Box::new(crate::app::commands::MoveAutomationPoint {
                                             track_id,
                                             clip_idx,
                                             point_idx,
@@ -915,7 +922,7 @@ pub(super) fn draw_automation_editor(
                     // Sort on release even if no orig stored (fallback)
                     if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id)
                     {
-                        if let Some(crate::models::Clip::Automation(auto)) =
+                        if let Some(crate::app::models::Clip::Automation(auto)) =
                             track.clips.get_mut(clip_idx)
                         {
                             auto.points
@@ -945,7 +952,8 @@ pub(super) fn draw_automation_editor(
         let max_point_beat = {
             let mut max_b = 0.0_f64;
             if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                if let Some(crate::models::Clip::Automation(auto)) = track.clips.get(clip_idx) {
+                if let Some(crate::app::models::Clip::Automation(auto)) = track.clips.get(clip_idx)
+                {
                     for p in &auto.points {
                         if p.time > max_b {
                             max_b = p.time;

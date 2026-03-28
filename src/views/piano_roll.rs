@@ -4,8 +4,8 @@ use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -83,7 +83,7 @@ pub(super) fn draw_piano_roll_impl(
             .iter()
             .find(|t| t.id == tid)
             .and_then(|t| {
-                if let Some(crate::models::Clip::Midi(m)) = t.clips.get(ci) {
+                if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(ci) {
                     Some((tid, ci, m.start_time, m.length))
                 } else {
                     None
@@ -156,7 +156,7 @@ pub(super) fn draw_piano_roll_impl(
     // Mode indicator: Ctrl = SELECT, default = DRAW (only when piano roll is focused)
     {
         let is_select =
-            input.ctrl() && state.focused_panel == crate::state::FocusedPanel::PianoRoll;
+            input.ctrl() && state.focused_panel == crate::app::state::FocusedPanel::PianoRoll;
         let mode_label = if is_select { "SELECT" } else { "DRAW" };
         draw_pixel_label(
             canvas,
@@ -277,7 +277,7 @@ pub(super) fn draw_piano_roll_impl(
             // Select all notes in clip
             if let Some((tid, ci, _, _)) = clip_info {
                 if let Some(track) = state.project.tracks.iter().find(|t| t.id == tid) {
-                    if let Some(crate::models::Clip::Midi(m)) = track.clips.get(ci) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get(ci) {
                         state.piano_roll_selected_notes = (0..m.notes.len()).collect();
                     }
                 }
@@ -341,7 +341,7 @@ pub(super) fn draw_piano_roll_impl(
         if midi_exp_btn {
             if let Some((tid, ci, _, _)) = clip_info {
                 if let Some(track) = state.project.tracks.iter().find(|t| t.id == tid) {
-                    if let Some(crate::models::Clip::Midi(m)) = track.clips.get(ci) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get(ci) {
                         let clip_name = if m.name.is_empty() {
                             format!("clip_{}", ci)
                         } else {
@@ -694,7 +694,7 @@ pub(super) fn draw_piano_roll_impl(
             .iter()
             .find(|t| t.id == track_id)
             .and_then(|t| {
-                if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                     Some(
                         m.notes
                             .iter()
@@ -909,7 +909,7 @@ pub(super) fn draw_piano_roll_impl(
 
             if is_resizing_right {
                 if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
                         for (&sni, &(_orig_s, orig_l)) in &origins {
                             let raw_len = (orig_l + dx_beats).max(snap_beats.min(0.125));
                             let new_len = pr_snap_prox(raw_len).max(snap_beats.min(0.125));
@@ -921,7 +921,7 @@ pub(super) fn draw_piano_roll_impl(
                     }
                 }
             } else if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
+                if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
                     for (&sni, &(orig_s, orig_l)) in &origins {
                         let raw_start = orig_s + dx_beats;
                         let new_start = pr_snap_prox(raw_start)
@@ -940,14 +940,14 @@ pub(super) fn draw_piano_roll_impl(
         if input.mouse_released {
             // Build a composite undo command for all resized notes
             let origins = state.piano_roll_resize_origins.clone();
-            let mut cmds: Vec<Box<dyn crate::commands::Command>> = Vec::new();
+            let mut cmds: Vec<Box<dyn crate::app::commands::Command>> = Vec::new();
             if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                if let Some(crate::models::Clip::Midi(m)) = track.clips.get(clip_idx) {
+                if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get(clip_idx) {
                     for (&sni, &(_orig_s, orig_l)) in &origins {
                         if let Some(note) = m.notes.get(sni) {
                             let new_len = note.length;
                             if (new_len - orig_l).abs() > 1e-9 {
-                                cmds.push(Box::new(crate::commands::ResizeMidiNote {
+                                cmds.push(Box::new(crate::app::commands::ResizeMidiNote {
                                     track_id,
                                     clip_idx,
                                     note_idx: sni,
@@ -961,7 +961,7 @@ pub(super) fn draw_piano_roll_impl(
             }
             if !cmds.is_empty() {
                 state.commands.execute(
-                    Box::new(crate::commands::CompositeCommand {
+                    Box::new(crate::app::commands::CompositeCommand {
                         desc: "Resize MIDI Notes".to_string(),
                         cmds,
                     }),
@@ -995,7 +995,7 @@ pub(super) fn draw_piano_roll_impl(
                 let new_start = orig_start + clamped_dx;
                 let new_pitch = ((orig_pitch as i32 + dy_semi).clamp(0, 127)) as u8;
                 if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
                         if let Some(note) = m.notes.get_mut(ni) {
                             note.start = new_start;
                             note.pitch = new_pitch;
@@ -1010,13 +1010,13 @@ pub(super) fn draw_piano_roll_impl(
                 // Clone drag release: the cloned notes are already in the clip at their
                 // current positions. Collect them, remove them, then use AddMidiNote
                 // commands so undo works correctly.
-                let mut cloned_notes: Vec<crate::models::MidiNote> = Vec::new();
+                let mut cloned_notes: Vec<crate::app::models::MidiNote> = Vec::new();
                 let mut indices_to_remove: Vec<usize> =
                     state.piano_roll_selected_notes.iter().copied().collect();
                 indices_to_remove.sort_unstable_by(|a, b| b.cmp(a)); // descending for safe removal
 
                 if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
                         for &idx in &indices_to_remove {
                             if idx < m.notes.len() {
                                 cloned_notes.push(m.notes.remove(idx));
@@ -1027,16 +1027,16 @@ pub(super) fn draw_piano_roll_impl(
                 cloned_notes.reverse(); // restore original order
                                         // Now add them back via commands for proper undo
                 if !cloned_notes.is_empty() {
-                    let mut sub_cmds: Vec<Box<dyn crate::commands::Command>> = Vec::new();
+                    let mut sub_cmds: Vec<Box<dyn crate::app::commands::Command>> = Vec::new();
                     for note in cloned_notes {
-                        sub_cmds.push(Box::new(crate::commands::AddMidiNote {
+                        sub_cmds.push(Box::new(crate::app::commands::AddMidiNote {
                             track_id,
                             clip_idx,
                             note,
                         }));
                     }
                     state.commands.execute(
-                        Box::new(crate::commands::CompositeCommand {
+                        Box::new(crate::app::commands::CompositeCommand {
                             cmds: sub_cmds,
                             desc: "Clone MIDI Notes".into(),
                         }),
@@ -1055,7 +1055,7 @@ pub(super) fn draw_piano_roll_impl(
                         .iter()
                         .find(|t| t.id == track_id)
                         .and_then(|t| {
-                            if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                            if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                                 m.notes.get(ni).map(|n| (n.start, n.pitch))
                             } else {
                                 None
@@ -1066,7 +1066,7 @@ pub(super) fn draw_piano_roll_impl(
                 }
                 if !moves.is_empty() {
                     state.commands.execute(
-                        Box::new(crate::commands::MoveMidiNotes {
+                        Box::new(crate::app::commands::MoveMidiNotes {
                             track_id,
                             clip_idx,
                             moves,
@@ -1106,14 +1106,14 @@ pub(super) fn draw_piano_roll_impl(
         if input.mouse_released {
             // Commit note at the correct start position
             let final_len = pr_snap(note_len).max(snap_beats.min(0.125));
-            let new_note = crate::models::MidiNote {
+            let new_note = crate::app::models::MidiNote {
                 pitch: note_pitch,
                 velocity: 100,
                 start: actual_start,
                 length: final_len,
             };
             state.commands.execute(
-                Box::new(crate::commands::AddMidiNote {
+                Box::new(crate::app::commands::AddMidiNote {
                     track_id,
                     clip_idx,
                     note: new_note,
@@ -1153,7 +1153,7 @@ pub(super) fn draw_piano_roll_impl(
     // ── Focus: clicking anywhere in piano roll area claims keyboard focus ──
     let in_piano_roll_area = input.mouse_in_rect(0, top, w, h);
     if in_piano_roll_area && input.mouse_pressed {
-        state.focused_panel = crate::state::FocusedPanel::PianoRoll;
+        state.focused_panel = crate::app::state::FocusedPanel::PianoRoll;
     }
 
     // ── Mouse press: decide action ────────────────────────────────────
@@ -1178,13 +1178,13 @@ pub(super) fn draw_piano_roll_impl(
                     state.piano_roll_selected_notes.insert(ni);
                 }
                 // Clone all selected notes
-                let notes_to_clone: Vec<crate::models::MidiNote> = state
+                let notes_to_clone: Vec<crate::app::models::MidiNote> = state
                     .project
                     .tracks
                     .iter()
                     .find(|t| t.id == track_id)
                     .and_then(|t| {
-                        if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                        if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                             Some(
                                 state
                                     .piano_roll_selected_notes
@@ -1205,7 +1205,7 @@ pub(super) fn draw_piano_roll_impl(
                         .iter()
                         .find(|t| t.id == track_id)
                         .and_then(|t| {
-                            if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                            if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                                 Some(m.notes.len())
                             } else {
                                 None
@@ -1214,7 +1214,9 @@ pub(super) fn draw_piano_roll_impl(
                         .unwrap_or(0);
                     if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id)
                     {
-                        if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
+                        if let Some(crate::app::models::Clip::Midi(m)) =
+                            track.clips.get_mut(clip_idx)
+                        {
                             for note in &notes_to_clone {
                                 m.notes.push(note.clone());
                             }
@@ -1260,7 +1262,7 @@ pub(super) fn draw_piano_roll_impl(
                         .iter()
                         .find(|t| t.id == track_id)
                         .and_then(|t| {
-                            if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                            if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                                 m.notes.get(ni).map(|n| (n.start, n.length))
                             } else {
                                 None
@@ -1270,7 +1272,7 @@ pub(super) fn draw_piano_roll_impl(
                     // Store original (start, length) for all selected notes
                     state.piano_roll_resize_origins.clear();
                     if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                        if let Some(crate::models::Clip::Midi(m)) = track.clips.get(clip_idx) {
+                        if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get(clip_idx) {
                             for &sni in &state.piano_roll_selected_notes {
                                 if let Some(n) = m.notes.get(sni) {
                                     state
@@ -1303,7 +1305,7 @@ pub(super) fn draw_piano_roll_impl(
                         .iter()
                         .find(|t| t.id == track_id)
                         .and_then(|t| {
-                            if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                            if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                                 Some(
                                     state
                                         .piano_roll_selected_notes
@@ -1346,7 +1348,7 @@ pub(super) fn draw_piano_roll_impl(
                 .iter()
                 .find(|t| t.id == track_id)
                 .and_then(|t| {
-                    if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                         m.notes.get(ni).cloned().map(|n| (ni, n))
                     } else {
                         None
@@ -1354,7 +1356,7 @@ pub(super) fn draw_piano_roll_impl(
                 });
             if let Some((ni, n)) = orig {
                 state.commands.execute(
-                    Box::new(crate::commands::DeleteMidiNotes {
+                    Box::new(crate::app::commands::DeleteMidiNotes {
                         track_id,
                         clip_idx,
                         notes: vec![(ni, n)],
@@ -1370,18 +1372,18 @@ pub(super) fn draw_piano_roll_impl(
     }
 
     // Delete key: delete selected notes (only when piano roll has focus)
-    if state.focused_panel == crate::state::FocusedPanel::PianoRoll
+    if state.focused_panel == crate::app::state::FocusedPanel::PianoRoll
         && !state.piano_roll_selected_notes.is_empty()
         && (input.key_available(sdl2::keyboard::Keycode::Delete)
             || input.key_available(sdl2::keyboard::Keycode::Backspace))
     {
-        let to_delete: Vec<(usize, crate::models::MidiNote)> = state
+        let to_delete: Vec<(usize, crate::app::models::MidiNote)> = state
             .project
             .tracks
             .iter()
             .find(|t| t.id == track_id)
             .and_then(|t| {
-                if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                     Some(
                         state
                             .piano_roll_selected_notes
@@ -1396,7 +1398,7 @@ pub(super) fn draw_piano_roll_impl(
             .unwrap_or_default();
         if !to_delete.is_empty() {
             state.commands.execute(
-                Box::new(crate::commands::DeleteMidiNotes {
+                Box::new(crate::app::commands::DeleteMidiNotes {
                     track_id,
                     clip_idx,
                     notes: to_delete,
@@ -1411,7 +1413,7 @@ pub(super) fn draw_piano_roll_impl(
     }
 
     // ── Ctrl+A: select all (only when piano roll has focus) ──────────
-    if state.focused_panel == crate::state::FocusedPanel::PianoRoll
+    if state.focused_panel == crate::app::state::FocusedPanel::PianoRoll
         && input.ctrl()
         && input.key_available(sdl2::keyboard::Keycode::A)
     {
@@ -1421,7 +1423,7 @@ pub(super) fn draw_piano_roll_impl(
             .iter()
             .find(|t| t.id == track_id)
             .and_then(|t| {
-                if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                     Some(m.notes.len())
                 } else {
                     None
@@ -1434,7 +1436,7 @@ pub(super) fn draw_piano_roll_impl(
 
     // ── Up/Down arrows: move selected notes by semitone (Shift = octave) ──
     // Only when piano roll has focus, to prevent cross-bleed with arrangement.
-    if state.focused_panel == crate::state::FocusedPanel::PianoRoll {
+    if state.focused_panel == crate::app::state::FocusedPanel::PianoRoll {
         let up = input.key_available(sdl2::keyboard::Keycode::Up);
         let down = input.key_available(sdl2::keyboard::Keycode::Down);
         if (up || down) && !state.piano_roll_selected_notes.is_empty() {
@@ -1447,7 +1449,7 @@ pub(super) fn draw_piano_roll_impl(
                 .iter()
                 .find(|t| t.id == track_id)
                 .and_then(|t| {
-                    if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                         Some(state.piano_roll_selected_notes.iter().all(|&ni| {
                             if let Some(note) = m.notes.get(ni) {
                                 let new_pitch = note.pitch as i16 + delta as i16;
@@ -1469,7 +1471,7 @@ pub(super) fn draw_piano_roll_impl(
                     .iter()
                     .find(|t| t.id == track_id)
                     .and_then(|t| {
-                        if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                        if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                             Some(
                                 state
                                     .piano_roll_selected_notes
@@ -1489,7 +1491,7 @@ pub(super) fn draw_piano_roll_impl(
                     .unwrap_or_default();
                 if !moves.is_empty() {
                     state.commands.execute(
-                        Box::new(crate::commands::MoveMidiNotes {
+                        Box::new(crate::app::commands::MoveMidiNotes {
                             track_id,
                             clip_idx,
                             moves,
@@ -1590,7 +1592,7 @@ pub(super) fn draw_piano_roll_impl(
                 .iter()
                 .find(|t| t.id == track_id)
                 .and_then(|t| {
-                    if let Some(crate::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = t.clips.get(clip_idx) {
                         Some(
                             m.notes
                                 .iter()
@@ -1634,7 +1636,7 @@ pub(super) fn draw_piano_roll_impl(
             if hover_vel && input.mouse_pressed && input.shift() {
                 let old_vel = *velocity;
                 state.commands.execute(
-                    Box::new(crate::commands::SetNoteVelocity {
+                    Box::new(crate::app::commands::SetNoteVelocity {
                         track_id,
                         clip_idx,
                         note_idx: *ni,
@@ -1651,7 +1653,7 @@ pub(super) fn draw_piano_roll_impl(
                     * 127.0)
                     .clamp(1.0, 127.0) as u8;
                 if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(clip_idx) {
                         if let Some(note) = m.notes.get_mut(*ni) {
                             // Store original velocity on first touch for undo
                             if input.mouse_pressed {
@@ -1671,12 +1673,12 @@ pub(super) fn draw_piano_roll_impl(
             if let Some(ni) = state.drag_velocity_note_idx.take() {
                 let old_vel = state.drag_velocity_original;
                 if let Some(track) = state.project.tracks.iter().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Midi(m)) = track.clips.get(clip_idx) {
+                    if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get(clip_idx) {
                         if let Some(note) = m.notes.get(ni) {
                             let new_vel = note.velocity;
                             if new_vel != old_vel {
                                 state.commands.execute(
-                                    Box::new(crate::commands::SetNoteVelocity {
+                                    Box::new(crate::app::commands::SetNoteVelocity {
                                         track_id,
                                         clip_idx,
                                         note_idx: ni,

@@ -12,9 +12,9 @@ mod dsp_tests;
 mod parity;
 mod save_load;
 
-use crate::commands::*;
+use crate::app::commands::*;
+use crate::app::models::*;
 use crate::engine::render_to_buffer;
-use crate::models::*;
 use crate::modules::*;
 
 // ─── Helper: create a minimal project with one MIDI track + clip ───
@@ -1945,7 +1945,7 @@ fn test_multiple_undo_redo_roundtrips() {
 fn make_render_project(effects: Vec<RackSlot>) -> Project {
     let mut p = Project::default();
     p.name = "RenderTest".into();
-    p.tempo_map.changes = vec![crate::models::TempoChange {
+    p.tempo_map.changes = vec![crate::app::models::TempoChange {
         beat: 0.0,
         bpm: 120.0,
     }];
@@ -3178,7 +3178,7 @@ fn test_render_duration_scales_samples() {
 fn make_render_project_with_synth_slot(synth: RackSlot, effects: Vec<RackSlot>) -> Project {
     let mut p = Project::default();
     p.name = "SynthTest".into();
-    p.tempo_map.changes = vec![crate::models::TempoChange {
+    p.tempo_map.changes = vec![crate::app::models::TempoChange {
         beat: 0.0,
         bpm: 120.0,
     }];
@@ -5043,11 +5043,11 @@ fn test_project_next_track_id_exceeds_all() {
 fn test_tempo_map_multiple_changes() {
     let mut tm = TempoMap::default();
     tm.changes = vec![
-        crate::models::TempoChange {
+        crate::app::models::TempoChange {
             beat: 0.0,
             bpm: 120.0,
         },
-        crate::models::TempoChange {
+        crate::app::models::TempoChange {
             beat: 8.0,
             bpm: 140.0,
         },
@@ -6166,7 +6166,7 @@ fn test_midi_export_roundtrip() {
     let bpm = 120.0;
 
     // Export
-    let result = crate::models::export_midi_file(&clip, tmp_path, bpm, "test");
+    let result = crate::app::models::export_midi_file(&clip, tmp_path, bpm, "test");
     assert!(
         result.is_ok(),
         "MIDI export should succeed: {:?}",
@@ -6180,7 +6180,7 @@ fn test_midi_export_roundtrip() {
     );
 
     // Import back
-    let imported = crate::models::import_midi_file(tmp_path, bpm);
+    let imported = crate::app::models::import_midi_file(tmp_path, bpm);
     assert!(
         imported.is_ok(),
         "MIDI import should succeed: {:?}",
@@ -6251,7 +6251,7 @@ fn test_midi_export_empty_clip() {
         color: [100, 160, 255, 200],
     };
     let tmp_path = "/tmp/eden_test_midi_export_empty.mid";
-    let result = crate::models::export_midi_file(&clip, tmp_path, 120.0, "empty");
+    let result = crate::app::models::export_midi_file(&clip, tmp_path, 120.0, "empty");
     // Should succeed even with empty notes (just end-of-track event)
     assert!(result.is_ok(), "MIDI export of empty clip should succeed");
     let _ = std::fs::remove_file(tmp_path);
@@ -6274,7 +6274,7 @@ fn test_midi_export_various_bpm() {
 
     for bpm in [60.0, 120.0, 140.0, 200.0, 300.0] {
         let tmp_path = format!("/tmp/eden_test_midi_bpm_{}.mid", bpm as u32);
-        let result = crate::models::export_midi_file(&clip, &tmp_path, bpm, "bpm_test");
+        let result = crate::app::models::export_midi_file(&clip, &tmp_path, bpm, "bpm_test");
         assert!(result.is_ok(), "MIDI export at {} BPM should succeed", bpm);
         let _ = std::fs::remove_file(&tmp_path);
     }
@@ -6620,7 +6620,7 @@ fn test_join_midi_clips_snapshot_undo() {
 
 #[test]
 fn test_tempo_map_seconds_to_beats_roundtrip() {
-    let tm = crate::models::TempoMap::default();
+    let tm = crate::app::models::TempoMap::default();
     let beats = 12.5;
     let seconds = tm.beats_to_seconds(beats);
     let roundtrip = tm.seconds_to_beats(seconds);
@@ -7088,8 +7088,8 @@ fn test_set_master_rack_param_out_of_bounds() {
 // knob, and drag interaction without needing a GPU.
 // ═══════════════════════════════════════════════════════════════════
 
-use crate::input::{ClickType, InputState};
-use crate::state::AppState;
+use crate::app::input::{ClickType, InputState};
+use crate::app::state::AppState;
 
 // ── InputState simulation helpers ────────────────────────────────
 
@@ -7323,7 +7323,7 @@ fn test_input_drag_cleared_on_release() {
 
     sim_release(&mut input, 200, 200);
     assert!(!input.dragging, "dragging should be cleared on release");
-    assert_eq!(input.drag_widget, crate::input::WidgetId::None);
+    assert_eq!(input.drag_widget, crate::app::input::WidgetId::None);
 }
 
 #[test]
@@ -7427,14 +7427,14 @@ fn test_input_widget_id_counter() {
     let id2 = input.next_id();
     let id3 = input.next_id();
 
-    assert_eq!(id1, crate::input::WidgetId::Auto(0));
-    assert_eq!(id2, crate::input::WidgetId::Auto(1));
-    assert_eq!(id3, crate::input::WidgetId::Auto(2));
+    assert_eq!(id1, crate::app::input::WidgetId::Auto(0));
+    assert_eq!(id2, crate::app::input::WidgetId::Auto(1));
+    assert_eq!(id3, crate::app::input::WidgetId::Auto(2));
 
     // Resets on new frame
     input.begin_frame();
     let id_reset = input.next_id();
-    assert_eq!(id_reset, crate::input::WidgetId::Auto(0));
+    assert_eq!(id_reset, crate::app::input::WidgetId::Auto(0));
 }
 
 #[test]
@@ -7453,13 +7453,13 @@ fn test_input_active_widget_survives_released_frame() {
 
     // Press — set active widget
     sim_click(&mut input, 100, 100);
-    input.active_widget = crate::input::WidgetId::Auto(42);
+    input.active_widget = crate::app::input::WidgetId::Auto(42);
 
     // Release frame — active_widget should survive
     sim_release(&mut input, 100, 100);
     assert_eq!(
         input.active_widget,
-        crate::input::WidgetId::Auto(42),
+        crate::app::input::WidgetId::Auto(42),
         "active_widget should survive through release frame"
     );
 
@@ -7467,7 +7467,7 @@ fn test_input_active_widget_survives_released_frame() {
     input.begin_frame();
     assert_eq!(
         input.active_widget,
-        crate::input::WidgetId::None,
+        crate::app::input::WidgetId::None,
         "active_widget should clear on next frame after release"
     );
 }
@@ -7483,7 +7483,7 @@ fn test_input_middle_mouse_drag() {
     assert!(input.middle_mouse_down);
 
     // Set middle_drag_widget (normally done by widget logic)
-    input.middle_drag_widget = crate::input::WidgetId::Auto(10);
+    input.middle_drag_widget = crate::app::input::WidgetId::Auto(10);
 
     // Release
     input.begin_frame();
@@ -7495,7 +7495,7 @@ fn test_input_middle_mouse_drag() {
 
     // Next frame — middle_drag_widget should clear
     input.begin_frame();
-    assert_eq!(input.middle_drag_widget, crate::input::WidgetId::None);
+    assert_eq!(input.middle_drag_widget, crate::app::input::WidgetId::None);
 }
 
 #[test]
@@ -7566,7 +7566,7 @@ fn test_app_state_sync_clip_library() {
 
 #[test]
 fn test_app_state_snap_settings() {
-    let snap = crate::state::SnapSettings {
+    let snap = crate::app::state::SnapSettings {
         enabled: true,
         resolution_idx: 2, // 1/4 = 1.0 beat
     };
@@ -7579,7 +7579,7 @@ fn test_app_state_snap_settings() {
 
 #[test]
 fn test_app_state_snap_disabled() {
-    let snap = crate::state::SnapSettings {
+    let snap = crate::app::state::SnapSettings {
         enabled: false,
         resolution_idx: 2,
     };
@@ -7593,7 +7593,7 @@ fn test_app_state_snap_disabled() {
 
 #[test]
 fn test_app_state_snap_proximity() {
-    let snap = crate::state::SnapSettings {
+    let snap = crate::app::state::SnapSettings {
         enabled: true,
         resolution_idx: 2, // 1/4 = 1.0 beat
     };
@@ -7607,13 +7607,13 @@ fn test_app_state_snap_proximity() {
 #[test]
 fn test_app_state_snap_resolutions() {
     // Verify all snap resolutions are valid
-    for (label, beats) in crate::state::SNAP_RESOLUTIONS {
+    for (label, beats) in crate::app::state::SNAP_RESOLUTIONS {
         assert!(*beats > 0.0, "snap resolution {} should be positive", label);
     }
     // Should be sorted from largest to smallest
-    for i in 1..crate::state::SNAP_RESOLUTIONS.len() {
+    for i in 1..crate::app::state::SNAP_RESOLUTIONS.len() {
         assert!(
-            crate::state::SNAP_RESOLUTIONS[i].1 < crate::state::SNAP_RESOLUTIONS[i - 1].1,
+            crate::app::state::SNAP_RESOLUTIONS[i].1 < crate::app::state::SNAP_RESOLUTIONS[i - 1].1,
             "snap resolutions should be in decreasing order"
         );
     }
@@ -7622,16 +7622,16 @@ fn test_app_state_snap_resolutions() {
 #[test]
 fn test_app_state_mode_transitions() {
     let mut state = make_app_state();
-    assert_eq!(state.mode, crate::state::AppMode::ProjectManager);
+    assert_eq!(state.mode, crate::app::state::AppMode::ProjectManager);
 
-    state.mode = crate::state::AppMode::Arrangement;
-    assert_eq!(state.mode, crate::state::AppMode::Arrangement);
+    state.mode = crate::app::state::AppMode::Arrangement;
+    assert_eq!(state.mode, crate::app::state::AppMode::Arrangement);
 
-    state.mode = crate::state::AppMode::Mixer;
-    assert_eq!(state.mode, crate::state::AppMode::Mixer);
+    state.mode = crate::app::state::AppMode::Mixer;
+    assert_eq!(state.mode, crate::app::state::AppMode::Mixer);
 
-    state.mode = crate::state::AppMode::Edit;
-    assert_eq!(state.mode, crate::state::AppMode::Edit);
+    state.mode = crate::app::state::AppMode::Edit;
+    assert_eq!(state.mode, crate::app::state::AppMode::Edit);
 }
 
 #[test]
@@ -7673,17 +7673,26 @@ fn test_app_state_bottom_panel() {
     state.bottom_panel_height = 200;
     assert!(state.bottom_panel_open);
 
-    state.bottom_panel_tab = crate::state::BottomPanelTab::Mixer;
-    assert_eq!(state.bottom_panel_tab, crate::state::BottomPanelTab::Mixer);
+    state.bottom_panel_tab = crate::app::state::BottomPanelTab::Mixer;
+    assert_eq!(
+        state.bottom_panel_tab,
+        crate::app::state::BottomPanelTab::Mixer
+    );
 }
 
 #[test]
 fn test_app_state_focused_panel() {
     let mut state = make_app_state();
-    assert_eq!(state.focused_panel, crate::state::FocusedPanel::Arrangement);
+    assert_eq!(
+        state.focused_panel,
+        crate::app::state::FocusedPanel::Arrangement
+    );
 
-    state.focused_panel = crate::state::FocusedPanel::PianoRoll;
-    assert_eq!(state.focused_panel, crate::state::FocusedPanel::PianoRoll);
+    state.focused_panel = crate::app::state::FocusedPanel::PianoRoll;
+    assert_eq!(
+        state.focused_panel,
+        crate::app::state::FocusedPanel::PianoRoll
+    );
 }
 
 #[test]
@@ -8276,20 +8285,20 @@ fn test_undo_redo_clears_redo_on_new_command() {
 
 #[test]
 fn test_arrangement_view_defaults() {
-    let arr = crate::state::ArrangementView::default();
+    let arr = crate::app::state::ArrangementView::default();
     assert!(arr.zoom_x > 0.0, "zoom must be positive");
     assert!(arr.scroll_x >= 0.0, "scroll must be non-negative");
 }
 
 #[test]
 fn test_arrangement_zoom_bounds() {
-    let arr = crate::state::ArrangementView {
+    let arr = crate::app::state::ArrangementView {
         zoom_x: 500.0,
         ..Default::default()
     };
     assert!(arr.zoom_x > 0.0);
     // Zoom out
-    let arr = crate::state::ArrangementView {
+    let arr = crate::app::state::ArrangementView {
         zoom_x: 5.0,
         ..Default::default()
     };
@@ -8315,7 +8324,7 @@ fn test_piano_roll_note_selection() {
 #[test]
 fn test_piano_roll_snap_resolution() {
     let state = make_app_state();
-    let snap_beats = crate::state::SNAP_RESOLUTIONS[state.piano_roll_snap_idx].1;
+    let snap_beats = crate::app::state::SNAP_RESOLUTIONS[state.piano_roll_snap_idx].1;
     assert!(snap_beats > 0.0);
 }
 
@@ -8483,7 +8492,7 @@ fn make_audio_clip_project(sample_rate: u32, duration_secs: f64, freq: f64, bpm:
 
     let mut p = Project::default();
     p.name = "AudioPrecisionTest".into();
-    p.tempo_map.changes = vec![crate::models::TempoChange { beat: 0.0, bpm }];
+    p.tempo_map.changes = vec![crate::app::models::TempoChange { beat: 0.0, bpm }];
 
     let mut t = Track::new(1, "Audio", TrackType::Audio);
     t.volume = 1.0;
@@ -8795,7 +8804,7 @@ fn test_delay_beat_division_at_various_bpms() {
     // by rendering a project with delay effect
     for &bpm in &[60.0, 90.0, 120.0, 140.0, 180.0] {
         let mut project = make_render_project(vec![RackSlot::delay(101)]);
-        project.tempo_map.changes = vec![crate::models::TempoChange { beat: 0.0, bpm }];
+        project.tempo_map.changes = vec![crate::app::models::TempoChange { beat: 0.0, bpm }];
         let buf = render_to_buffer(&project, 44100, 1.0);
         // Should produce output (not silence)
         let note_rms = rms(&buf, 100, buf.len().min(10000));
@@ -9590,7 +9599,7 @@ fn test_midi_note_boundary_no_click() {
 /// the result equals the raw beat regardless of the grid.
 #[test]
 fn test_snap_alt_bypass_returns_raw() {
-    let snap = crate::state::SnapSettings {
+    let snap = crate::app::state::SnapSettings {
         enabled: true,
         resolution_idx: 2, // 1/4 note = 1.0 beat grid
     };
@@ -9608,7 +9617,7 @@ fn test_snap_alt_bypass_returns_raw() {
 /// snap_proximity also returns the raw value when bypass is active.
 #[test]
 fn test_snap_proximity_alt_bypass() {
-    let snap = crate::state::SnapSettings {
+    let snap = crate::app::state::SnapSettings {
         enabled: true,
         resolution_idx: 2, // 1/4 note
     };

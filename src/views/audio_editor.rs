@@ -4,8 +4,8 @@ use sdl2::render::Canvas;
 use sdl2::video::Window;
 
 use super::gain_to_db_label;
-use crate::input::{InputState, WidgetId};
-use crate::state::*;
+use crate::app::input::{InputState, WidgetId};
+use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -60,7 +60,7 @@ pub(super) fn draw_audio_editor(
 
     // ── Click anywhere in audio editor to focus it ───────────────────
     if input.mouse_in_rect(0, top, w, h) && input.mouse_pressed {
-        state.focused_panel = crate::state::FocusedPanel::AudioEditor;
+        state.focused_panel = crate::app::state::FocusedPanel::AudioEditor;
     }
 
     // ── Gather clip info ─────────────────────────────────────────────
@@ -74,7 +74,7 @@ pub(super) fn draw_audio_editor(
                 .find(|t| t.id == track_id)
                 .and_then(|t| t.clips.get(clip_idx))
                 .and_then(|c| {
-                    if let crate::models::Clip::Audio(ac) = c {
+                    if let crate::app::models::Clip::Audio(ac) = c {
                         let name = if ac.name.is_empty() {
                             std::path::Path::new(&ac.source_file)
                                 .file_name()
@@ -364,7 +364,7 @@ pub(super) fn draw_audio_editor(
         let mut count = 0usize;
         for track in &state.project.tracks {
             for clip in &track.clips {
-                if let crate::models::Clip::Audio(ac) = clip {
+                if let crate::app::models::Clip::Audio(ac) = clip {
                     if ac.source_file == *sf {
                         count += 1;
                         if count > 1 {
@@ -430,7 +430,7 @@ pub(super) fn draw_audio_editor(
                         if let Some(track) =
                             state.project.tracks.iter_mut().find(|t| t.id == track_id)
                         {
-                            if let Some(crate::models::Clip::Audio(ac)) =
+                            if let Some(crate::app::models::Clip::Audio(ac)) =
                                 track.clips.get_mut(clip_idx)
                             {
                                 ac.source_file = new_path_str.clone();
@@ -459,7 +459,7 @@ pub(super) fn draw_audio_editor(
     // ── Keyboard shortcuts for toolbar tools (left-hand keys) ────────
     // Q=SEL(all), W=NORM, E=TRIM, R=FIT, T=CUT, Y=PASTE
     let key_triggered_tool: Option<usize> = if state.focused_panel
-        == crate::state::FocusedPanel::AudioEditor
+        == crate::app::state::FocusedPanel::AudioEditor
         && state.text_field_active_id == 0
     {
         if input.key_available(sdl2::keyboard::Keycode::Q) {
@@ -688,7 +688,7 @@ pub(super) fn draw_audio_editor(
                                                             .find(|t| t.id == track_id)
                                                         {
                                                             if let Some(
-                                                                crate::models::Clip::Audio(ac),
+                                                                crate::app::models::Clip::Audio(ac),
                                                             ) = t.clips.get_mut(clip_idx)
                                                             {
                                                                 let old_offset = ac.offset;
@@ -736,7 +736,7 @@ pub(super) fn draw_audio_editor(
                                 if let Some(t) =
                                     state.project.tracks.iter_mut().find(|t| t.id == track_id)
                                 {
-                                    if let Some(crate::models::Clip::Audio(ac)) =
+                                    if let Some(crate::app::models::Clip::Audio(ac)) =
                                         t.clips.get_mut(clip_idx)
                                     {
                                         let new_len_secs = e - s;
@@ -836,7 +836,7 @@ pub(super) fn draw_audio_editor(
                                                             .find(|t| t.id == track_id)
                                                         {
                                                             if let Some(
-                                                                crate::models::Clip::Audio(ac),
+                                                                crate::app::models::Clip::Audio(ac),
                                                             ) = t.clips.get_mut(clip_idx)
                                                             {
                                                                 if ac.offset >= e {
@@ -942,8 +942,9 @@ pub(super) fn draw_audio_editor(
                                                     .iter_mut()
                                                     .find(|t| t.id == track_id)
                                                 {
-                                                    if let Some(crate::models::Clip::Audio(ac)) =
-                                                        t.clips.get_mut(clip_idx)
+                                                    if let Some(crate::app::models::Clip::Audio(
+                                                        ac,
+                                                    )) = t.clips.get_mut(clip_idx)
                                                     {
                                                         if ac.offset >= paste_sec {
                                                             ac.offset += paste_dur;
@@ -1054,7 +1055,7 @@ pub(super) fn draw_audio_editor(
         if gain_changed {
             if let Some((track_id, clip_idx)) = state.selected_clip {
                 if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                    if let Some(crate::app::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
                         ac.gain = gain_val;
                         state.dirty = true;
                     }
@@ -1068,7 +1069,7 @@ pub(super) fn draw_audio_editor(
                 let new_gain = gain_val;
                 if (old_gain - new_gain).abs() > 1e-4 {
                     state.commands.execute(
-                        Box::new(crate::commands::SetClipGain {
+                        Box::new(crate::app::commands::SetClipGain {
                             track_id,
                             clip_idx,
                             old_gain,
@@ -1122,7 +1123,7 @@ pub(super) fn draw_audio_editor(
             // Write back to the clip model
             if let Some((track_id, clip_idx)) = state.selected_clip {
                 if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                    if let Some(crate::app::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
                         ac.fade_in = fade_val as f64;
                         state.dirty = true;
                     }
@@ -1172,7 +1173,7 @@ pub(super) fn draw_audio_editor(
             // Write back to the clip model
             if let Some((track_id, clip_idx)) = state.selected_clip {
                 if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
-                    if let Some(crate::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
+                    if let Some(crate::app::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
                         ac.fade_out = fade_val as f64;
                         state.dirty = true;
                     }
@@ -2146,7 +2147,7 @@ pub(super) fn draw_audio_editor(
             input.active_widget = WidgetId::Auto(7082);
             input.drag_start_value = sec;
         }
-        state.focused_panel = crate::state::FocusedPanel::AudioEditor;
+        state.focused_panel = crate::app::state::FocusedPanel::AudioEditor;
     }
     // Drag loop start handle
     if input.drag_widget == WidgetId::Auto(7080) && input.mouse_down {
@@ -2228,7 +2229,7 @@ pub(super) fn draw_audio_editor(
     {
         let sec = x_to_sec(input.mouse_x).clamp(0.0, total_secs);
         state.audio_editor_playhead = sec;
-        state.focused_panel = crate::state::FocusedPanel::AudioEditor;
+        state.focused_panel = crate::app::state::FocusedPanel::AudioEditor;
         // Start a drag so subsequent mouse_down frames also update the playhead
         input.drag_widget = WidgetId::Auto(7095);
         input.active_widget = WidgetId::Auto(7095);
@@ -2265,7 +2266,7 @@ pub(super) fn draw_audio_editor(
     {
         let sec = snap_sec(x_to_sec(input.mouse_x).clamp(0.0, total_secs));
         state.audio_editor_selection = Some((sec, sec));
-        state.focused_panel = crate::state::FocusedPanel::AudioEditor;
+        state.focused_panel = crate::app::state::FocusedPanel::AudioEditor;
         input.drag_widget = WidgetId::Auto(7050);
         input.active_widget = WidgetId::Auto(7050);
         input.drag_start_value = sec;
@@ -2311,7 +2312,7 @@ pub(super) fn draw_audio_editor(
     }
 
     if (in_wave || in_ruler || in_loop_ruler) && input.mouse_pressed {
-        state.focused_panel = crate::state::FocusedPanel::AudioEditor;
+        state.focused_panel = crate::app::state::FocusedPanel::AudioEditor;
     }
 
     // ── Update playhead from preview position ────────────────────────

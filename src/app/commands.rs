@@ -1,7 +1,7 @@
 // Eden DAW — Command / Undo-Redo system
 // Every mutation to the Project goes through a Command.
 
-use crate::models::*;
+use crate::app::models::*;
 
 /// A reversible action on the project.
 pub trait Command: std::fmt::Debug {
@@ -577,13 +577,13 @@ impl Command for ResizeTrack {
 pub struct AddMidiNote {
     pub track_id: u32,
     pub clip_idx: usize,
-    pub note: crate::models::MidiNote,
+    pub note: crate::app::models::MidiNote,
 }
 
 impl Command for AddMidiNote {
     fn apply(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 m.notes.push(self.note.clone());
             }
         }
@@ -591,7 +591,7 @@ impl Command for AddMidiNote {
 
     fn undo(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 m.notes.pop(); // it was pushed last
             }
         }
@@ -608,14 +608,14 @@ impl Command for AddMidiNote {
 pub struct DuplicateNotes {
     pub track_id: u32,
     pub clip_idx: usize,
-    pub new_notes: Vec<crate::models::MidiNote>,
+    pub new_notes: Vec<crate::app::models::MidiNote>,
     pub count: usize, // how many were appended (set in apply)
 }
 
 impl Command for DuplicateNotes {
     fn apply(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 self.count = self.new_notes.len();
                 for n in &self.new_notes {
                     m.notes.push(n.clone());
@@ -626,7 +626,7 @@ impl Command for DuplicateNotes {
 
     fn undo(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 for _ in 0..self.count {
                     m.notes.pop();
                 }
@@ -646,13 +646,13 @@ pub struct DeleteMidiNotes {
     pub track_id: u32,
     pub clip_idx: usize,
     /// (original_index, note) pairs stored for undo, sorted ascending by original index
-    pub notes: Vec<(usize, crate::models::MidiNote)>,
+    pub notes: Vec<(usize, crate::app::models::MidiNote)>,
 }
 
 impl Command for DeleteMidiNotes {
     fn apply(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 // Remove from highest index first so lower indices aren't shifted
                 let mut indices: Vec<usize> = self.notes.iter().map(|(i, _)| *i).collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
@@ -667,7 +667,7 @@ impl Command for DeleteMidiNotes {
 
     fn undo(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 // Re-insert in ascending index order
                 let mut pairs = self.notes.clone();
                 pairs.sort_unstable_by_key(|(i, _)| *i);
@@ -696,7 +696,7 @@ pub struct MoveMidiNotes {
 impl Command for MoveMidiNotes {
     fn apply(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 for &(idx, _, _, new_start, new_pitch) in &self.moves {
                     if let Some(note) = m.notes.get_mut(idx) {
                         note.start = new_start;
@@ -709,7 +709,7 @@ impl Command for MoveMidiNotes {
 
     fn undo(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 for &(idx, old_start, old_pitch, _, _) in &self.moves {
                     if let Some(note) = m.notes.get_mut(idx) {
                         note.start = old_start;
@@ -842,7 +842,7 @@ pub struct ResizeMidiNote {
 impl Command for ResizeMidiNote {
     fn apply(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 if let Some(note) = m.notes.get_mut(self.note_idx) {
                     note.length = self.new_len;
                 }
@@ -852,7 +852,7 @@ impl Command for ResizeMidiNote {
 
     fn undo(&mut self, project: &mut Project) {
         if let Some(track) = project.tracks.iter_mut().find(|t| t.id == self.track_id) {
-            if let Some(crate::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
+            if let Some(crate::app::models::Clip::Midi(m)) = track.clips.get_mut(self.clip_idx) {
                 if let Some(note) = m.notes.get_mut(self.note_idx) {
                     note.length = self.old_len;
                 }
@@ -1339,7 +1339,7 @@ pub struct MoveClipsCrossTrack {
     /// Filled in by apply(); used by undo.
     pub dst_clip_indices: Vec<usize>,
     /// Filled in by apply(); original src indices shift after removals, stored for undo.
-    pub removed_src: Vec<(u32, usize, crate::models::Clip)>,
+    pub removed_src: Vec<(u32, usize, crate::app::models::Clip)>,
 }
 
 impl Command for MoveClipsCrossTrack {
@@ -1357,7 +1357,7 @@ impl Command for MoveClipsCrossTrack {
         // Sort: same track → descending index so removals don't shift remaining indices.
         to_remove.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
-        let mut collected: Vec<(crate::models::Clip, f64)> = Vec::new();
+        let mut collected: Vec<(crate::app::models::Clip, f64)> = Vec::new();
         for (tid, ci, new_start) in &to_remove {
             if let Some(track) = project.tracks.iter_mut().find(|t| t.id == *tid) {
                 if *ci < track.clips.len() {
@@ -1472,12 +1472,12 @@ impl Command for JoinClips {
 
             let joined = if all_midi {
                 // Merge all notes, adjusting positions relative to new_start
-                let mut all_notes: Vec<crate::models::MidiNote> = Vec::new();
+                let mut all_notes: Vec<crate::app::models::MidiNote> = Vec::new();
                 let first_color = clips_sorted[0].1.color();
                 for (_, clip) in &clips_sorted {
                     if let Clip::Midi(mc) = clip {
                         for note in &mc.notes {
-                            all_notes.push(crate::models::MidiNote {
+                            all_notes.push(crate::app::models::MidiNote {
                                 pitch: note.pitch,
                                 velocity: note.velocity,
                                 start: note.start + mc.start_time - new_start,
@@ -1486,7 +1486,7 @@ impl Command for JoinClips {
                         }
                     }
                 }
-                Clip::Midi(crate::models::MidiClip {
+                Clip::Midi(crate::app::models::MidiClip {
                     notes: all_notes,
                     start_time: new_start,
                     length: new_length,
@@ -1604,7 +1604,7 @@ impl Command for JoinClips {
                         let merged_dur_secs = merged_samples.len() as f64
                             / (out_sr as f64 * out_channels.max(1) as f64);
                         let merged_len_beats = merged_dur_secs * bpm / 60.0;
-                        Clip::Audio(crate::models::AudioClip {
+                        Clip::Audio(crate::app::models::AudioClip {
                             source_file: joined_path.to_string_lossy().to_string(),
                             start_time: new_start,
                             offset: 0.0,
@@ -1617,7 +1617,7 @@ impl Command for JoinClips {
                         })
                     } else {
                         // Fallback: just extend length like before
-                        Clip::Audio(crate::models::AudioClip {
+                        Clip::Audio(crate::app::models::AudioClip {
                             source_file: first_ac.source_file,
                             start_time: new_start,
                             offset: first_ac.offset,
@@ -1631,7 +1631,7 @@ impl Command for JoinClips {
                     }
                 } else {
                     // Fallback: just extend length
-                    Clip::Audio(crate::models::AudioClip {
+                    Clip::Audio(crate::app::models::AudioClip {
                         source_file: first_ac.source_file,
                         start_time: new_start,
                         offset: first_ac.offset,

@@ -9,8 +9,8 @@ use super::automation_editor::draw_automation_editor;
 use super::clip_manager::draw_clip_manager;
 use super::piano_roll::draw_piano_roll_at;
 use super::transport::{draw_mode_tabs, draw_transport};
-use crate::input::InputState;
-use crate::state::*;
+use crate::app::input::InputState;
+use crate::app::state::*;
 use crate::theme::Theme;
 
 pub fn draw_edit(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
@@ -47,9 +47,9 @@ pub fn draw_edit(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mu
             .find(|t| t.id == tid)
             .and_then(|t| t.clips.get(ci))
             .map(|c| match c {
-                crate::models::Clip::Midi(_) => 0,
-                crate::models::Clip::Audio(_) => 1,
-                crate::models::Clip::Automation(_) => 2,
+                crate::app::models::Clip::Midi(_) => 0,
+                crate::app::models::Clip::Audio(_) => 1,
+                crate::app::models::Clip::Automation(_) => 2,
             })
     });
 

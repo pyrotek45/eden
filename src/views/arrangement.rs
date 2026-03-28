@@ -10,8 +10,8 @@ use super::overlays::draw_overlays;
 use super::track_headers::draw_track_headers;
 use super::track_lanes::draw_track_lanes;
 use super::transport::{draw_loop_ruler, draw_mode_tabs, draw_timeline_ruler, draw_transport};
-use crate::input::InputState;
-use crate::state::*;
+use crate::app::input::InputState;
+use crate::app::state::*;
 use crate::widgets::*;
 
 pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
@@ -38,7 +38,7 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     // Block input when an overlay is active (popups, dialogs, etc.).
     macro_rules! bg {
         ($inp:expr) => {
-            if layer > crate::state::UiLayer::Base {
+            if layer > crate::app::state::UiLayer::Base {
                 &mut dead_input
             } else {
                 $inp
@@ -51,7 +51,7 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     let mouse_below_panel = state.bottom_panel_open && input.mouse_y >= state.bottom_panel_y();
     macro_rules! bg_track {
         ($inp:expr) => {
-            if layer > crate::state::UiLayer::Base || mouse_below_panel {
+            if layer > crate::app::state::UiLayer::Base || mouse_below_panel {
                 &mut dead_input
             } else {
                 $inp
@@ -63,7 +63,7 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     // widgets drawn before the dropdown overlay can't steal the click.
     // The dropdown overlay (draw_overlays) processes item-click via
     // input.mouse_pressed directly, so consumed=true doesn't block it.
-    if state.dropdown_open_id == 200 && layer == crate::state::UiLayer::Base {
+    if state.dropdown_open_id == 200 && layer == crate::app::state::UiLayer::Base {
         let dd_x = 424i32;
         let dd_y = 10i32;
         let dd_w = 52i32;
@@ -134,7 +134,7 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     sync_counters!();
 
     // ── Drag-drop handlers (background layer only) ────────────────────────────
-    if layer == crate::state::UiLayer::Base {
+    if layer == crate::app::state::UiLayer::Base {
         // ── Clip sidebar drag → arrangement drop ──
         if let Some((src_track_id, src_clip_idx)) = state.clip_sidebar_drag {
             let left = state.arrangement_left_offset();
@@ -171,21 +171,23 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             .and_then(|t| t.clips.get(src_clip_idx));
                         let clip_len = clip_info
                             .map(|c| match c {
-                                crate::models::Clip::Midi(m) => m.length,
-                                crate::models::Clip::Audio(a) => a.length,
-                                crate::models::Clip::Automation(a) => a.length,
+                                crate::app::models::Clip::Midi(m) => m.length,
+                                crate::app::models::Clip::Audio(a) => a.length,
+                                crate::app::models::Clip::Automation(a) => a.length,
                             })
                             .unwrap_or(4.0);
                         // Check type compatibility
                         let clip_type_ok = clip_info
                             .map(|c| {
                                 let ct = match c {
-                                    crate::models::Clip::Midi(_) => crate::models::TrackType::Midi,
-                                    crate::models::Clip::Audio(_) => {
-                                        crate::models::TrackType::Audio
+                                    crate::app::models::Clip::Midi(_) => {
+                                        crate::app::models::TrackType::Midi
                                     }
-                                    crate::models::Clip::Automation(_) => {
-                                        crate::models::TrackType::Automation
+                                    crate::app::models::Clip::Audio(_) => {
+                                        crate::app::models::TrackType::Audio
+                                    }
+                                    crate::app::models::Clip::Automation(_) => {
+                                        crate::app::models::TrackType::Automation
                                     }
                                 };
                                 ct == state.project.tracks[row].track_type
@@ -241,22 +243,28 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             .cloned()
                         {
                             let clip_track_type = match &src_clip {
-                                crate::models::Clip::Midi(_) => crate::models::TrackType::Midi,
-                                crate::models::Clip::Audio(_) => crate::models::TrackType::Audio,
-                                crate::models::Clip::Automation(_) => {
-                                    crate::models::TrackType::Automation
+                                crate::app::models::Clip::Midi(_) => {
+                                    crate::app::models::TrackType::Midi
+                                }
+                                crate::app::models::Clip::Audio(_) => {
+                                    crate::app::models::TrackType::Audio
+                                }
+                                crate::app::models::Clip::Automation(_) => {
+                                    crate::app::models::TrackType::Automation
                                 }
                             };
                             if clip_track_type == state.project.tracks[row].track_type {
                                 let mut new_clip = src_clip;
                                 match &mut new_clip {
-                                    crate::models::Clip::Midi(m) => m.start_time = snapped,
-                                    crate::models::Clip::Audio(a) => a.start_time = snapped,
-                                    crate::models::Clip::Automation(a) => a.start_time = snapped,
+                                    crate::app::models::Clip::Midi(m) => m.start_time = snapped,
+                                    crate::app::models::Clip::Audio(a) => a.start_time = snapped,
+                                    crate::app::models::Clip::Automation(a) => {
+                                        a.start_time = snapped
+                                    }
                                 }
                                 let track_id = state.project.tracks[row].id;
                                 state.commands.execute(
-                                    Box::new(crate::commands::AddClips {
+                                    Box::new(crate::app::commands::AddClips {
                                         clips: vec![(track_id, new_clip)],
                                         added_indices: vec![],
                                     }),
@@ -266,14 +274,14 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                                 state.push_status(format!(
                                     "Cannot drop {} clip on {} track",
                                     match clip_track_type {
-                                        crate::models::TrackType::Midi => "MIDI",
-                                        crate::models::TrackType::Audio => "Audio",
-                                        crate::models::TrackType::Automation => "Auto",
+                                        crate::app::models::TrackType::Midi => "MIDI",
+                                        crate::app::models::TrackType::Audio => "Audio",
+                                        crate::app::models::TrackType::Automation => "Auto",
                                     },
                                     match state.project.tracks[row].track_type {
-                                        crate::models::TrackType::Midi => "MIDI",
-                                        crate::models::TrackType::Audio => "Audio",
-                                        crate::models::TrackType::Automation => "Auto",
+                                        crate::app::models::TrackType::Midi => "MIDI",
+                                        crate::app::models::TrackType::Audio => "Audio",
+                                        crate::app::models::TrackType::Automation => "Auto",
                                     },
                                 ));
                             }
@@ -323,18 +331,20 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
             let (clip_len, clip_type) = if let Some((_, ref c)) = state.library_drag_clip {
                 let len = match c {
-                    crate::models::Clip::Midi(m) => m.length,
-                    crate::models::Clip::Audio(a) => a.length,
-                    crate::models::Clip::Automation(a) => a.length,
+                    crate::app::models::Clip::Midi(m) => m.length,
+                    crate::app::models::Clip::Audio(a) => a.length,
+                    crate::app::models::Clip::Automation(a) => a.length,
                 };
                 let ct = match c {
-                    crate::models::Clip::Midi(_) => crate::models::TrackType::Midi,
-                    crate::models::Clip::Audio(_) => crate::models::TrackType::Audio,
-                    crate::models::Clip::Automation(_) => crate::models::TrackType::Automation,
+                    crate::app::models::Clip::Midi(_) => crate::app::models::TrackType::Midi,
+                    crate::app::models::Clip::Audio(_) => crate::app::models::TrackType::Audio,
+                    crate::app::models::Clip::Automation(_) => {
+                        crate::app::models::TrackType::Automation
+                    }
                 };
                 (len, ct)
             } else {
-                (4.0, crate::models::TrackType::Midi)
+                (4.0, crate::app::models::TrackType::Midi)
             };
 
             let beat = scroll_x + (input.mouse_x - lane_left).max(0) as f64 / zoom;
@@ -390,16 +400,16 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     if let Some((_, lib_clip)) = state.library_drag_clip.take() {
                         let mut placed_clip = lib_clip.clone();
                         match &mut placed_clip {
-                            crate::models::Clip::Midi(m) => m.start_time = snapped,
-                            crate::models::Clip::Audio(a) => a.start_time = snapped,
-                            crate::models::Clip::Automation(a) => a.start_time = snapped,
+                            crate::app::models::Clip::Midi(m) => m.start_time = snapped,
+                            crate::app::models::Clip::Audio(a) => a.start_time = snapped,
+                            crate::app::models::Clip::Automation(a) => a.start_time = snapped,
                         }
 
                         if let Some(row) = target_row {
                             if state.project.tracks[row].track_type == clip_type {
                                 let tid = state.project.tracks[row].id;
                                 state.commands.execute(
-                                    Box::new(crate::commands::AddClips {
+                                    Box::new(crate::app::commands::AddClips {
                                         clips: vec![(tid, placed_clip)],
                                         added_indices: vec![],
                                     }),
@@ -410,14 +420,14 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                                 state.push_status(format!(
                                     "Cannot drop {} clip on {} track",
                                     match clip_type {
-                                        crate::models::TrackType::Midi => "MIDI",
-                                        crate::models::TrackType::Audio => "Audio",
-                                        crate::models::TrackType::Automation => "Auto",
+                                        crate::app::models::TrackType::Midi => "MIDI",
+                                        crate::app::models::TrackType::Audio => "Audio",
+                                        crate::app::models::TrackType::Automation => "Auto",
                                     },
                                     match state.project.tracks[row].track_type {
-                                        crate::models::TrackType::Midi => "MIDI",
-                                        crate::models::TrackType::Audio => "Audio",
-                                        crate::models::TrackType::Automation => "Auto",
+                                        crate::app::models::TrackType::Midi => "MIDI",
+                                        crate::app::models::TrackType::Audio => "Audio",
+                                        crate::app::models::TrackType::Automation => "Auto",
                                     },
                                 ));
                             }
@@ -426,18 +436,20 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             let new_id =
                                 state.project.tracks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
                             let track_name = match clip_type {
-                                crate::models::TrackType::Midi => format!("MIDI {}", new_id),
-                                crate::models::TrackType::Audio => format!("Audio {}", new_id),
-                                crate::models::TrackType::Automation => format!("Auto {}", new_id),
+                                crate::app::models::TrackType::Midi => format!("MIDI {}", new_id),
+                                crate::app::models::TrackType::Audio => format!("Audio {}", new_id),
+                                crate::app::models::TrackType::Automation => {
+                                    format!("Auto {}", new_id)
+                                }
                             };
                             let new_track =
-                                crate::models::Track::new(new_id, &track_name, clip_type);
+                                crate::app::models::Track::new(new_id, &track_name, clip_type);
                             state.commands.execute(
-                                Box::new(crate::commands::AddTrack { track: new_track }),
+                                Box::new(crate::app::commands::AddTrack { track: new_track }),
                                 &mut state.project,
                             );
                             state.commands.execute(
-                                Box::new(crate::commands::AddClips {
+                                Box::new(crate::app::commands::AddClips {
                                     clips: vec![(new_id, placed_clip)],
                                     added_indices: vec![],
                                 }),
@@ -468,7 +480,7 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             };
 
             // Gather track y ranges
-            let mut track_rows: Vec<(i32, i32, u32, crate::models::TrackType)> = Vec::new();
+            let mut track_rows: Vec<(i32, i32, u32, crate::app::models::TrackType)> = Vec::new();
             {
                 let mut y_acc = track_top - state.arrangement.scroll_y;
                 for track in &state.project.tracks {
@@ -507,7 +519,8 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             (state.window_width as i32 - lane_left) as u32,
                             state.track_area_height() as u32,
                         ));
-                        let is_audio_track = track_rows[row].3 == crate::models::TrackType::Audio;
+                        let is_audio_track =
+                            track_rows[row].3 == crate::app::models::TrackType::Audio;
                         if is_audio_track {
                             canvas.set_draw_color(sdl2::pixels::Color::RGBA(100, 200, 140, 80));
                             let _ =
@@ -535,27 +548,28 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         let track_type = track_rows[row].3;
                         let track_id = track_rows[row].2;
 
-                        if track_type == crate::models::TrackType::Audio {
+                        if track_type == crate::app::models::TrackType::Audio {
                             // Drop as an audio clip on this audio track
-                            let clip = crate::models::Clip::Audio(crate::models::AudioClip {
-                                source_file: state.audio_drag_source.clone(),
-                                start_time: snapped,
-                                offset: state.audio_drag_offset,
-                                length: drag_len_beats,
-                                gain: 1.0,
-                                name: {
-                                    let p = std::path::Path::new(&state.audio_drag_source);
-                                    p.file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("audio")
-                                        .to_string()
-                                },
-                                color: [100, 200, 140, 255],
-                                fade_in: 0.0,
-                                fade_out: 0.0,
-                            });
+                            let clip =
+                                crate::app::models::Clip::Audio(crate::app::models::AudioClip {
+                                    source_file: state.audio_drag_source.clone(),
+                                    start_time: snapped,
+                                    offset: state.audio_drag_offset,
+                                    length: drag_len_beats,
+                                    gain: 1.0,
+                                    name: {
+                                        let p = std::path::Path::new(&state.audio_drag_source);
+                                        p.file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("audio")
+                                            .to_string()
+                                    },
+                                    color: [100, 200, 140, 255],
+                                    fade_in: 0.0,
+                                    fade_out: 0.0,
+                                });
                             state.commands.execute(
-                                Box::new(crate::commands::AddClips {
+                                Box::new(crate::app::commands::AddClips {
                                     clips: vec![(track_id, clip)],
                                     added_indices: vec![],
                                 }),
@@ -601,7 +615,7 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
     // ── Focus indicator: a 2-px accent border on the active panel ────
     {
-        use crate::state::FocusedPanel;
+        use crate::app::state::FocusedPanel;
         let ac = state.theme.accent;
         let focus_color = sdl2::pixels::Color::RGBA(ac[0], ac[1], ac[2], 200);
         let w = state.window_width as i32;
@@ -702,7 +716,7 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         }
     } else {
         state.hover_timer = 0;
-        state.hover_last_widget = crate::input::WidgetId::None;
+        state.hover_last_widget = crate::app::input::WidgetId::None;
     }
 
     // ── Module drag indicator ─────────────────────────────────────────
@@ -719,12 +733,12 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         let drop_valid = if let Some(sel_ti) = state.selected_track {
             if let Some(track) = state.project.tracks.iter().find(|t| t.id == sel_ti) {
                 match track.track_type {
-                    crate::models::TrackType::Midi => true,
-                    crate::models::TrackType::Audio => {
+                    crate::app::models::TrackType::Midi => true,
+                    crate::app::models::TrackType::Audio => {
                         !crate::modules::is_midi_effect(module_name)
                             && !crate::modules::is_instrument(module_name)
                     }
-                    crate::models::TrackType::Automation => false,
+                    crate::app::models::TrackType::Automation => false,
                 }
             } else {
                 true
