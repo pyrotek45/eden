@@ -51,6 +51,7 @@ pub fn sync_named_effect_chain(
 /// `bpm`, `sample_rate` — context.
 ///
 /// Returns the processed (left, right) pair.
+#[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn process_named_effect_chain(
     mut signal: (f64, f64),
@@ -105,6 +106,7 @@ pub fn process_named_effect_chain(
 /// `sample_rate` — audio sample rate.
 ///
 /// Returns the processed (left, right) pair.
+#[inline]
 pub fn process_cstrip(
     input: (f64, f64),
     cstrip: &mut dyn EffectModule,
@@ -137,6 +139,7 @@ pub fn process_cstrip(
 /// `bpm`, `sample_rate` — context.
 ///
 /// Returns the processed (left, right) pair.
+#[inline]
 pub fn process_named_master_effects(
     mut mix: (f64, f64),
     effects: &mut [(String, Box<dyn EffectModule>)],

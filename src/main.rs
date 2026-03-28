@@ -144,12 +144,7 @@ fn main() {
     state.velocity_editor_visible = user_config.velocity_editor_visible;
     state.sample_auto_play = user_config.sample_auto_play;
     state.audio_device_idx = user_config.audio_device_idx;
-    state.left_panel_tab = match user_config.left_panel_tab {
-        1 => app::state::LeftPanelTab::Clips,
-        2 => app::state::LeftPanelTab::Instruments,
-        3 => app::state::LeftPanelTab::Themes,
-        _ => app::state::LeftPanelTab::Files,
-    };
+    state.left_panel_tab = app::state::LeftPanelTab::from_index(user_config.left_panel_tab);
     // Load favorite folders into sample browser
     for folder in &user_config.favorite_folders {
         let path = std::path::PathBuf::from(folder);
@@ -215,50 +210,7 @@ fn main() {
         input.begin_frame();
 
         // Snapshot config-relevant state at frame start for change detection
-        #[derive(PartialEq)]
-        struct CfgSnap {
-            theme: String,
-            favs: Vec<String>,
-            auto_return: bool,
-            ui_scale: u32, // f32 as bits for PartialEq
-            snap_enabled: bool,
-            snap_res: usize,
-            browser_open: bool,
-            browser_w: i32,
-            bottom_open: bool,
-            bottom_h: i32,
-            vel_vis: bool,
-            win_w: u32,
-            win_h: u32,
-            left_tab: u8,
-            sample_auto: bool,
-            audio_dev: usize,
-            follow: bool,
-        }
-        let cfg_snapshot = CfgSnap {
-            theme: state.theme.name.clone(),
-            favs: state.favorite_folders.clone(),
-            auto_return: state.auto_return,
-            ui_scale: state.ui_scale.to_bits(),
-            snap_enabled: state.snap.enabled,
-            snap_res: state.snap.resolution_idx,
-            browser_open: state.sample_browser_open,
-            browser_w: state.sample_browser_width,
-            bottom_open: state.bottom_panel_open,
-            bottom_h: state.bottom_panel_height,
-            vel_vis: state.velocity_editor_visible,
-            win_w: state.window_width,
-            win_h: state.window_height,
-            left_tab: match state.left_panel_tab {
-                app::state::LeftPanelTab::Files => 0,
-                app::state::LeftPanelTab::Clips => 1,
-                app::state::LeftPanelTab::Instruments => 2,
-                app::state::LeftPanelTab::Themes => 3,
-            },
-            sample_auto: state.sample_auto_play,
-            audio_dev: state.audio_device_idx,
-            follow: state.follow_playhead,
-        };
+        let cfg_snapshot = app::config::UserConfig::from_state(&state);
 
         // Always poll current modifier state so Ctrl/Shift/Alt are
         // accurate even when no key event fires this frame.
@@ -2030,30 +1982,7 @@ fn main() {
         // ── Config auto-save (debounced: save 120 frames (~2s) after last change) ──
         // Compare current state against frame-start snapshot
         {
-            let cfg_now = CfgSnap {
-                theme: state.theme.name.clone(),
-                favs: state.favorite_folders.clone(),
-                auto_return: state.auto_return,
-                ui_scale: state.ui_scale.to_bits(),
-                snap_enabled: state.snap.enabled,
-                snap_res: state.snap.resolution_idx,
-                browser_open: state.sample_browser_open,
-                browser_w: state.sample_browser_width,
-                bottom_open: state.bottom_panel_open,
-                bottom_h: state.bottom_panel_height,
-                vel_vis: state.velocity_editor_visible,
-                win_w: state.window_width,
-                win_h: state.window_height,
-                left_tab: match state.left_panel_tab {
-                    app::state::LeftPanelTab::Files => 0,
-                    app::state::LeftPanelTab::Clips => 1,
-                    app::state::LeftPanelTab::Instruments => 2,
-                    app::state::LeftPanelTab::Themes => 3,
-                },
-                sample_auto: state.sample_auto_play,
-                audio_dev: state.audio_device_idx,
-                follow: state.follow_playhead,
-            };
+            let cfg_now = app::config::UserConfig::from_state(&state);
             if cfg_now != cfg_snapshot {
                 state.config_dirty = true;
                 state.config_save_countdown = 120;
@@ -2064,33 +1993,7 @@ fn main() {
                 state.config_save_countdown -= 1;
             }
             if state.config_save_countdown == 0 {
-                let cfg = app::config::UserConfig {
-                    theme_name: state.theme.name.clone(),
-                    favorite_folders: state.favorite_folders.clone(),
-                    auto_return: state.auto_return,
-                    ui_scale: state.ui_scale,
-                    snap_enabled: state.snap.enabled,
-                    snap_resolution_idx: state.snap.resolution_idx,
-                    sample_browser_open: state.sample_browser_open,
-                    sample_browser_width: state.sample_browser_width,
-                    bottom_panel_open: state.bottom_panel_open,
-                    bottom_panel_height: state.bottom_panel_height,
-                    velocity_editor_visible: state.velocity_editor_visible,
-                    window_width: state.window_width,
-                    window_height: state.window_height,
-                    left_panel_tab: match state.left_panel_tab {
-                        app::state::LeftPanelTab::Files => 0,
-                        app::state::LeftPanelTab::Clips => 1,
-                        app::state::LeftPanelTab::Instruments => 2,
-                        app::state::LeftPanelTab::Themes => 3,
-                    },
-                    sample_auto_play: state.sample_auto_play,
-                    audio_device_idx: state.audio_device_idx,
-                    recent_projects: state.recent_projects.clone(),
-                    follow_playhead: state.follow_playhead,
-                    autosave_enabled: state.autosave_enabled,
-                    autosave_interval_idx: state.autosave_interval_idx,
-                };
+                let cfg = app::config::UserConfig::from_state(&state);
                 if cfg.save().is_ok() {
                     // config saved silently
                 }
@@ -2169,33 +2072,7 @@ fn main() {
 
     // Save user config on exit
     {
-        let cfg = app::config::UserConfig {
-            theme_name: state.theme.name.clone(),
-            favorite_folders: state.favorite_folders.clone(),
-            auto_return: state.auto_return,
-            ui_scale: state.ui_scale,
-            snap_enabled: state.snap.enabled,
-            snap_resolution_idx: state.snap.resolution_idx,
-            sample_browser_open: state.sample_browser_open,
-            sample_browser_width: state.sample_browser_width,
-            bottom_panel_open: state.bottom_panel_open,
-            bottom_panel_height: state.bottom_panel_height,
-            velocity_editor_visible: state.velocity_editor_visible,
-            window_width: state.window_width,
-            window_height: state.window_height,
-            left_panel_tab: match state.left_panel_tab {
-                app::state::LeftPanelTab::Files => 0,
-                app::state::LeftPanelTab::Clips => 1,
-                app::state::LeftPanelTab::Instruments => 2,
-                app::state::LeftPanelTab::Themes => 3,
-            },
-            sample_auto_play: state.sample_auto_play,
-            audio_device_idx: state.audio_device_idx,
-            recent_projects: state.recent_projects.clone(),
-            follow_playhead: state.follow_playhead,
-            autosave_enabled: state.autosave_enabled,
-            autosave_interval_idx: state.autosave_interval_idx,
-        };
+        let cfg = app::config::UserConfig::from_state(&state);
         match cfg.save() {
             Ok(()) => {} // saved silently on shutdown
             Err(e) => eprintln!("[config] Save error: {}", e),

@@ -1946,10 +1946,7 @@ pub(super) fn draw_instrument_rack(
 
         // Decide if we show an effect visual panel on the right side.
         // Only for specific effect modules that have useful graphs.
-        let has_vis_panel = matches!(
-            plugin_name_ref.as_str(),
-            "LP Filter" | "HP Filter" | "Compressor" | "EQ" | "Distortion" | "Delay" | "Limiter"
-        );
+        let has_vis_panel = crate::modules::has_vis_panel(plugin_name_ref.as_str());
         let vis_col_w = if has_vis_panel { 120i32 } else { 0i32 };
 
         let base_w = knob_cols_w + vis_col_w;
@@ -4188,10 +4185,7 @@ pub(super) fn draw_master_rack(
         let knob_cols_w = cols as i32 * knob_cell_w + 20;
 
         // Effect vis panel (same as track rack)
-        let has_vis_panel = matches!(
-            plugin_name.as_str(),
-            "LP Filter" | "HP Filter" | "Compressor" | "EQ" | "Distortion" | "Delay" | "Limiter"
-        );
+        let has_vis_panel = crate::modules::has_vis_panel(plugin_name.as_str());
         let vis_col_w = if has_vis_panel { 120i32 } else { 0i32 };
         let slot_w = (knob_cols_w + vis_col_w).max(160);
 

@@ -133,6 +133,27 @@ pub enum LeftPanelTab {
     Themes,
 }
 
+impl LeftPanelTab {
+    /// Convert to a persisted index (for config save/load).
+    pub fn to_index(self) -> u8 {
+        match self {
+            Self::Files => 0,
+            Self::Clips => 1,
+            Self::Instruments => 2,
+            Self::Themes => 3,
+        }
+    }
+    /// Restore from a persisted index.
+    pub fn from_index(i: u8) -> Self {
+        match i {
+            1 => Self::Clips,
+            2 => Self::Instruments,
+            3 => Self::Themes,
+            _ => Self::Files,
+        }
+    }
+}
+
 /// A node in the sample browser tree.
 /// Can be a folder (with children) or a file (leaf).
 #[derive(Debug, Clone)]

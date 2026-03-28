@@ -98,6 +98,7 @@ pub fn pan_and_mix(signal: (f64, f64), pan: f64, volume: f64) -> (f64, f64) {
 ///
 /// Used for per-track effect params, master rack params, and CStrip2
 /// channel-strip params.
+#[inline]
 pub fn smooth_params(cache: &mut Vec<(String, f32)>, target: &[(String, f32)], coeff: f32) {
     // Grow the cache if new params appeared
     if cache.len() < target.len() {

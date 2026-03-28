@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// User configuration saved/loaded from disk.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserConfig {
     /// Name of the selected theme
     pub theme_name: String,
@@ -85,6 +85,32 @@ impl Default for UserConfig {
 }
 
 impl UserConfig {
+    /// Build a UserConfig snapshot from the current application state.
+    pub fn from_state(state: &super::state::AppState) -> Self {
+        Self {
+            theme_name: state.theme.name.clone(),
+            favorite_folders: state.favorite_folders.clone(),
+            auto_return: state.auto_return,
+            ui_scale: state.ui_scale,
+            snap_enabled: state.snap.enabled,
+            snap_resolution_idx: state.snap.resolution_idx,
+            sample_browser_open: state.sample_browser_open,
+            sample_browser_width: state.sample_browser_width,
+            bottom_panel_open: state.bottom_panel_open,
+            bottom_panel_height: state.bottom_panel_height,
+            velocity_editor_visible: state.velocity_editor_visible,
+            window_width: state.window_width,
+            window_height: state.window_height,
+            left_panel_tab: state.left_panel_tab.to_index(),
+            sample_auto_play: state.sample_auto_play,
+            audio_device_idx: state.audio_device_idx,
+            recent_projects: state.recent_projects.clone(),
+            follow_playhead: state.follow_playhead,
+            autosave_enabled: state.autosave_enabled,
+            autosave_interval_idx: state.autosave_interval_idx,
+        }
+    }
+
     /// Get the config file path (~/.config/eden/config.json)
     pub fn config_path() -> std::path::PathBuf {
         let home = std::env::var("HOME")

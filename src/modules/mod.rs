@@ -386,6 +386,22 @@ pub fn is_midi_effect(name: &str) -> bool {
     MIDI_EFFECT_NAMES.contains(&name)
 }
 
+/// Effects that have a visual/graph panel in the mixer rack UI.
+pub const VIS_PANEL_EFFECTS: &[&str] = &[
+    "LP Filter",
+    "HP Filter",
+    "Compressor",
+    "EQ",
+    "Distortion",
+    "Delay",
+    "Limiter",
+];
+
+/// Returns true if this effect has a visual panel (graph/meter) in the mixer.
+pub fn has_vis_panel(name: &str) -> bool {
+    VIS_PANEL_EFFECTS.contains(&name)
+}
+
 pub fn get_param_descs(name: &str) -> &'static [ParamDesc] {
     match name {
         "Analog" => instruments::SUBTRACTIVE_PARAMS,
