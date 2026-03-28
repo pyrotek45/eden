@@ -1583,6 +1583,10 @@ fn draw_left_panel_instruments(
                     icon: "⌄",
                     name: "Autoduck",
                 },
+                ModuleEntry {
+                    icon: "≈",
+                    name: "CStrip2",
+                },
             ],
         },
     ];
