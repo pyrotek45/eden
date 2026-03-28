@@ -19,6 +19,11 @@ eden_session.json
 # Scripts
 *.py
 
+# Internal audit/dev notes (not for distribution)
+PROS_AND_CONS.md
+TECHNICAL_IMPROVEMENTS.md
+UX_AUDIT_SCENARIOS.md
+
 # Editor
 *.swp
 *.swo
