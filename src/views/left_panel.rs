@@ -1488,106 +1488,28 @@ fn draw_left_panel_instruments(
             icon: "♪",
             label: "MIDI",
             color: [100, 160, 255, 220],
-            items: vec![
-                ModuleEntry {
-                    icon: "♪",
-                    name: "Arpeggiator",
-                },
-                ModuleEntry {
-                    icon: "♪",
-                    name: "Chord",
-                },
-                ModuleEntry {
-                    icon: "♪",
-                    name: "Transpose",
-                },
-                ModuleEntry {
-                    icon: "♪",
-                    name: "Velocity",
-                },
-            ],
+            items: crate::modules::MIDI_EFFECT_NAMES
+                .iter()
+                .map(|&name| ModuleEntry { icon: "♪", name })
+                .collect(),
         },
         ModuleCategory {
             icon: "~",
             label: "GENERATORS",
             color: [100, 220, 130, 220],
-            items: vec![
-                ModuleEntry {
-                    icon: "~",
-                    name: "Analog",
-                },
-                ModuleEntry {
-                    icon: "~",
-                    name: "HyperSaw",
-                },
-                ModuleEntry {
-                    icon: "~",
-                    name: "Monolith",
-                },
-                ModuleEntry {
-                    icon: "~",
-                    name: "Sampler",
-                },
-            ],
+            items: crate::modules::INSTRUMENT_NAMES
+                .iter()
+                .map(|&name| ModuleEntry { icon: "~", name })
+                .collect(),
         },
         ModuleCategory {
             icon: "≈",
             label: "FX",
             color: [220, 160, 80, 220],
-            items: vec![
-                ModuleEntry {
-                    icon: "≈",
-                    name: "LP Filter",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "HP Filter",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "Delay",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "Reverb",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "Chorus",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "Distortion",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "Compressor",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "EQ",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "Gain",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "Utility",
-                },
-                ModuleEntry {
-                    icon: "▐",
-                    name: "Limiter",
-                },
-                ModuleEntry {
-                    icon: "⌄",
-                    name: "Autoduck",
-                },
-                ModuleEntry {
-                    icon: "≈",
-                    name: "CStrip2",
-                },
-            ],
+            items: crate::modules::EFFECT_NAMES
+                .iter()
+                .map(|&name| ModuleEntry { icon: "≈", name })
+                .collect(),
         },
     ];
 

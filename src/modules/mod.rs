@@ -4,12 +4,17 @@
 // engine never matches on module names — it only calls trait methods.
 //
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  Adding a new module:                                           ║
-// ║  1. Implement InstrumentModule or EffectModule trait.           ║
-// ║  2. Register it in create_instrument / create_effect below.     ║
-// ║  3. Add a RackSlot constructor in models.rs + create_rack_slot. ║
-// ║  4. Add it to the category list in views.rs left panel.         ║
-// ║  That's it — NO changes to audio.rs, render.rs, or main.rs.    ║
+// ║  Adding a new effect:                                           ║
+// ║  1. Create effects/my_fx.rs implementing EffectModule trait.    ║
+// ║  2. Add `pub mod my_fx;` + `pub use my_fx::*;` in effects/mod. ║
+// ║  3. Add its name to EFFECT_NAMES below.                         ║
+// ║  4. Add a match arm in create_effect() below.                   ║
+// ║  5. Add a match arm in get_param_descs() below.                 ║
+// ║  That's it — the UI, is_effect(), and module browser all        ║
+// ║  derive from EFFECT_NAMES automatically.                        ║
+// ║                                                                 ║
+// ║  Adding a new instrument: same pattern with INSTRUMENT_NAMES,   ║
+// ║  create_instrument(), and get_param_descs().                    ║
 // ╚══════════════════════════════════════════════════════════════════╝
 
 pub mod dsp_primitives;
@@ -317,6 +322,29 @@ pub struct ModuleExtra {
 // Registry — factory functions
 // ═══════════════════════════════════════════════════════════════════
 
+/// Canonical list of instrument names.  Add new instruments here.
+pub const INSTRUMENT_NAMES: &[&str] = &["Analog", "HyperSaw", "Monolith", "Sampler"];
+
+/// Canonical list of effect names.  Add new effects here.
+pub const EFFECT_NAMES: &[&str] = &[
+    "LP Filter",
+    "HP Filter",
+    "Delay",
+    "Reverb",
+    "Chorus",
+    "Distortion",
+    "Compressor",
+    "EQ",
+    "Gain",
+    "Utility",
+    "Limiter",
+    "Autoduck",
+    "CStrip2",
+];
+
+/// Canonical list of MIDI effect names.
+pub const MIDI_EFFECT_NAMES: &[&str] = &["Arpeggiator", "Chord", "Transpose", "Velocity"];
+
 pub fn create_instrument(name: &str) -> Option<Box<dyn InstrumentModule>> {
     match name {
         "Analog" => Some(Box::new(instruments::SubtractiveSynth)),
@@ -347,30 +375,15 @@ pub fn create_effect(name: &str, sr: u32) -> Option<Box<dyn EffectModule>> {
 }
 
 pub fn is_instrument(name: &str) -> bool {
-    matches!(name, "Analog" | "HyperSaw" | "Sampler" | "Monolith")
+    INSTRUMENT_NAMES.contains(&name)
 }
 
 pub fn is_effect(name: &str) -> bool {
-    matches!(
-        name,
-        "LP Filter"
-            | "HP Filter"
-            | "Delay"
-            | "Reverb"
-            | "Chorus"
-            | "Distortion"
-            | "Compressor"
-            | "EQ"
-            | "Gain"
-            | "Utility"
-            | "Limiter"
-            | "Autoduck"
-            | "CStrip2"
-    )
+    EFFECT_NAMES.contains(&name)
 }
 
 pub fn is_midi_effect(name: &str) -> bool {
-    matches!(name, "Arpeggiator" | "Chord" | "Transpose" | "Velocity")
+    MIDI_EFFECT_NAMES.contains(&name)
 }
 
 pub fn get_param_descs(name: &str) -> &'static [ParamDesc] {
