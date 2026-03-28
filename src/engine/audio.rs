@@ -19,36 +19,14 @@ use std::sync::{
     Arc, Mutex,
 };
 
+use crate::dsp;
 use crate::modules::{
     create_effect, create_instrument, create_midi_effect, voice_is_done, EffectModule,
-    InstrumentModule, MidiContext, MidiEffect, MidiEvent, ModuleExtra, ModuleVoice,
+    InstrumentModule, MidiEffect, MidiEvent, ModuleExtra, ModuleVoice,
 };
 
-// ── MIDI effect chain helper ─────────────────────────────────────────
-
-/// Run `events` through every MIDI effect instance in `chain`, using the
-/// matching param slices from `param_slices`.  Returns the final event list.
-fn run_midi_chain<'a>(
-    mut events: Vec<MidiEvent>,
-    chain: &'a mut [Box<dyn MidiEffect>],
-    param_slices: impl Iterator<Item = &'a Vec<(String, f32)>>,
-    pos_beats: f64,
-    prev_beats: f64,
-    bpm: f64,
-    sample_rate: f64,
-) -> Vec<MidiEvent> {
-    for (fx, params) in chain.iter_mut().zip(param_slices) {
-        let ctx = MidiContext {
-            pos_beats,
-            prev_beats,
-            bpm,
-            sample_rate,
-            params: params.as_slice(),
-        };
-        events = fx.process(events, &ctx);
-    }
-    events
-}
+// run_midi_chain and midi_to_freq are now in dsp.rs (shared with render.rs)
+use crate::dsp::run_midi_chain;
 
 // ── Shared state (UI → audio) ─────────────────────────────────────────
 
@@ -447,12 +425,8 @@ pub fn load_audio_interleaved(path: &std::path::Path) -> Result<(Vec<f32>, usize
     }
 }
 
-// ── MIDI pitch → frequency ────────────────────────────────────────────
-
-fn midi_to_freq(pitch: u8) -> f64 {
-    // A4 = 69 = 440 Hz
-    440.0 * crate::modules::fast_pow2((pitch as f64 - 69.0) / 12.0)
-}
+// midi_to_freq is now in dsp.rs (shared with render.rs)
+use crate::dsp::midi_to_freq;
 
 // ── Audio device enumeration ──────────────────────────────────────────
 
@@ -470,6 +444,11 @@ pub fn list_output_devices() -> Vec<String> {
     }
     names
 }
+
+// ── Shared helpers moved to dsp.rs ──────────────────────────────────
+// sync_named_effect_chain, smooth_params, process_named_effect_chain,
+// process_cstrip, and process_named_master_effects now live in dsp.rs
+// as the single source of truth.
 
 // ── Start the audio engine ────────────────────────────────────────────
 
@@ -546,11 +525,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         // Removes any DC bias that can push the waveform off-centre and cause
         // clicks when combined with abrupt gain changes.  Coefficient:
         //   R = 1 - 2π·fc/sr ≈ 0.99997 @ 44.1kHz  (close enough for any SR)
-        const DC_HP_R: f64 = 0.99972; // fc ≈ 20 Hz @ 44.1kHz
-        let mut dc_hp_x_l: f64 = 0.0; // prev input  — L
-        let mut dc_hp_y_l: f64 = 0.0; // prev output — L
-        let mut dc_hp_x_r: f64 = 0.0;
-        let mut dc_hp_y_r: f64 = 0.0;
+        let mut dc_hp = dsp::DcHpState::new();
 
         // Per-track smoothed pan + volume (one-pole, ~5 ms time constant).
         // Eliminates zipper noise from pan/volume automation without audible lag.
@@ -935,27 +910,18 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 .and_then(|n| create_instrument(n).map(|m| (n.to_string(), m)));
                         }
                         // Sync effect chain instances
-                        let effects_changed = track.effect_slots.len() != track_effects[ti].len()
-                            || track
-                                .effect_slots
-                                .iter()
-                                .zip(track_effects[ti].iter())
-                                .any(|((want, _), (have, _))| want != have);
-                        if effects_changed {
-                            let mut new_fx = Vec::new();
-                            for (fx_name, _) in &track.effect_slots {
-                                let idx = track_effects[ti]
-                                    .iter()
-                                    .position(|(n, _)| n.as_str() == fx_name.as_str());
-                                if let Some(i) = idx {
-                                    new_fx.push(track_effects[ti].remove(i));
-                                } else if let Some(m) = create_effect(fx_name, sample_rate as u32) {
-                                    new_fx.push((fx_name.to_string(), m));
-                                }
-                            }
-                            track_effects[ti] = new_fx;
-                        }
+                        dsp::sync_named_effect_chain(
+                            &mut track_effects[ti],
+                            &track.effect_slots,
+                            sample_rate as u32,
+                        );
                     }
+                    // ── Sync master rack effect instances (preview path) ──
+                    dsp::sync_named_effect_chain(
+                        &mut master_effects,
+                        &snap.master_effects,
+                        sample_rate as u32,
+                    );
 
                     // Process each voice sample-by-sample — use pre-allocated scratch bufs
                     cb_preview_rms.clear();
@@ -997,6 +963,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     // ── Per-callback parameter smoothing (preview path) ──────────
                     // Mirror the playing-path smoothing so knob changes don't cause
                     // zipper noise while previewing notes in piano/keyboard mode.
+                    let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
 
                     // Smooth track effect params
                     while smooth_track_fx_params.len() < snap.tracks.len() {
@@ -1008,16 +975,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             slot_cache.push(Vec::new());
                         }
                         for (si, (_, params)) in track.effect_slots.iter().enumerate() {
-                            let param_cache = &mut slot_cache[si];
-                            if param_cache.len() < params.len() {
-                                for item in params.iter().skip(param_cache.len()) {
-                                    param_cache.push(item.clone());
-                                }
-                            }
-                            let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
-                            for (pi, p) in params.iter().enumerate() {
-                                param_cache[pi].1 += (p.1 - param_cache[pi].1) * coeff;
-                            }
+                            dsp::smooth_params(&mut slot_cache[si], params, coeff);
                         }
                     }
                     // Smooth master effect params
@@ -1025,34 +983,19 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         smooth_master_fx_params.push(Vec::new());
                     }
                     for (si, (_, params)) in snap.master_effects.iter().enumerate() {
-                        let param_cache = &mut smooth_master_fx_params[si];
-                        if param_cache.len() < params.len() {
-                            for item in params.iter().skip(param_cache.len()) {
-                                param_cache.push(item.clone());
-                            }
-                        }
-                        let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
-                        for (pi, p) in params.iter().enumerate() {
-                            param_cache[pi].1 += (p.1 - param_cache[pi].1) * coeff;
-                        }
+                        dsp::smooth_params(&mut smooth_master_fx_params[si], params, coeff);
                     }
                     // Smooth CStrip2 channel-strip params per track
                     while smooth_cstrip_params.len() < snap.tracks.len() {
                         smooth_cstrip_params.push(Vec::new());
                     }
                     for (ti, track) in snap.tracks.iter().enumerate() {
-                        let cs_raw = &track.cstrip2_params;
-                        if !cs_raw.is_empty() {
-                            let cache = &mut smooth_cstrip_params[ti];
-                            if cache.len() < cs_raw.len() {
-                                for item in cs_raw.iter().skip(cache.len()) {
-                                    cache.push(item.clone());
-                                }
-                            }
-                            let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
-                            for (pi, p) in cs_raw.iter().enumerate() {
-                                cache[pi].1 += (p.1 - cache[pi].1) * coeff;
-                            }
+                        if !track.cstrip2_params.is_empty() {
+                            dsp::smooth_params(
+                                &mut smooth_cstrip_params[ti],
+                                &track.cstrip2_params,
+                                coeff,
+                            );
                         }
                     }
 
@@ -1100,7 +1043,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 let rate_beats = get_arp("rate", 0.25) as f64;
                                 let octaves = get_arp("octaves", 1.0) as i32;
                                 let pattern = get_arp("pattern", 0.0) as i32;
-                                let vel_default = track.volume;
+                                let vel_default = 1.0_f32;
                                 let (ref mut step, ref mut last_beat) = keyboard_arp_state[ti];
 
                                 // Build pool — reuse scratch vec
@@ -1208,7 +1151,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 cb_per_track_voices[ti] += 1;
                             }
                         }
-                        // Normalize + run effect chain per track (same as main path)
+                        // Normalize + run effect chain per track (shared via dsp.rs)
                         for ti in 0..num_tracks {
                             if cb_per_track_sample[ti] == (0.0, 0.0) && cb_per_track_voices[ti] == 0
                             {
@@ -1230,50 +1173,38 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             }
                             if ti < track_effects.len() {
                                 let track = &snap.tracks[ti];
-                                for (fi2, (_, fx_params)) in track.effect_slots.iter().enumerate() {
-                                    if fi2 < track_effects[ti].len() {
-                                        track_effects[ti][fi2].1.set_bpm(snap.bpm);
-                                        // Use pre-smoothed params if available, else raw snapshot
-                                        let params_ref: &[(String, f32)] = if ti
-                                            < smooth_track_fx_params.len()
-                                            && fi2 < smooth_track_fx_params[ti].len()
-                                            && smooth_track_fx_params[ti][fi2].len()
-                                                == fx_params.len()
-                                        {
-                                            &smooth_track_fx_params[ti][fi2]
-                                        } else {
-                                            fx_params
-                                        };
-                                        let (ol, or2) = track_effects[ti][fi2].1.process(
-                                            cb_per_track_sample[ti].0,
-                                            cb_per_track_sample[ti].1,
-                                            params_ref,
-                                            sample_rate,
-                                        );
-                                        cb_per_track_sample[ti] = (ol, or2);
-                                    }
-                                }
+                                let smoothed_fx = if ti < smooth_track_fx_params.len() {
+                                    Some(smooth_track_fx_params[ti].as_slice())
+                                } else {
+                                    None
+                                };
+                                // Use the same sidechain-aware processing as the playing path
+                                cb_per_track_sample[ti] = dsp::process_named_effect_chain(
+                                    cb_per_track_sample[ti],
+                                    &mut track_effects[ti],
+                                    &track.effect_slots,
+                                    smoothed_fx,
+                                    &track.effect_sidechain_track,
+                                    &cb_per_track_sample,
+                                    snap.bpm,
+                                    sample_rate,
+                                );
                             }
-                            // ── CStrip2 channel strip ──
-                            if ti < track_cstrip.len() && !snap.tracks[ti].cstrip2_bypass {
-                                let cs_raw = &snap.tracks[ti].cstrip2_params;
-                                if !cs_raw.is_empty() {
-                                    let cs_params: &[(String, f32)] = if ti
-                                        < smooth_cstrip_params.len()
-                                        && smooth_cstrip_params[ti].len() == cs_raw.len()
-                                    {
-                                        &smooth_cstrip_params[ti]
-                                    } else {
-                                        cs_raw
-                                    };
-                                    let (cl, cr) = track_cstrip[ti].process(
-                                        cb_per_track_sample[ti].0,
-                                        cb_per_track_sample[ti].1,
-                                        cs_params,
-                                        sample_rate,
-                                    );
-                                    cb_per_track_sample[ti] = (cl, cr);
-                                }
+                            // CStrip2 channel strip (via shared dsp.rs)
+                            if ti < track_cstrip.len() {
+                                let smoothed_cs = if ti < smooth_cstrip_params.len() {
+                                    Some(smooth_cstrip_params[ti].as_slice())
+                                } else {
+                                    None
+                                };
+                                cb_per_track_sample[ti] = dsp::process_cstrip(
+                                    cb_per_track_sample[ti],
+                                    &mut *track_cstrip[ti],
+                                    &snap.tracks[ti].cstrip2_params,
+                                    smoothed_cs,
+                                    snap.tracks[ti].cstrip2_bypass,
+                                    sample_rate,
+                                );
                             }
                             let post_mono = ((cb_per_track_sample[ti].0
                                 + cb_per_track_sample[ti].1)
@@ -1292,8 +1223,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                             let (tl, tr) = cb_per_track_sample[ti];
                             let theta =
                                 ((track.pan as f64) + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
-                            let pan_l = crate::modules::fast_cos(theta);
-                            let pan_r = crate::modules::fast_sin(theta);
+                            let pan_l = crate::modules::fast_cos(theta) * std::f64::consts::SQRT_2;
+                            let pan_r = crate::modules::fast_sin(theta) * std::f64::consts::SQRT_2;
                             let sl = tl * pan_l * track.volume as f64;
                             let sr = tr * pan_r * track.volume as f64;
                             mix_l += sl;
@@ -1304,29 +1235,23 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 track_rms_r_accum[ti] += (sr * sr) as f32;
                             }
                         }
-                        // Apply master rack effects to preview stereo mix
-                        for (fi2, (_, fx_params)) in snap.master_effects.iter().enumerate() {
-                            if fi2 < master_effects.len() {
-                                master_effects[fi2].1.set_bpm(snap.bpm);
-                                let params_ref: &[(String, f32)] = if fi2
-                                    < smooth_master_fx_params.len()
-                                    && smooth_master_fx_params[fi2].len() == fx_params.len()
-                                {
-                                    &smooth_master_fx_params[fi2]
-                                } else {
-                                    fx_params
-                                };
-                                let (ml, mr) = master_effects[fi2].1.process_sidechain(
-                                    mix_l,
-                                    mix_r,
-                                    mix_l,
-                                    mix_r,
-                                    params_ref,
-                                    sample_rate,
-                                );
-                                mix_l = ml;
-                                mix_r = mr;
-                            }
+                        // Apply master rack effects to preview stereo mix (shared via dsp.rs)
+                        {
+                            let smoothed_mfx = if !smooth_master_fx_params.is_empty() {
+                                Some(smooth_master_fx_params.as_slice())
+                            } else {
+                                None
+                            };
+                            let (ml, mr) = dsp::process_named_master_effects(
+                                (mix_l, mix_r),
+                                &mut master_effects,
+                                &snap.master_effects,
+                                smoothed_mfx,
+                                snap.bpm,
+                                sample_rate,
+                            );
+                            mix_l = ml;
+                            mix_r = mr;
                         }
                         let mv = smooth_master_vol;
                         frame_samples_l[fi] = (frame_samples_l[fi] as f64 + mix_l * mv) as f32;
@@ -1629,18 +1554,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 .zip(track_effects[ti].iter())
                                 .any(|((want, _), (have, _))| want != have);
                         if effects_changed {
-                            let mut new_fx = Vec::new();
-                            for (fx_name, _) in &track.effect_slots {
-                                let idx = track_effects[ti]
-                                    .iter()
-                                    .position(|(n, _)| n.as_str() == fx_name.as_str());
-                                if let Some(i) = idx {
-                                    new_fx.push(track_effects[ti].remove(i));
-                                } else if let Some(m) = create_effect(fx_name, sample_rate as u32) {
-                                    new_fx.push((fx_name.to_string(), m));
-                                }
-                            }
-                            track_effects[ti] = new_fx;
+                            dsp::sync_named_effect_chain(
+                                &mut track_effects[ti],
+                                &track.effect_slots,
+                                sample_rate as u32,
+                            );
                         }
                         // ── Sync MIDI effect instances ──
                         let midi_changed = track.midi_effect_slots.len()
@@ -1667,28 +1585,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                     }
                     // ── Sync master rack effect instances ──
-                    {
-                        let master_changed = snap.master_effects.len() != master_effects.len()
-                            || snap
-                                .master_effects
-                                .iter()
-                                .zip(master_effects.iter())
-                                .any(|((want, _), (have, _))| want != have);
-                        if master_changed {
-                            let mut new_fx = Vec::new();
-                            for (fx_name, _) in &snap.master_effects {
-                                let idx = master_effects
-                                    .iter()
-                                    .position(|(n, _)| n.as_str() == fx_name.as_str());
-                                if let Some(i) = idx {
-                                    new_fx.push(master_effects.remove(i));
-                                } else if let Some(m) = create_effect(fx_name, sample_rate as u32) {
-                                    new_fx.push((fx_name.to_string(), m));
-                                }
-                            }
-                            master_effects = new_fx;
-                        }
-                    }
+                    dsp::sync_named_effect_chain(
+                        &mut master_effects,
+                        &snap.master_effects,
+                        sample_rate as u32,
+                    );
                 }
 
                 // Pre-allocate per-track buffers outside the per-sample loop
@@ -1722,6 +1623,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     * (FX_SMOOTH_COEFF as f64 * frames as f64).min(1.0);
 
                 // Grow track fx param cache to match current layout
+                let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
                 while smooth_track_fx_params.len() < snap.tracks.len() {
                     smooth_track_fx_params.push(Vec::new());
                 }
@@ -1731,19 +1633,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         slot_cache.push(Vec::new());
                     }
                     for (si, (_, params)) in track.effect_slots.iter().enumerate() {
-                        let param_cache = &mut slot_cache[si];
-                        // Initialise missing entries with (name, value) — allocates strings
-                        // only ONCE when the slot first appears.
-                        if param_cache.len() < params.len() {
-                            for item in params.iter().skip(param_cache.len()) {
-                                param_cache.push(item.clone());
-                            }
-                        }
-                        // One-pole smooth every param value toward its target (no allocation)
-                        let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
-                        for (pi, p) in params.iter().enumerate() {
-                            param_cache[pi].1 += (p.1 - param_cache[pi].1) * coeff;
-                        }
+                        dsp::smooth_params(&mut slot_cache[si], params, coeff);
                     }
                 }
                 // Grow master fx param cache
@@ -1751,16 +1641,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     smooth_master_fx_params.push(Vec::new());
                 }
                 for (si, (_, params)) in snap.master_effects.iter().enumerate() {
-                    let param_cache = &mut smooth_master_fx_params[si];
-                    if param_cache.len() < params.len() {
-                        for item in params.iter().skip(param_cache.len()) {
-                            param_cache.push(item.clone());
-                        }
-                    }
-                    let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
-                    for (pi, p) in params.iter().enumerate() {
-                        param_cache[pi].1 += (p.1 - param_cache[pi].1) * coeff;
-                    }
+                    dsp::smooth_params(&mut smooth_master_fx_params[si], params, coeff);
                 }
 
                 // Smooth CStrip2 channel-strip params per track
@@ -1768,18 +1649,12 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     smooth_cstrip_params.push(Vec::new());
                 }
                 for (ti, track) in snap.tracks.iter().enumerate() {
-                    let cs_raw = &track.cstrip2_params;
-                    if !cs_raw.is_empty() {
-                        let cache = &mut smooth_cstrip_params[ti];
-                        if cache.len() < cs_raw.len() {
-                            for item in cs_raw.iter().skip(cache.len()) {
-                                cache.push(item.clone());
-                            }
-                        }
-                        let coeff = (FX_SMOOTH_COEFF * frames as f32).min(1.0);
-                        for (pi, p) in cs_raw.iter().enumerate() {
-                            cache[pi].1 += (p.1 - cache[pi].1) * coeff;
-                        }
+                    if !track.cstrip2_params.is_empty() {
+                        dsp::smooth_params(
+                            &mut smooth_cstrip_params[ti],
+                            &track.cstrip2_params,
+                            coeff,
+                        );
                     }
                 }
 
@@ -1837,7 +1712,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                             && !v.released
                                     });
                                 if just_started || catch_on_start {
-                                    let vel = note.velocity as f32 / 127.0 * track.volume;
+                                    let vel = note.velocity as f32 / 127.0;
                                     let seed_events = vec![MidiEvent::new(note.pitch, vel)];
 
                                     // Check if arp is in the chain — arp manages its own voices
@@ -1916,7 +1791,7 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 let rate_beats = get_arp("rate", 0.25) as f64;
                                 let octaves = get_arp("octaves", 1.0) as i32;
                                 let pattern = get_arp("pattern", 0.0) as i32;
-                                let vel_default = track.volume;
+                                let vel_default = 1.0_f32;
 
                                 if ti < track_arp_state.len() {
                                     let (ref mut step, ref mut last_beat, ref mut _held) =
@@ -2115,91 +1990,19 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                     }
 
-                    // ── Mix audio clips into per-track mono ──
+                    // ── Mix audio clips into per-track stereo (shared with render.rs) ──
                     for (ti, track) in snap.tracks.iter().enumerate() {
-                        if track.is_automation {
+                        if track.is_automation || track.mute || (any_solo && !track.solo) {
                             continue;
                         }
-                        if track.mute {
-                            continue;
-                        }
-                        if any_solo && !track.solo {
-                            continue;
-                        }
-                        for aclip in &track.audio_clips {
-                            let clip_end = aclip.start_beats + aclip.length_beats;
-                            if pos < aclip.start_beats || pos >= clip_end {
-                                continue;
-                            }
-                            // Position within the clip (in beats from clip start)
-                            let clip_pos_beats = pos - aclip.start_beats;
-                            // Convert beat position to seconds using pre-computed rate
-                            let clip_pos_secs = clip_pos_beats / beats_per_sec;
-                            // Add the offset (already in seconds) to get position in audio file
-                            let audio_pos_secs = clip_pos_secs + aclip.offset_secs;
-                            let src_pos = audio_pos_secs * aclip.sample_rate as f64;
-                            let src_idx = src_pos as usize;
-                            if src_idx < aclip.samples.len() {
-                                // Linear interpolation between samples for click-free resampling
-                                let frac = src_pos - src_pos.floor();
-                                let s0 = aclip.samples[src_idx] as f64;
-                                let s1 = if src_idx + 1 < aclip.samples.len() {
-                                    aclip.samples[src_idx + 1] as f64
-                                } else {
-                                    s0
-                                };
-                                let mut s = (s0 + (s1 - s0) * frac)
-                                    * aclip.gain as f64
-                                    * track.volume as f64;
-
-                                // Equal-power micro-fade at CLIP boundaries (~5 ms = 220 samples).
-                                // Sine curve: gain = sin(t·π/2) removes click without tonal change.
-                                // Applied only at the first/last ~5 ms of each clip — the rest plays
-                                // at full gain, so musical content is completely unaffected.
-                                let fade_len = 220usize;
-                                let clip_sample = (clip_pos_secs * sample_rate) as usize;
-                                let clip_len_samples =
-                                    (aclip.length_beats / beats_per_sec * sample_rate) as usize;
-                                // Fade in at clip start
-                                if clip_sample < fade_len {
-                                    let t = clip_sample as f64 / fade_len as f64;
-                                    s *= (t * std::f64::consts::FRAC_PI_2).sin();
-                                }
-                                // Fade out at clip end
-                                let remaining = clip_len_samples.saturating_sub(clip_sample);
-                                if remaining < fade_len && fade_len > 0 {
-                                    let t = remaining as f64 / fade_len as f64;
-                                    s *= (t * std::f64::consts::FRAC_PI_2).sin();
-                                }
-
-                                // User-controlled fade-in
-                                if aclip.fade_in > 0.0 {
-                                    let fade_in_samples = (aclip.fade_in * sample_rate) as usize;
-                                    if fade_in_samples > 0 && clip_sample < fade_in_samples {
-                                        s *= clip_sample as f64 / fade_in_samples as f64;
-                                    }
-                                }
-                                // User-controlled fade-out
-                                if aclip.fade_out > 0.0 {
-                                    let fade_out_samples = (aclip.fade_out * sample_rate) as usize;
-                                    if fade_out_samples > 0 && clip_len_samples > fade_out_samples {
-                                        let fade_out_start = clip_len_samples - fade_out_samples;
-                                        if clip_sample >= fade_out_start {
-                                            s *= (clip_len_samples - clip_sample) as f64
-                                                / fade_out_samples as f64;
-                                        }
-                                    }
-                                }
-
-                                if ti < num_tracks {
-                                    per_track_sample[ti].0 += s;
-                                    per_track_sample[ti].1 += s;
-                                }
-                            }
+                        let (cl, cr) = dsp::mix_audio_clips(track, pos, beats_per_sec, sample_rate);
+                        if ti < num_tracks {
+                            per_track_sample[ti].0 += cl;
+                            per_track_sample[ti].1 += cr;
                         }
                     }
 
-                    // ── Run effect chain per track via trait objects ──
+                    // ── Run effect chain per track (shared with render.rs via dsp.rs) ──
                     for (ti, track) in snap.tracks.iter().enumerate() {
                         if track.is_automation || ti >= num_tracks {
                             continue;
@@ -2226,62 +2029,38 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                                 track_rms_pre_accum[ti] += (ts * ts) as f32;
                             }
                         }
-                        // Process through each effect module
-                        for (fi, (_, fx_params)) in track.effect_slots.iter().enumerate() {
-                            if fi < track_effects[ti].len() {
-                                // Provide BPM to beat-synced effects (e.g. delay)
-                                track_effects[ti][fi].1.set_bpm(snap.bpm);
-                                // Resolve sidechain source signal (default: self)
-                                let sc_ti = track.effect_sidechain_track.get(fi).copied().flatten();
-                                let (key_l, key_r) = if let Some(sc_idx) = sc_ti {
-                                    if sc_idx < per_track_sample.len() {
-                                        per_track_sample[sc_idx]
-                                    } else {
-                                        per_track_sample[ti]
-                                    }
-                                } else {
-                                    per_track_sample[ti]
-                                };
-                                // Use pre-smoothed params if available, else raw snapshot
-                                let params_ref: &[(String, f32)] = if ti
-                                    < smooth_track_fx_params.len()
-                                    && fi < smooth_track_fx_params[ti].len()
-                                    && smooth_track_fx_params[ti][fi].len() == fx_params.len()
-                                {
-                                    &smooth_track_fx_params[ti][fi]
-                                } else {
-                                    fx_params
-                                };
-                                let (ol, or2) = track_effects[ti][fi].1.process_sidechain(
-                                    per_track_sample[ti].0,
-                                    per_track_sample[ti].1,
-                                    key_l,
-                                    key_r,
-                                    params_ref,
-                                    sample_rate,
-                                );
-                                per_track_sample[ti] = (ol, or2);
-                            }
+                        // Process effect chain + CStrip2 via shared dsp.rs functions
+                        if ti < track_effects.len() {
+                            let smoothed_fx = if ti < smooth_track_fx_params.len() {
+                                Some(smooth_track_fx_params[ti].as_slice())
+                            } else {
+                                None
+                            };
+                            per_track_sample[ti] = dsp::process_named_effect_chain(
+                                per_track_sample[ti],
+                                &mut track_effects[ti],
+                                &track.effect_slots,
+                                smoothed_fx,
+                                &track.effect_sidechain_track,
+                                per_track_sample,
+                                snap.bpm,
+                                sample_rate,
+                            );
                         }
-                        // ── CStrip2 channel strip ──
-                        if ti < track_cstrip.len() && !track.cstrip2_bypass {
-                            let cs_raw = &track.cstrip2_params;
-                            if !cs_raw.is_empty() {
-                                let cs_params: &[(String, f32)] = if ti < smooth_cstrip_params.len()
-                                    && smooth_cstrip_params[ti].len() == cs_raw.len()
-                                {
-                                    &smooth_cstrip_params[ti]
-                                } else {
-                                    cs_raw
-                                };
-                                let (cl, cr) = track_cstrip[ti].process(
-                                    per_track_sample[ti].0,
-                                    per_track_sample[ti].1,
-                                    cs_params,
-                                    sample_rate,
-                                );
-                                per_track_sample[ti] = (cl, cr);
-                            }
+                        if ti < track_cstrip.len() {
+                            let smoothed_cs = if ti < smooth_cstrip_params.len() {
+                                Some(smooth_cstrip_params[ti].as_slice())
+                            } else {
+                                None
+                            };
+                            per_track_sample[ti] = dsp::process_cstrip(
+                                per_track_sample[ti],
+                                &mut *track_cstrip[ti],
+                                &track.cstrip2_params,
+                                smoothed_cs,
+                                track.cstrip2_bypass,
+                                sample_rate,
+                            );
                         }
                     }
 
@@ -2329,10 +2108,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         smooth_pan[ti] += (track.pan as f64 - smooth_pan[ti]) * SMOOTH_COEFF;
                         smooth_vol[ti] += (track.volume as f64 - smooth_vol[ti]) * SMOOTH_COEFF;
                         let (tl, tr) = per_track_sample[ti];
-                        // Equal-power pan (fast approximation) using smoothed pan
+                        // Equal-power pan with √2 compensation so center = 0 dB per channel.
+                        // cos(π/4)·√2 = 1.0, sin(π/4)·√2 = 1.0  →  unity at center.
                         let theta = (smooth_pan[ti] + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
-                        let pan_l = crate::modules::fast_cos(theta);
-                        let pan_r = crate::modules::fast_sin(theta);
+                        let pan_l = crate::modules::fast_cos(theta) * std::f64::consts::SQRT_2;
+                        let pan_r = crate::modules::fast_sin(theta) * std::f64::consts::SQRT_2;
                         mix_l += tl * pan_l * smooth_vol[ti];
                         mix_r += tr * pan_r * smooth_vol[ti];
                     }
@@ -2346,27 +2126,22 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         master_rms_l_accum += (mix_l * mix_l) as f32;
                         master_rms_r_accum += (mix_r * mix_r) as f32;
                     }
-                    for (fi, (_, fx_params)) in snap.master_effects.iter().enumerate() {
-                        if fi < master_effects.len() {
-                            master_effects[fi].1.set_bpm(snap.bpm);
-                            let params_ref: &[(String, f32)] = if fi < smooth_master_fx_params.len()
-                                && smooth_master_fx_params[fi].len() == fx_params.len()
-                            {
-                                &smooth_master_fx_params[fi]
-                            } else {
-                                fx_params
-                            };
-                            let (ml, mr) = master_effects[fi].1.process_sidechain(
-                                mix_l,
-                                mix_r,
-                                mix_l,
-                                mix_r,
-                                params_ref,
-                                sample_rate,
-                            );
-                            mix_l = ml;
-                            mix_r = mr;
-                        }
+                    {
+                        let smoothed_mfx = if !smooth_master_fx_params.is_empty() {
+                            Some(smooth_master_fx_params.as_slice())
+                        } else {
+                            None
+                        };
+                        let (ml, mr) = dsp::process_named_master_effects(
+                            (mix_l, mix_r),
+                            &mut master_effects,
+                            &snap.master_effects,
+                            smoothed_mfx,
+                            snap.bpm,
+                            sample_rate,
+                        );
+                        mix_l = ml;
+                        mix_r = mr;
                     }
                     // Capture post-effect master level (before master volume).
                     // master_rms_accum = mono RMS for the centre VU meter.
@@ -2401,17 +2176,11 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         anti_click_remaining -= 1;
                     }
 
-                    // DC-offset removal: one-pole high-pass filter (fc ≈ 20 Hz).
-                    // Removes any slowly-drifting bias without affecting audible content.
+                    // DC-offset removal (shared with render.rs via dsp::DcHpState)
                     {
-                        let new_l = mix_l - dc_hp_x_l + DC_HP_R * dc_hp_y_l;
-                        dc_hp_x_l = mix_l;
-                        dc_hp_y_l = new_l;
-                        mix_l = new_l;
-                        let new_r = mix_r - dc_hp_x_r + DC_HP_R * dc_hp_y_r;
-                        dc_hp_x_r = mix_r;
-                        dc_hp_y_r = new_r;
-                        mix_r = new_r;
+                        let (fl, fr) = dc_hp.process(mix_l, mix_r);
+                        mix_l = fl;
+                        mix_r = fr;
                     }
 
                     // Denormal prevention: add tiny sub-threshold offset so the CPU
@@ -2432,8 +2201,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         let vol = smooth_vol.get(ti).copied().unwrap_or(1.0);
                         let pan = smooth_pan.get(ti).copied().unwrap_or(0.0);
                         let theta = (pan + 1.0) * 0.5 * std::f64::consts::FRAC_PI_2;
-                        let pan_l = crate::modules::fast_cos(theta);
-                        let pan_r = crate::modules::fast_sin(theta);
+                        let pan_l = crate::modules::fast_cos(theta) * std::f64::consts::SQRT_2;
+                        let pan_r = crate::modules::fast_sin(theta) * std::f64::consts::SQRT_2;
                         let sl = tl * pan_l * vol;
                         let sr = tr * pan_r * vol;
                         let ts = (sl + sr) * 0.5;

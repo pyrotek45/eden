@@ -2,13 +2,13 @@
 // SDL2 window, event loop, audio engine, everything wired together.
 #![allow(dead_code)]
 
-mod audio;
 mod commands;
 mod config;
+mod dsp;
+mod engine;
 mod input;
 mod models;
 mod modules;
-mod render;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -19,7 +19,7 @@ mod widgets;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 
-use crate::audio::start_audio_engine;
+use crate::engine::start_audio_engine;
 use crate::input::InputState;
 use crate::state::*;
 
@@ -631,12 +631,12 @@ fn main() {
                                         .and_then(|c| {
                                             if let crate::models::Clip::Audio(ac) = c {
                                                 let path = std::path::Path::new(&ac.source_file);
-                                                crate::audio::load_audio_interleaved(path).ok().map(
-                                                    |(raw, ch, sr)| {
+                                                crate::engine::load_audio_interleaved(path)
+                                                    .ok()
+                                                    .map(|(raw, ch, sr)| {
                                                         raw.len() as f64
                                                             / (ch.max(1) as f64 * sr as f64)
-                                                    },
-                                                )
+                                                    })
                                             } else {
                                                 None
                                             }
@@ -1292,11 +1292,11 @@ fn main() {
                             // Render to a temporary WAV file
                             let tmp_path = std::env::temp_dir().join("eden_midi_preview.wav");
                             let tmp_str = tmp_path.to_string_lossy().to_string();
-                            let settings = crate::render::RenderSettings::default();
-                            match crate::render::render_to_wav(&preview_proj, &tmp_str, &settings) {
+                            let settings = crate::engine::RenderSettings::default();
+                            match crate::engine::render_to_wav(&preview_proj, &tmp_str, &settings) {
                                 Ok(()) => {
                                     // Load the rendered WAV for preview playback
-                                    match crate::audio::load_wav(&tmp_path) {
+                                    match crate::engine::load_wav(&tmp_path) {
                                         Ok((samples, sr)) => {
                                             println!(
                                                 "[preview] MIDI rendered {} samples at {}Hz",
@@ -1338,7 +1338,7 @@ fn main() {
                     // Use the audio sample cache so we don't re-read from disk
                     let path_str = path.to_string_lossy().to_string();
                     if !audio_sample_cache.contains_key(&path_str) {
-                        match crate::audio::load_audio(path) {
+                        match crate::engine::load_audio(path) {
                             Ok((samples, sr)) => {
                                 audio_sample_cache
                                     .insert(path_str.clone(), (std::sync::Arc::new(samples), sr));
@@ -1486,7 +1486,7 @@ fn main() {
             }
 
             // Build track data outside the lock
-            let mut prepared_tracks: Vec<audio::AudioTrack> =
+            let mut prepared_tracks: Vec<engine::AudioTrack> =
                 Vec::with_capacity(state.project.tracks.len());
             for track in &state.project.tracks {
                 let mut midi_clips = Vec::new();
@@ -1556,7 +1556,7 @@ fn main() {
                         if !sample_path.is_empty() {
                             if !audio_sample_cache.contains_key(sample_path) {
                                 let path = std::path::Path::new(sample_path);
-                                match audio::load_audio(path) {
+                                match engine::load_audio(path) {
                                     Ok((samples, sr)) => {
                                         audio_sample_cache.insert(
                                             sample_path.clone(),
@@ -1595,14 +1595,14 @@ fn main() {
                             let notes = mc
                                 .notes
                                 .iter()
-                                .map(|n| audio::AudioNote {
+                                .map(|n| engine::AudioNote {
                                     pitch: n.pitch,
                                     velocity: n.velocity,
                                     start_beats: n.start,
                                     length_beats: n.length,
                                 })
                                 .collect();
-                            midi_clips.push(audio::AudioMidiClip {
+                            midi_clips.push(engine::AudioMidiClip {
                                 start_beats: mc.start_time,
                                 length_beats: mc.length,
                                 notes,
@@ -1617,7 +1617,7 @@ fn main() {
                         }
                         if !audio_sample_cache.contains_key(&ac.source_file) {
                             let path = std::path::Path::new(&ac.source_file);
-                            match audio::load_audio(path) {
+                            match engine::load_audio(path) {
                                 Ok((samples, sr)) => {
                                     audio_sample_cache.insert(
                                         ac.source_file.clone(),
@@ -1634,7 +1634,7 @@ fn main() {
                         }
                         if let Some((samples, sr)) = audio_sample_cache.get(&ac.source_file) {
                             if !samples.is_empty() {
-                                audio_clips_vec.push(audio::AudioSampleClip {
+                                audio_clips_vec.push(engine::AudioSampleClip {
                                     start_beats: ac.start_time,
                                     length_beats: ac.length,
                                     gain: ac.gain,
@@ -1649,7 +1649,7 @@ fn main() {
                     }
                 }
 
-                prepared_tracks.push(audio::AudioTrack {
+                prepared_tracks.push(engine::AudioTrack {
                     volume: track.volume,
                     pan: track.pan,
                     mute: track.mute,
@@ -1840,11 +1840,11 @@ fn main() {
                     if mr >= 0.98 {
                         state.meters.master_clipping_r = true;
                     }
-                    // Post-output (Out pair) peak hold — driven from true instantaneous
-                    // peak so the user can verify the limiter ceiling is being honoured.
-                    // Uses the same unified PEAK_HOLD_FRAMES / PEAK_DECAY constants.
-                    let pl = state.meters.master_true_peak_post_l;
-                    let pr = state.meters.master_true_peak_post_r;
+                    // Post-output (Out pair) peak hold — driven from post-effect
+                    // RMS so the peak-hold line tracks the same data as the bar
+                    // meter, matching the feel of every other meter in the program.
+                    let pl = state.meters.master_rms_post_l;
+                    let pr = state.meters.master_rms_post_r;
                     if pl > state.meters.master_peak_hold_post_l {
                         state.meters.master_peak_hold_post_l = pl;
                         state.meters.master_peak_hold_post_frames_l = PEAK_HOLD_FRAMES;
@@ -1863,15 +1863,15 @@ fn main() {
                         state.meters.master_peak_hold_post_r =
                             (state.meters.master_peak_hold_post_r - PEAK_DECAY).max(0.0);
                     }
-                    // Master VU ballistic needle — driven from post-effect RMS
-                    // so it matches the output bar meters.
+                    // Master VU ballistic needle — driven from smoothed post-effect peak
+                    // so it matches the output bar meters (which use master_peak_smooth_post).
                     {
-                        let m_rms = state
+                        let m_peak = state
                             .meters
-                            .master_rms_post_l
-                            .max(state.meters.master_rms_post_r);
-                        let m_vu_db = if m_rms > 1e-6 {
-                            20.0 * m_rms.log10()
+                            .master_peak_smooth_post_l
+                            .max(state.meters.master_peak_smooth_post_r);
+                        let m_vu_db = if m_peak > 1e-6 {
+                            20.0 * m_peak.log10()
                         } else {
                             -60.0_f32
                         };

@@ -1487,7 +1487,7 @@ impl AppState {
             if let std::collections::hash_map::Entry::Vacant(e) = self.waveform_raw_cache.entry(sf)
             {
                 let path_ref = std::path::Path::new(e.key());
-                if let Ok((raw, channels, sr)) = crate::audio::load_audio_interleaved(path_ref) {
+                if let Ok((raw, channels, sr)) = crate::engine::load_audio_interleaved(path_ref) {
                     let (left, right) = if channels >= 2 {
                         let l: Vec<f32> = raw.chunks(channels).map(|ch| ch[0]).collect();
                         let r: Vec<f32> = raw
@@ -1509,7 +1509,7 @@ impl AppState {
 /// Returns (peaks, total_duration_seconds).
 fn load_waveform_peaks(path: &str, num_peaks: usize) -> (Vec<f32>, f64) {
     let path_ref = std::path::Path::new(path);
-    let (samples, sample_rate) = match crate::audio::load_audio(path_ref) {
+    let (samples, sample_rate) = match crate::engine::load_audio(path_ref) {
         Ok(v) => v,
         Err(_) => return (vec![0.0; num_peaks], 0.0),
     };
@@ -1552,7 +1552,7 @@ pub fn load_waveform_stereo(
         )
     };
     let path_ref = std::path::Path::new(path);
-    let (raw, channels, _sample_rate) = match crate::audio::load_audio_interleaved(path_ref) {
+    let (raw, channels, _sample_rate) = match crate::engine::load_audio_interleaved(path_ref) {
         Ok(v) => v,
         Err(_) => return zero4(),
     };

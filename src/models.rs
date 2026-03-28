@@ -491,7 +491,6 @@ impl RackSlot {
     }
 
     /// Create an EQ effect slot.
-    /// Create an EQ effect slot.
     pub fn eq(slot_id: u32) -> Self {
         Self {
             slot_id,
@@ -500,9 +499,10 @@ impl RackSlot {
             sidechain_track_id: None,
             params: vec![
                 RackParam::new("lo_gain", "Lo Gain", 0.0, -12.0, 12.0),
-                RackParam::new("mid_gain", "Mid Gain", 0.0, -12.0, 12.0),
-                RackParam::new("hi_gain", "Hi Gain", 0.0, -12.0, 12.0),
                 RackParam::new("lo_freq", "Lo Freq", 200.0, 20.0, 500.0),
+                RackParam::new("mid_gain", "Mid Gain", 0.0, -12.0, 12.0),
+                RackParam::new("mid_freq", "Mid Freq", 1000.0, 100.0, 10000.0),
+                RackParam::new("hi_gain", "Hi Gain", 0.0, -12.0, 12.0),
                 RackParam::new("hi_freq", "Hi Freq", 4000.0, 1000.0, 16000.0),
                 RackParam::new("output_db", "Output", 0.0, -60.0, 24.0),
             ],
@@ -722,20 +722,6 @@ fn default_true() -> bool {
     true
 }
 
-/// Available instruments for MIDI tracks
-pub fn instrument_list() -> Vec<&'static str> {
-    vec![
-        "Sine Osc",
-        "Square Osc",
-        "Saw Osc",
-        "Triangle Osc",
-        "FM Synth",
-        "Sampler",
-        "Pluck",
-        "Pad",
-    ]
-}
-
 impl Track {
     pub fn new(id: u32, name: &str, track_type: TrackType) -> Self {
         let color = match track_type {
@@ -752,7 +738,7 @@ impl Track {
             id,
             name: name.to_string(),
             track_type,
-            volume: 0.8,
+            volume: 1.0,
             pan: 0.0,
             mute: false,
             solo: false,

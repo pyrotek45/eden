@@ -1510,7 +1510,8 @@ impl Command for JoinClips {
                 for (_idx, clip) in &clips_sorted {
                     if let Clip::Audio(ac) = clip {
                         let path = std::path::Path::new(&ac.source_file);
-                        if let Ok((_raw, channels, sr)) = crate::audio::load_audio_interleaved(path)
+                        if let Ok((_raw, channels, sr)) =
+                            crate::engine::load_audio_interleaved(path)
                         {
                             out_channels = out_channels.max(channels);
                             out_sr = sr;
@@ -1534,7 +1535,7 @@ impl Command for JoinClips {
                             }
                         }
                         let path = std::path::Path::new(&ac.source_file);
-                        match crate::audio::load_audio_interleaved(path) {
+                        match crate::engine::load_audio_interleaved(path) {
                             Ok((raw, channels, sr)) => {
                                 let ch = channels.max(1);
                                 let total_frames = raw.len() / ch;
@@ -1593,9 +1594,10 @@ impl Command for JoinClips {
                     let joined_path = dir.join(&joined_name);
 
                     let save_ok = if out_channels >= 2 {
-                        crate::audio::save_wav_stereo(&joined_path, &merged_samples, out_sr).is_ok()
+                        crate::engine::save_wav_stereo(&joined_path, &merged_samples, out_sr)
+                            .is_ok()
                     } else {
-                        crate::audio::save_wav_mono(&joined_path, &merged_samples, out_sr).is_ok()
+                        crate::engine::save_wav_mono(&joined_path, &merged_samples, out_sr).is_ok()
                     };
 
                     if save_ok {
