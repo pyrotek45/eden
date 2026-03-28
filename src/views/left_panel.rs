@@ -464,6 +464,7 @@ fn draw_left_panel_files(
             .sample_browser_scroll
             .max(0)
             .min((total_rows - visible_rows).max(0));
+        input.scroll_consumed = true;
     }
 
     let scroll = state.sample_browser_scroll;
@@ -1377,6 +1378,7 @@ fn draw_folder_navigator(
             .folder_nav_scroll
             .max(0)
             .min((total - visible_rows).max(0));
+        input.scroll_consumed = true;
     }
 
     let entries = state.folder_nav_entries.clone();
@@ -1529,15 +1531,12 @@ fn draw_left_panel_instruments(
     let sb_visible = max_scroll > 0;
     let sb_off = if sb_visible { 14i32 } else { 0 };
 
-    // Scroll with mouse wheel
-    if input.mouse_y >= top
-        && input.mouse_y < top + h
-        && input.scroll_y != 0
-        && !input.scroll_consumed
-    {
+    // Scroll with mouse wheel (check mouse_in_rect so arranger scroll doesn't leak in)
+    if input.mouse_in_rect(0, top, w, h) && input.scroll_y != 0 && !input.scroll_consumed {
         state.instruments_scroll = (state.instruments_scroll - input.scroll_y * 20)
             .max(0)
             .min(max_scroll);
+        input.scroll_consumed = true;
     }
 
     let scroll = state.instruments_scroll;
@@ -1759,7 +1758,7 @@ fn draw_left_panel_themes(
             .theme_scroll
             .max(0)
             .min((total_content_h - available_h).max(0));
-        input.scroll_y = 0;
+        input.scroll_consumed = true;
     }
 
     // Clip drawing to the content area below the header
