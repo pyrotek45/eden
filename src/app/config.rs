@@ -143,3 +143,57 @@ impl UserConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_user_config_default_values() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.theme_name, "Dark");
+        assert!(cfg.auto_return);
+        assert_eq!(cfg.ui_scale, 1.0);
+        assert!(cfg.snap_enabled);
+        assert_eq!(cfg.snap_resolution_idx, 2);
+        assert!(cfg.sample_browser_open);
+        assert_eq!(cfg.left_panel_tab, 0);
+        assert!(!cfg.autosave_enabled);
+        assert_eq!(cfg.autosave_interval_idx, 1);
+    }
+
+    #[test]
+    fn test_user_config_serialize_roundtrip() {
+        let cfg = UserConfig {
+            theme_name: "Neon".into(),
+            ui_scale: 1.5,
+            snap_enabled: false,
+            follow_playhead: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: UserConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, restored);
+    }
+
+    #[test]
+    fn test_user_config_partial_eq() {
+        let a = UserConfig::default();
+        let b = UserConfig::default();
+        assert_eq!(a, b);
+        let c = UserConfig {
+            theme_name: "Other".into(),
+            ..Default::default()
+        };
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_autosave_intervals_valid() {
+        assert!(AUTOSAVE_INTERVALS.len() >= 2);
+        for &(label, secs) in AUTOSAVE_INTERVALS {
+            assert!(!label.is_empty());
+            assert!(secs > 0);
+        }
+    }
+}

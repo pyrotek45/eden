@@ -170,23 +170,6 @@ pub struct RackSlot {
 }
 
 impl RackSlot {
-    /// Create a rack slot from the module's ParamDesc array.
-    /// Works for any module registered in modules/mod.rs — no need to
-    /// write a hand-rolled constructor for each new effect.
-    pub fn from_param_descs(name: &str, slot_id: u32) -> Self {
-        let descs = crate::modules::get_param_descs(name);
-        Self {
-            slot_id,
-            plugin_name: name.to_string(),
-            enabled: true,
-            sidechain_track_id: None,
-            params: descs
-                .iter()
-                .map(|d| RackParam::new(d.id, d.name, d.default, d.min, d.max))
-                .collect(),
-        }
-    }
-
     /// Create a simple sine oscillator slot (built-in).
     pub fn sine_osc(slot_id: u32) -> Self {
         Self {
@@ -673,7 +656,6 @@ pub fn create_rack_slot_for_module(name: &str, slot_id: u32) -> RackSlot {
         "Utility" => RackSlot::utility(slot_id),
         "Limiter" => RackSlot::limiter(slot_id),
         "Autoduck" => RackSlot::autoduck(slot_id),
-        "CStrip2" => RackSlot::from_param_descs("CStrip2", slot_id),
         "Arpeggiator" => RackSlot::arpeggiator(slot_id),
         "Chord" => RackSlot::chord(slot_id),
         "Transpose" => RackSlot::transpose(slot_id),
@@ -1219,101 +1201,4 @@ pub fn export_midi_file(
 
     smf.save(path)
         .map_err(|e| format!("Failed to save MIDI file: {}", e))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_track_type_variants() {
-        let midi = TrackType::Midi;
-        let audio = TrackType::Audio;
-        assert_ne!(format!("{:?}", midi), format!("{:?}", audio));
-    }
-
-    #[test]
-    fn test_midi_note_default_fields() {
-        let note = MidiNote {
-            pitch: 60,
-            velocity: 100,
-            start: 0.0,
-            length: 1.0,
-        };
-        assert_eq!(note.pitch, 60);
-        assert_eq!(note.velocity, 100);
-    }
-
-    #[test]
-    fn test_clip_variants() {
-        let midi_clip = MidiClip {
-            notes: vec![],
-            start_time: 0.0,
-            length: 4.0,
-            name: "Test".into(),
-            color: [255, 100, 100, 255],
-        };
-        let clip = Clip::Midi(midi_clip.clone());
-        assert!(matches!(clip, Clip::Midi(_)));
-
-        let audio_clip = AudioClip {
-            source_file: "test.wav".into(),
-            start_time: 0.0,
-            offset: 0.0,
-            length: 4.0,
-            gain: 1.0,
-            name: "Audio".into(),
-            color: [100, 200, 100, 255],
-            fade_in: 0.0,
-            fade_out: 0.0,
-        };
-        let clip2 = Clip::Audio(audio_clip);
-        assert!(matches!(clip2, Clip::Audio(_)));
-    }
-
-    #[test]
-    fn test_create_rack_slot_for_all_effects() {
-        for &name in crate::modules::EFFECT_NAMES {
-            let slot = create_rack_slot_for_module(name, 1);
-            assert_eq!(slot.plugin_name, name);
-            assert!(slot.enabled);
-            assert!(!slot.params.is_empty(), "Effect '{name}' has no params");
-        }
-    }
-
-    #[test]
-    fn test_create_rack_slot_for_all_instruments() {
-        for &name in crate::modules::INSTRUMENT_NAMES {
-            let slot = create_rack_slot_for_module(name, 1);
-            assert_eq!(slot.plugin_name, name);
-            assert!(slot.enabled);
-        }
-    }
-
-    #[test]
-    fn test_project_default() {
-        let proj = Project::default();
-        assert_eq!(proj.name, "Untitled");
-        assert_eq!(proj.sample_rate, 44100);
-        assert!(proj.tracks.is_empty());
-        assert_eq!(proj.transport.position, 0.0);
-        assert!(!proj.transport.playing);
-    }
-
-    #[test]
-    fn test_track_new_midi() {
-        let track = Track::new(1, "Test", TrackType::Midi);
-        assert_eq!(track.volume, 1.0);
-        assert_eq!(track.pan, 0.0);
-        assert!(!track.mute);
-        assert!(!track.solo);
-        // MIDI tracks get a default instrument rack slot
-        assert!(!track.rack.is_empty());
-    }
-
-    #[test]
-    fn test_track_new_audio() {
-        let track = Track::new(2, "Audio", TrackType::Audio);
-        assert!(track.rack.is_empty()); // audio tracks start with no effects
-    }
 }

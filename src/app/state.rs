@@ -1614,3 +1614,57 @@ pub fn load_waveform_stereo(
     let (r_max, r_min) = downsample_envelope(&right, num_peaks);
     (l_max, l_min, r_max, r_min)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_left_panel_tab_to_index() {
+        assert_eq!(LeftPanelTab::Files.to_index(), 0);
+        assert_eq!(LeftPanelTab::Clips.to_index(), 1);
+        assert_eq!(LeftPanelTab::Instruments.to_index(), 2);
+        assert_eq!(LeftPanelTab::Themes.to_index(), 3);
+    }
+
+    #[test]
+    fn test_left_panel_tab_from_index() {
+        assert_eq!(LeftPanelTab::from_index(0), LeftPanelTab::Files);
+        assert_eq!(LeftPanelTab::from_index(1), LeftPanelTab::Clips);
+        assert_eq!(LeftPanelTab::from_index(2), LeftPanelTab::Instruments);
+        assert_eq!(LeftPanelTab::from_index(3), LeftPanelTab::Themes);
+        // Out-of-range defaults to Files
+        assert_eq!(LeftPanelTab::from_index(99), LeftPanelTab::Files);
+    }
+
+    #[test]
+    fn test_left_panel_tab_roundtrip() {
+        for tab in [
+            LeftPanelTab::Files,
+            LeftPanelTab::Clips,
+            LeftPanelTab::Instruments,
+            LeftPanelTab::Themes,
+        ] {
+            assert_eq!(LeftPanelTab::from_index(tab.to_index()), tab);
+        }
+    }
+
+    #[test]
+    fn test_snap_resolutions_valid() {
+        assert!(!SNAP_RESOLUTIONS.is_empty());
+        for &(label, beats) in SNAP_RESOLUTIONS {
+            assert!(!label.is_empty());
+            assert!(beats > 0.0);
+        }
+    }
+
+    #[test]
+    fn test_app_state_default_creation() {
+        let state = AppState::new();
+        assert_eq!(state.project.sample_rate, 44100);
+        assert_eq!(state.project.tracks.len(), 0);
+        assert!(state.running);
+        assert!(!state.project.transport.playing);
+        assert_eq!(state.ui_scale, 1.0);
+    }
+}

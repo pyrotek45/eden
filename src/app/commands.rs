@@ -1775,3 +1775,91 @@ impl Command for SetMasterRackParam {
         "Set Master Effect Param"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A trivial test command that sets the project name.
+    #[derive(Debug)]
+    struct SetName {
+        new: String,
+        old: String,
+    }
+
+    impl Command for SetName {
+        fn apply(&mut self, project: &mut Project) {
+            self.old = project.name.clone();
+            project.name = self.new.clone();
+        }
+        fn undo(&mut self, project: &mut Project) {
+            project.name = self.old.clone();
+        }
+        fn description(&self) -> &str {
+            "Set Name"
+        }
+    }
+
+    #[test]
+    fn test_command_manager_undo_redo() {
+        let mut mgr = CommandManager::new(50);
+        let mut project = Project::default();
+        assert_eq!(project.name, "Untitled");
+
+        mgr.execute(
+            Box::new(SetName {
+                new: "MyProject".into(),
+                old: String::new(),
+            }),
+            &mut project,
+        );
+        assert_eq!(project.name, "MyProject");
+        assert!(mgr.can_undo());
+        assert!(!mgr.can_redo());
+
+        mgr.undo(&mut project);
+        assert_eq!(project.name, "Untitled");
+        assert!(mgr.can_redo());
+
+        mgr.redo(&mut project);
+        assert_eq!(project.name, "MyProject");
+    }
+
+    #[test]
+    fn test_command_manager_max_history() {
+        let mut mgr = CommandManager::new(3);
+        let mut project = Project::default();
+
+        for i in 0..5 {
+            mgr.execute(
+                Box::new(SetName {
+                    new: format!("Name{i}"),
+                    old: String::new(),
+                }),
+                &mut project,
+            );
+        }
+        // Only 3 undos should be possible
+        assert_eq!(project.name, "Name4");
+        mgr.undo(&mut project);
+        mgr.undo(&mut project);
+        mgr.undo(&mut project);
+        assert!(!mgr.can_undo());
+    }
+
+    #[test]
+    fn test_command_manager_descriptions() {
+        let mut mgr = CommandManager::new(10);
+        let mut project = Project::default();
+        assert!(mgr.undo_description().is_none());
+
+        mgr.execute(
+            Box::new(SetName {
+                new: "X".into(),
+                old: String::new(),
+            }),
+            &mut project,
+        );
+        assert_eq!(mgr.undo_description(), Some("Set Name"));
+    }
+}

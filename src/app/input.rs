@@ -396,3 +396,49 @@ impl InputState {
         self.mouse_x >= x && self.mouse_x < x + w && self.mouse_y >= y && self.mouse_y < y + h
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_input_state_new() {
+        let input = InputState::default();
+        assert_eq!(input.mouse_x, 0);
+        assert_eq!(input.mouse_y, 0);
+        assert!(!input.mouse_pressed);
+        assert!(!input.mouse_released);
+        assert!(!input.mouse_down);
+    }
+
+    #[test]
+    fn test_input_mouse_in_rect() {
+        let mut input = InputState::default();
+        input.mouse_x = 50;
+        input.mouse_y = 50;
+        assert!(input.mouse_in_rect(0, 0, 100, 100));
+        assert!(!input.mouse_in_rect(60, 60, 10, 10));
+        assert!(!input.mouse_in_rect(0, 0, 50, 50)); // x < x+w is exclusive at boundary
+    }
+
+    #[test]
+    fn test_input_begin_frame_clears_transients() {
+        let mut input = InputState::default();
+        input.mouse_pressed = true;
+        input.mouse_released = true;
+        input.scroll_y = 5;
+        input.begin_frame();
+        assert!(!input.mouse_pressed);
+        assert!(!input.mouse_released);
+        assert_eq!(input.scroll_y, 0);
+    }
+
+    #[test]
+    fn test_input_key_held_tracking() {
+        let mut input = InputState::default();
+        input.on_key_down(sdl2::keyboard::Keycode::A);
+        assert!(input.key_held(sdl2::keyboard::Keycode::A));
+        input.on_key_up(sdl2::keyboard::Keycode::A);
+        assert!(!input.key_held(sdl2::keyboard::Keycode::A));
+    }
+}
