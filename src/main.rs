@@ -419,9 +419,22 @@ fn main() {
                                 state.project.transport.loop_enabled =
                                     !state.project.transport.loop_enabled;
                             }
-                            Keycode::Num1 => state.mode = AppMode::Arrangement,
-                            Keycode::Num2 => state.mode = AppMode::Mixer,
-                            Keycode::Num3 => state.mode = AppMode::Edit,
+                            Keycode::Num1 => {
+                                state.mode = AppMode::Arrangement;
+                            }
+                            Keycode::Num2 => {
+                                state.mode = AppMode::Mixer;
+                                state.bottom_panel_tab = BottomPanelTab::Mixer;
+                                state.bottom_panel_open = true;
+                            }
+                            Keycode::Num3 => {
+                                state.mode = AppMode::Edit;
+                                state.bottom_panel_tab = BottomPanelTab::PianoRoll;
+                                state.bottom_panel_open = true;
+                            }
+                            Keycode::H if !piano_consumes => {
+                                state.help_screen_visible = !state.help_screen_visible;
+                            }
                             Keycode::S if input.ctrl() => {
                                 let save_path = state.last_save_path.clone().unwrap_or_else(|| {
                                     let name = state.project.name.trim().to_string();
