@@ -34,7 +34,7 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     draw_pixel_label(
         canvas,
         &state.theme,
-        "Eden DAW  —  Help  (F1 to close)",
+        "Eden DAW  —  Help  (F1 / Esc to close)",
         px + 8,
         py + 5,
         pw - 16,
@@ -134,6 +134,7 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             ("2", "Mixer view", false),
             ("3", "Edit / piano-roll view", false),
             ("F1", "Toggle this help screen", false),
+            ("H", "Toggle this help screen (alternate)", false),
             ("Escape", "Deselect / close popup / close help", false),
             ("T", "Cycle colour theme", false),
             ("", "", false),
