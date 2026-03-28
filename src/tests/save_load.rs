@@ -364,6 +364,7 @@ fn test_save_load_every_rack_module_type() {
         "Utility",
         "Limiter",
         "Autoduck",
+        "CStrip2",
         "Arpeggiator",
         "Chord",
         "Transpose",

@@ -711,6 +711,8 @@ pub struct AppState {
     pub multi_pan_drag_origins: Vec<(u32, f32)>,
     /// Snapshot for multi-track volume/pan undo
     pub multi_slider_snapshot: Option<Project>,
+    /// Snapshot captured before the first CStrip2 knob change in a drag session
+    pub cstrip2_knob_snapshot: Option<Project>,
     /// Raw mouse X at start of multi-track volume drag (pixel-accurate delta)
     pub multi_vol_drag_start_x: i32,
     pub multi_vol_slider_w: i32,
@@ -1004,6 +1006,7 @@ impl AppState {
             multi_vol_drag_origins: Vec::new(),
             multi_pan_drag_origins: Vec::new(),
             multi_slider_snapshot: None,
+            cstrip2_knob_snapshot: None,
             multi_vol_drag_start_x: 0,
             multi_vol_slider_w: 1,
             multi_pan_drag_start_x: 0,

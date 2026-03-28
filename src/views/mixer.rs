@@ -662,6 +662,10 @@ pub(super) fn draw_bottom_mixer(
                     sdl2::pixels::Color::RGBA(130, 135, 145, 170),
                 );
                 if changed {
+                    // Snapshot before first CStrip2 knob change in this drag
+                    if state.cstrip2_knob_snapshot.is_none() {
+                        state.cstrip2_knob_snapshot = Some(state.project.clone());
+                    }
                     let delta = val - cur_val;
                     if let Some(entry) = state.project.tracks[i]
                         .cstrip2_params
@@ -689,6 +693,15 @@ pub(super) fn draw_bottom_mixer(
                         }
                     }
                     state.dirty = true;
+                }
+            }
+
+            // Commit CStrip2 knob snapshot on mouse release
+            if input.mouse_released {
+                if let Some(snapshot) = state.cstrip2_knob_snapshot.take() {
+                    state
+                        .commands
+                        .push_undo_snapshot(snapshot, "Adjust CStrip2");
                 }
             }
 
@@ -1118,7 +1131,11 @@ pub(super) fn draw_bottom_mixer(
                 Some(byp_hint),
             );
             if byp_clicked {
+                let snapshot = state.project.clone();
                 state.project.tracks[i].cstrip2_bypass = !bypass_on;
+                state
+                    .commands
+                    .push_undo_snapshot(snapshot, "Toggle CStrip2 Bypass");
                 state.dirty = true;
             }
         }
