@@ -2599,9 +2599,72 @@ fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
         state.panic_triggered = true;
     }
 
-    // Click outside to dismiss
+    // ── Dropdown popup overlays (draw on top of everything) ──
+    // Autosave interval dropdown
+    if state.autosave_enabled {
+        let interval_labels: Vec<&str> = crate::app::config::AUTOSAVE_INTERVALS
+            .iter()
+            .map(|(label, _)| *label)
+            .collect();
+        let autosave_y = popup_y + 252; // follow_y + 28 = (row3_y + 22) + 28
+        dropdown_popup_overlay(
+            canvas,
+            &state.theme,
+            996,
+            popup_x + 120,
+            autosave_y - 2,
+            120,
+            22,
+            120,
+            &interval_labels,
+            state.autosave_interval_idx,
+            state.dropdown_open_id,
+            input.mouse_x,
+            input.mouse_y,
+        );
+    }
+    // Audio device dropdown
+    {
+        let device_strs: Vec<&str> = state
+            .audio_device_names
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        if !device_strs.is_empty() {
+            let row4_y = popup_y + 340;
+            dropdown_popup_overlay(
+                canvas,
+                &state.theme,
+                995,
+                popup_x + 12,
+                row4_y + 18,
+                popup_w - 24,
+                22,
+                popup_w - 24,
+                &device_strs,
+                state.audio_device_idx,
+                state.dropdown_open_id,
+                input.mouse_x,
+                input.mouse_y,
+            );
+        }
+    }
+
+    // Click outside to dismiss (but not if clicking in an open dropdown list)
     let in_popup = input.mouse_in_rect(popup_x, popup_y, popup_w, popup_h);
-    if !in_popup && input.mouse_pressed {
+    let in_dropdown_list = if state.dropdown_open_id == 996 && state.autosave_enabled {
+        let interval_count = crate::app::config::AUTOSAVE_INTERVALS.len() as i32;
+        let autosave_y = popup_y + 252;
+        let list_h = interval_count * 22;
+        input.mouse_in_rect(popup_x + 120, autosave_y - 2, 120, 22 + list_h)
+    } else if state.dropdown_open_id == 995 {
+        let row4_y = popup_y + 340;
+        let list_h = state.audio_device_names.len() as i32 * 22;
+        input.mouse_in_rect(popup_x + 12, row4_y + 18, popup_w - 24, 22 + list_h)
+    } else {
+        false
+    };
+    if !in_popup && !in_dropdown_list && input.mouse_pressed {
         state.options_open = false;
     }
 }
