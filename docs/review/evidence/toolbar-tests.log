@@ -7,4 +7,3 @@ test widgets::row_layout::transport_tests::toolbar_reflows_without_covering_tran
 test views::transport::toolbar_tests::toolbar_buttons_execute_actions_and_disabled_record_cannot_arm ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 562 filtered out; finished in 0.01s
-
