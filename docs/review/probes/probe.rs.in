@@ -1,0 +1,52 @@
+#![allow(dead_code)]
+#[path="@EDEN_ROOT@/src/app/mod.rs"] mod app;
+#[path="@EDEN_ROOT@/src/dsp/mod.rs"] mod dsp;
+#[path="@EDEN_ROOT@/src/engine/mod.rs"] mod engine;
+#[path="@EDEN_ROOT@/src/modules/mod.rs"] mod modules;
+#[path="@EDEN_ROOT@/src/theme/mod.rs"] mod theme;
+#[path="@EDEN_ROOT@/src/widgets/mod.rs"] mod widgets;
+#[path="@PROBE_DIR@/views_probe.rs"] mod views;
+
+use app::models::*;
+use app::state::AppState;
+use app::input::{InputState,WidgetId};
+use std::alloc::{GlobalAlloc,Layout,System};
+use std::sync::atomic::{AtomicUsize,Ordering};
+static COUNT:AtomicUsize=AtomicUsize::new(0);
+static BYTES:AtomicUsize=AtomicUsize::new(0);
+struct Counter;
+unsafe impl GlobalAlloc for Counter {
+ unsafe fn alloc(&self,l:Layout)->*mut u8 { COUNT.fetch_add(1,Ordering::Relaxed);BYTES.fetch_add(l.size(),Ordering::Relaxed);System.alloc(l) }
+ unsafe fn dealloc(&self,p:*mut u8,l:Layout){System.dealloc(p,l)}
+ unsafe fn realloc(&self,p:*mut u8,l:Layout,n:usize)->*mut u8 {COUNT.fetch_add(1,Ordering::Relaxed);BYTES.fetch_add(n,Ordering::Relaxed);System.realloc(p,l,n)}
+}
+#[global_allocator] static ALLOC:Counter=Counter;
+fn clip(start:f64,len:f64)->Clip { Clip::Midi(MidiClip{start_time:start,length:len,name:"probe".into(),color:[100,100,100,255],notes:vec![MidiNote{pitch:60,velocity:100,start:1.,length:0.5}]}) }
+fn state()->AppState { let mut s=AppState::new();s.snap.enabled=false;s.project.tracks=vec![Track::new(1,"probe",TrackType::Midi)];s.project.tracks[0].clips=vec![clip(0.,4.),clip(8.,6.)];s }
+fn lengths(s:&AppState)->Vec<f64>{s.project.tracks[0].clips.iter().map(|c|c.length()).collect()}
+fn release(i:&mut InputState){i.mouse_released=true;i.dragging=false;}
+fn main(){
+ let mut s=state(); let mut i=InputState::default();
+ i.dragging=true;i.drag_widget=WidgetId::ClipRightHandle(1,0);i.active_widget=i.drag_widget;i.drag_start_x=400;i.mouse_x=500;i.drag_start_value=4.;i.drag_start_value2=0.;
+ views::probe_drag(&mut s,&i);release(&mut i);views::probe_drag(&mut s,&i);
+ println!("SINGLE_RIGHT resized {:?}",lengths(&s));s.commands.undo(&mut s.project);println!("SINGLE_RIGHT undo {:?} expected [4,6]",lengths(&s));
+ let mut s=state();s.selected_clips.extend([(1,0),(1,1)]);s.drag_original_positions.extend([((1,0),0.),((1,1),8.)]);
+ let mut i=InputState::default();i.dragging=true;i.drag_widget=WidgetId::ClipLeftHandle(1,0);i.active_widget=i.drag_widget;i.drag_start_value=4.;i.drag_start_value2=0.;i.mouse_x=100;
+ views::probe_drag(&mut s,&i);println!("MULTI_LEFT frame1 {:?}",lengths(&s));views::probe_drag(&mut s,&i);println!("MULTI_LEFT same cursor frame2 {:?} expected [3,5]",lengths(&s));
+ let mut s=state();let mut i=InputState::default();i.dragging=true;i.drag_widget=WidgetId::ClipRightHandle(1,0);i.active_widget=i.drag_widget;i.drag_start_x=400;i.mouse_x=800;i.drag_start_value=4.;i.key_mod=sdl2::keyboard::Mod::LSHIFTMOD;
+ views::probe_drag(&mut s,&i);if let Clip::Midi(c)=&s.project.tracks[0].clips[0]{println!("SHIFT_STRETCH length={} note_start={} note_length={} (notes unchanged)",c.length,c.notes[0].start,c.notes[0].length);}
+
+ let mut s=state();s.project.tracks.push(Track::new(2,"audio target",TrackType::Audio));s.selected_clips.insert((1,0));s.drag_original_positions.insert((1,0),0.);s.clip_drag_is_copy=true;
+ let mut i=InputState::default();i.mouse_released=true;i.active_widget=WidgetId::ClipBody(1,0);i.mouse_y=s.track_area_top()+s.project.tracks[0].height+10;i.mouse_x=100;i.drag_start_value=0.;
+ views::probe_drag(&mut s,&i);println!("INVALID_COPY target_valid={} audio_track_clips={} expected 0",s.clip_drag_target_valid,s.project.tracks[1].clips.len());
+ let mut s=state();s.selected_clips.extend([(1,0),(1,1)]);s.drag_original_positions.extend([((1,0),0.),((1,1),8.)]);
+ let mut i=InputState::default();i.dragging=true;i.drag_widget=WidgetId::ClipBody(1,1);i.active_widget=i.drag_widget;i.drag_start_value=8.;i.drag_start_x=800;i.mouse_x=-100;i.mouse_y=s.track_area_top()+10;
+ views::probe_drag(&mut s,&i);println!("GROUP_MOVE_LEFT starts={:?} expected preserved spacing",s.project.tracks[0].clips.iter().map(|c|c.start_time()).collect::<Vec<_>>());
+ let path="@PROBE_DIR@/counterphase.wav";
+ let mut w=hound::WavWriter::create(path,hound::WavSpec{channels:2,sample_rate:44100,bits_per_sample:32,sample_format:hound::SampleFormat::Float}).unwrap();
+ for _ in 0..4410 {w.write_sample(0.5f32).unwrap();w.write_sample(-0.5f32).unwrap();}w.finalize().unwrap();
+ let (mono,_)=engine::load_audio(std::path::Path::new(path)).unwrap();println!("STEREO counterphase load_audio peak={} (original L=.5 R=-.5)",mono.iter().fold(0f32,|p,x|p.max(x.abs())));
+ let mut shared=engine::AudioShared::default();let mut track=engine::AudioTrack{volume:1.,pan:0.,mute:false,solo:false,is_automation:false,midi_clips:vec![],audio_clips:vec![],instrument_module:Some("Analog".into()),instrument_params:vec![("cutoff".into(),0.5)],effect_slots:vec![],midi_effect_slots:vec![],effect_sidechain_track:vec![],cstrip2_params:vec![],cstrip2_bypass:true,extra:modules::ModuleExtra::default()};
+ for k in 0..100 {track.midi_clips.push(engine::AudioMidiClip{start_beats:k as f64*4.,length_beats:4.,notes:(0..32).map(|p|engine::AudioNote{pitch:60,velocity:100,start_beats:p as f64/8.,length_beats:0.125}).collect()});}shared.tracks=vec![track];
+ COUNT.store(0,Ordering::Relaxed);BYTES.store(0,Ordering::Relaxed);let c=shared.clone();let n=COUNT.load(Ordering::Relaxed);let b=BYTES.load(Ordering::Relaxed);std::hint::black_box(&c);println!("AUDIO_SNAPSHOT_CLONE tracks=1 clips=100 notes=3200 allocations={} bytes={}",n,b);
+}

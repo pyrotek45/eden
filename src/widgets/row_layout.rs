@@ -86,3 +86,48 @@ impl RowLayout {
         out
     }
 }
+
+/// Top actions wrap below the transport controls instead of overlapping them.
+/// Entries are (x, width, y), in rightmost-first order.
+pub fn transport_action_layout(width: i32, font_scale: i32, keyboard_mode: bool) -> (Vec<(i32, i32, i32)>, i32) {
+    let mut labels = vec!["Home", "Options", "Save", "Export", "Project", "Redo", "Undo", "KBD", "STOP", "?"];
+    if keyboard_mode { labels.push("< C0 >"); }
+    let mut x = width - 10;
+    let mut y = 9;
+    let mut slots = Vec::with_capacity(labels.len());
+    for label in labels {
+        let item_w = (label.chars().count() as i32 * (4 * font_scale + 1) + 16).max(30);
+        let left = if y == 9 { 506 } else { 10 };
+        if x - item_w < left {
+            y += 40;
+            x = width - 10;
+        }
+        x -= item_w;
+        slots.push((x, item_w, y));
+        x -= 4;
+    }
+    (slots, y + 39)
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    #[test]
+    fn toolbar_reflows_without_covering_transport_or_other_actions() {
+        for width in [520, 640, 800, 1024, 1280, 1920] {
+            for font in 1..=4 {
+                for keyboard in [false, true] {
+                    let (slots, height) = transport_action_layout(width, font, keyboard);
+                    for (index, &(x, w, y)) in slots.iter().enumerate() {
+                        assert!(x >= 10 && x + w <= width - 10);
+                        assert!(y != 9 || x >= 506);
+                        assert!(y + 30 < height);
+                        for &(other_x, other_w, other_y) in &slots[..index] {
+                            assert!(y != other_y || x + w <= other_x || other_x + other_w <= x);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

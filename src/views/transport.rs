@@ -33,10 +33,13 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
 
     // ── Mini oscilloscope (between snap controls and mode tabs) ──
     {
-        let osc_x = 490i32;
-        let osc_w = (w - 540 - osc_x).clamp(60, 400);
+        let osc_x = 506i32;
+        let (actions, _) = transport_action_layout(w, state.font_scale, state.piano_keyboard_mode);
+        let first_row_left = actions.iter().filter(|s| s.2 == 9).map(|s| s.0).min().unwrap_or(w - 10);
+        let osc_w = (first_row_left - 12 - osc_x).clamp(0, 400);
         let osc_y = 8i32;
         let osc_h = 32i32;
+        if osc_w >= 40 {
         // Background
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(10, 10, 14, 200));
         let _ = canvas.fill_rect(Rect::new(osc_x, osc_y, osc_w as u32, osc_h as u32));
@@ -51,7 +54,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         // Waveform — only show if there's actual signal
         let osc = &state.meters.oscilloscope;
         let has_signal = osc.iter().any(|s| s.abs() > 0.001);
-        if has_signal && !osc.is_empty() {
+        if osc_w > 0 && has_signal && !osc.is_empty() {
             let step = osc.len() as f32 / osc_w as f32;
             let mid = osc_y + osc_h / 2;
             let amp = osc_h / 2 - 2;
@@ -76,6 +79,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             18,
             sdl2::pixels::Color::RGBA(80, 130, 80, 180),
         );
+            }
     }
 
     // ── Left-side transport icon buttons ─────────────────────────────────
@@ -254,7 +258,8 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
                 label: String::new(),
                 toggled: state.project.transport.recording,
                 icon: ButtonIcon::Record,
-                hint: Some("Record".into()),
+                hint: Some("Recording is not implemented yet".into()),
+                enabled: false,
                 ..Default::default()
             },
         );
@@ -392,14 +397,9 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         }
     }
     // "BPM" label above
-    draw_pixel_label(
-        canvas,
-        &state.theme,
-        "BPM",
-        268,
-        4,
-        40,
-        sdl2::pixels::Color::RGBA(140, 140, 140, 200),
+    draw_pixel_label_scaled(
+        canvas, &state.theme, "BPM", 268, 2, 40,
+        sdl2::pixels::Color::RGBA(180, 180, 180, 255), 1,
     );
 
     // Position display: bar:beat
@@ -408,26 +408,21 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
     let beat = (pos % 4.0).floor() as i32 + 1;
     let pos_str = format!("{}.{}", bar, beat);
     canvas.set_draw_color(Theme::c(state.theme.bg_light));
-    let _ = canvas.fill_rect(Rect::new(324, 10, 52, 28));
+    let _ = canvas.fill_rect(Rect::new(340, 10, 52, 28));
     canvas.set_draw_color(Theme::c(state.theme.panel_border));
-    let _ = canvas.draw_rect(Rect::new(324, 10, 52, 28));
+    let _ = canvas.draw_rect(Rect::new(340, 10, 52, 28));
     draw_pixel_label(
         canvas,
         &state.theme,
         &pos_str,
-        328,
+        344,
         21,
         44,
         sdl2::pixels::Color::RGBA(200, 220, 255, 255),
     );
-    draw_pixel_label(
-        canvas,
-        &state.theme,
-        "POS",
-        330,
-        4,
-        40,
-        sdl2::pixels::Color::RGBA(140, 140, 140, 200),
+    draw_pixel_label_scaled(
+        canvas, &state.theme, "POS", 346, 2, 40,
+        sdl2::pixels::Color::RGBA(180, 180, 180, 255), 1,
     );
 
     // ── Snap controls ───────────────────────────────────────
@@ -439,11 +434,11 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         &state.theme,
         &ButtonParams {
             id: __auto_id_6,
-            x: 384,
+            x: 400,
             y: 10,
             width: 36,
             height: 28,
-            label: "SNAP".into(),
+            label: if state.snap.enabled { "ON" } else { "OFF" }.into(),
             toggled: state.snap.enabled,
             icon: ButtonIcon::None,
             hint: Some("Toggle snap to grid".into()),
@@ -453,14 +448,9 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
     if snap_clicked {
         state.snap.enabled = !state.snap.enabled;
     }
-    draw_pixel_label(
-        canvas,
-        &state.theme,
-        "SNAP",
-        388,
-        4,
-        32,
-        sdl2::pixels::Color::RGBA(140, 140, 140, 200),
+    draw_pixel_label_scaled(
+        canvas, &state.theme, "SNAP", 404, 2, 32,
+        sdl2::pixels::Color::RGBA(180, 180, 180, 255), 1,
     );
 
     // Grid resolution dropdown — top layer within the transport bar.
@@ -471,7 +461,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
     {
         let snap_labels: Vec<&str> = SNAP_RESOLUTIONS.iter().map(|(l, _)| *l).collect();
         let is_open = state.dropdown_open_id == 200;
-        let dd_x = 424i32;
+        let dd_x = 440i32;
         let dd_y = 10i32;
         let dd_w = 52i32;
         let dd_h = 28i32;
@@ -531,14 +521,9 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         let _ = canvas.fill_rect(Rect::new(ax + 2, ay + 3, 3, 2));
         let _ = canvas.fill_rect(Rect::new(ax + 3, ay + 5, 1, 2));
     }
-    draw_pixel_label(
-        canvas,
-        &state.theme,
-        "GRID",
-        388,
-        4,
-        40,
-        sdl2::pixels::Color::RGBA(140, 140, 140, 200),
+    draw_pixel_label_scaled(
+        canvas, &state.theme, "GRID", 444, 2, 40,
+        sdl2::pixels::Color::RGBA(180, 180, 180, 255), 1,
     );
 
     // ── Right-side buttons — RowLayout::layout_right() ──────────────────────
@@ -547,78 +532,8 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
     // matches the visual order left→right so we reverse for layout_right.
     {
         let inp = layers.below(); // below the snap dropdown top layer
-        let btn_y = 9i32;
         let btn_h = 30i32;
-        let sm = 38i32; // small button width
-        let md = 56i32; // medium button width
-        let qs = 30i32; // question-mark button
-
-        // Slots in LEFT-TO-RIGHT visual order:
-        //   [0]=?  [1]=STOP  [2]=KBD  [3]=Undo  [4]=Redo
-        //   [5]=Project  [6]=Export  [7]=Save  [8]=Options  [9]=Home
-        // layout_right expects index-0 = rightmost, so we declare them that way.
-        let right_margin = 10i32;
-        let row = RowLayout {
-            x: 0,
-            y: btn_y,
-            total_width: w - right_margin,
-            height: btn_h,
-            gap: 4,
-        };
-        // Rightmost first: Home, Options, Save, Export, Project, Redo, Undo, KBD, STOP, ?
-        let slots = row.layout_right(&[
-            RowItem {
-                width: sm,
-                can_resize: false,
-                min_width: sm,
-            }, // Home
-            RowItem {
-                width: md,
-                can_resize: false,
-                min_width: md,
-            }, // Options
-            RowItem {
-                width: md,
-                can_resize: false,
-                min_width: md,
-            }, // Save
-            RowItem {
-                width: md,
-                can_resize: false,
-                min_width: md,
-            }, // Export
-            RowItem {
-                width: md,
-                can_resize: false,
-                min_width: md,
-            }, // Project
-            RowItem {
-                width: sm,
-                can_resize: false,
-                min_width: sm,
-            }, // Redo
-            RowItem {
-                width: sm,
-                can_resize: false,
-                min_width: sm,
-            }, // Undo
-            RowItem {
-                width: sm,
-                can_resize: false,
-                min_width: sm,
-            }, // KBD
-            RowItem {
-                width: sm,
-                can_resize: false,
-                min_width: sm,
-            }, // STOP
-            RowItem {
-                width: qs,
-                can_resize: false,
-                min_width: qs,
-            }, // ?
-        ]);
-        // slots[0] = Home (rightmost), slots[9] = ? (leftmost of fixed buttons)
+        let (slots, _) = transport_action_layout(w, state.font_scale, state.piano_keyboard_mode);
 
         // Home
         let __auto_id_7 = inp.next_id();
@@ -629,7 +544,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_7,
                 x: slots[0].0,
-                y: btn_y,
+                y: slots[0].2,
                 width: slots[0].1,
                 height: btn_h,
                 label: "Home".into(),
@@ -652,7 +567,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_8,
                 x: slots[1].0,
-                y: btn_y,
+                y: slots[1].2,
                 width: slots[1].1,
                 height: btn_h,
                 label: "Options".into(),
@@ -669,6 +584,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         // Save (left-click = quick save, right-click = save as)
         let save_btn_x = slots[2].0;
         let save_btn_w = slots[2].1;
+        let save_btn_y = slots[2].2;
         let __auto_id_9 = inp.next_id();
         let save_clicked = button(
             canvas,
@@ -677,7 +593,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_9,
                 x: save_btn_x,
-                y: btn_y,
+                y: save_btn_y,
                 width: save_btn_w,
                 height: btn_h,
                 label: "Save".into(),
@@ -690,11 +606,11 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         if save_clicked {
             match state.quick_save() {
                 Ok(()) => println!("[save] Project saved"),
-                Err(e) => eprintln!("[save] Error: {}", e),
+                Err(e) => state.push_status(format!("Save failed: {}", e)),
             }
         }
         // Right-click Save → open Save As popup
-        if inp.mouse_in_rect(save_btn_x, btn_y, save_btn_w, btn_h)
+        if inp.mouse_in_rect(save_btn_x, save_btn_y, save_btn_w, btn_h)
             && inp.right_mouse_pressed
             && !inp.consumed
         {
@@ -717,7 +633,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_10,
                 x: slots[3].0,
-                y: btn_y,
+                y: slots[3].2,
                 width: slots[3].1,
                 height: btn_h,
                 label: "Export".into(),
@@ -746,7 +662,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_11,
                 x: slots[4].0,
-                y: btn_y,
+                y: slots[4].2,
                 width: slots[4].1,
                 height: btn_h,
                 label: "Project".into(),
@@ -761,7 +677,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         }
 
         // Redo
-        let redo_hint = match state.commands.redo_description() {
+        let redo_hint = match state.history_description(true) {
             Some(desc) => format!("Redo: {} (Ctrl+Y)", desc),
             None => "Nothing to redo (Ctrl+Y)".into(),
         };
@@ -773,25 +689,23 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_12,
                 x: slots[5].0,
-                y: btn_y,
+                y: slots[5].2,
                 width: slots[5].1,
                 height: btn_h,
                 label: "Redo".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
                 hint: Some(redo_hint),
+                enabled: state.history_description(true).is_some(),
                 ..Default::default()
             },
         );
         if redo_clicked {
-            if let Some(desc) = state.commands.redo_description() {
-                state.push_status(format!("Redo: {}", desc));
-            }
-            state.commands.redo(&mut state.project);
+            state.apply_history(true);
         }
 
         // Undo
-        let undo_hint = match state.commands.undo_description() {
+        let undo_hint = match state.history_description(false) {
             Some(desc) => format!("Undo: {} (Ctrl+Z)", desc),
             None => "Nothing to undo (Ctrl+Z)".into(),
         };
@@ -803,21 +717,19 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_13,
                 x: slots[6].0,
-                y: btn_y,
+                y: slots[6].2,
                 width: slots[6].1,
                 height: btn_h,
                 label: "Undo".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
                 hint: Some(undo_hint),
+                enabled: state.history_description(false).is_some(),
                 ..Default::default()
             },
         );
         if undo_clicked {
-            if let Some(desc) = state.commands.undo_description() {
-                state.push_status(format!("Undo: {}", desc));
-            }
-            state.commands.undo(&mut state.project);
+            state.apply_history(false);
         }
 
         // KBD
@@ -829,7 +741,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_14,
                 x: slots[7].0,
-                y: btn_y,
+                y: slots[7].2,
                 width: slots[7].1,
                 height: btn_h,
                 label: "KBD".into(),
@@ -855,7 +767,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_15,
                 x: slots[8].0,
-                y: btn_y,
+                y: slots[8].2,
                 width: slots[8].1,
                 height: btn_h,
                 label: "STOP".into(),
@@ -882,7 +794,7 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
             &ButtonParams {
                 id: __auto_id_18,
                 x: slots[9].0,
-                y: btn_y,
+                y: slots[9].2,
                 width: slots[9].1,
                 height: btn_h,
                 label: "?".into(),
@@ -900,11 +812,12 @@ pub fn draw_transport(canvas: &mut Canvas<Window>, input: &mut InputState, state
         // These only appear in piano-keyboard mode. They use a local cursor
         // that starts at slots[9].0 (the left edge of the '?' button) and
         // expands further left.
-        if state.piano_keyboard_mode {
+        if state.piano_keyboard_mode && slots.len() > 10 {
             let oct_btn_w = 22i32;
             let gap = 4i32;
             // '>' octave-up: immediately left of '?'
-            let mut oct_rx = slots[9].0 - gap;
+            let mut oct_rx = slots[10].0 + slots[10].1 - gap;
+            let btn_y = slots[10].2;
 
             oct_rx -= oct_btn_w;
             let __auto_id_16 = inp.next_id();
@@ -1387,3 +1300,72 @@ pub fn draw_mode_tabs(
 }
 
 // ── Track headers ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod toolbar_tests {
+    use super::*;
+    fn click(canvas: &mut Canvas<Window>, state: &mut AppState, x: i32, y: i32) {
+        let mut input = InputState::default();
+        input.mouse_x = x;
+        input.mouse_y = y;
+        input.mouse_pressed = true;
+        input.mouse_down = true;
+        draw_transport(canvas, &mut input, state);
+        input.widget_counter = 0;
+        input.consumed = false;
+        input.mouse_pressed = false;
+        input.mouse_down = false;
+        input.mouse_released = true;
+        draw_transport(canvas, &mut input, state);
+    }
+    #[test]
+    fn toolbar_buttons_execute_actions_and_disabled_record_cannot_arm() {
+        let sdl = sdl2::init().unwrap();
+        let video = sdl.video().unwrap();
+        let window = video.window("toolbar regression", 1280, 800).hidden().build().unwrap();
+        let mut canvas = window.into_canvas().software().build().unwrap();
+        let mut state = AppState::new();
+        click(&mut canvas, &mut state, 68, 24);
+        assert!(state.project.transport.playing);
+        click(&mut canvas, &mut state, 108, 24);
+        assert!(!state.project.transport.playing);
+        click(&mut canvas, &mut state, 188, 24);
+        assert!(!state.project.transport.recording);
+        let slots = transport_action_layout(1280, state.font_scale, false).0;
+        for index in [1, 3, 4, 7, 9] {
+            click(&mut canvas, &mut state, slots[index].0 + 5, slots[index].2 + 12);
+        }
+        assert!(state.options_open && state.render_popup_open && state.project_popup_open);
+        assert!(state.piano_keyboard_mode && state.help_screen_visible);
+        // Exercise the remaining transport actions through pointer press/release.
+        state.project.transport.position = 3.0;
+        click(&mut canvas, &mut state, 28, 24);
+        assert_eq!(state.project.transport.position, 0.0);
+        let auto_return = state.auto_return;
+        click(&mut canvas, &mut state, 148, 24);
+        assert_ne!(state.auto_return, auto_return);
+        let looping = state.project.transport.loop_enabled;
+        click(&mut canvas, &mut state, 228, 24);
+        assert_ne!(state.project.transport.loop_enabled, looping);
+        let snap = state.snap.enabled;
+        click(&mut canvas, &mut state, 418, 24);
+        assert_ne!(state.snap.enabled, snap);
+        let slots = transport_action_layout(1280, state.font_scale, true).0;
+        state.project.transport.playing = true;
+        click(&mut canvas, &mut state, slots[8].0 + 5, slots[8].2 + 12);
+        assert!(!state.project.transport.playing && state.panic_triggered);
+        state.last_save_path = Some("/no/eden/save-target.json".into());
+        state.dirty = true;
+        click(&mut canvas, &mut state, slots[2].0 + 5, slots[2].2 + 12);
+        assert!(state.dirty); // Failed saves must not clear unsaved changes.
+        let before = state.project.clone();
+        state.project.name = "Toolbar edit".into();
+        state.commands.push_undo_snapshot(before.clone(), "Rename");
+        let slots = transport_action_layout(1280, state.font_scale, true).0;
+        click(&mut canvas, &mut state, slots[6].0 + 5, slots[6].2 + 12);
+        assert_eq!(state.project.name, before.name);
+        assert!(state.dirty);
+        click(&mut canvas, &mut state, slots[5].0 + 5, slots[5].2 + 12);
+        assert_eq!(state.project.name, "Toolbar edit");
+    }
+}

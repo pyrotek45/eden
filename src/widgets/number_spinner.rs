@@ -6,7 +6,7 @@ use sdl2::video::Window;
 
 use crate::app::input::{InputState, WidgetId};
 use crate::theme::Theme;
-use crate::widgets::draw_pixel_label;
+use crate::widgets::{draw_pixel_label_scaled, get_font_scale};
 
 #[allow(clippy::too_many_arguments)]
 pub fn number_spinner(
@@ -81,7 +81,11 @@ pub fn number_spinner(
     } else {
         sdl2::pixels::Color::RGBA(220, 220, 220, 255)
     };
-    draw_pixel_label(canvas, theme, &text, x + 4, y + (h - 10) / 2, w - 8, col);
+    let mut scale = get_font_scale();
+    while scale > 1 && (text.chars().count() as i32 * (4 * scale + scale / 2) > w - 20 || 5 * scale > h - 4) {
+        scale -= 1;
+    }
+    draw_pixel_label_scaled(canvas, theme, &text, x + 4, y + (h - 5 * scale) / 2, w - 20, col, scale);
 
     // Up/down arrows
     canvas.set_draw_color(Theme::c(theme.text_dim));

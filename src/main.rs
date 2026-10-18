@@ -456,128 +456,11 @@ fn main() {
                                     }
                                 }
                             }
-                            Keycode::Z
-                                if input.ctrl()
-                                    && input.shift()
-                                    && state.focused_panel
-                                        == crate::app::state::FocusedPanel::AudioEditor =>
-                            {
-                                // Audio editor redo
-                                if let Some((src, backup, desc, proj_snapshot)) =
-                                    state.audio_redo_stack.pop()
-                                {
-                                    // Current state becomes undo backup
-                                    let sp = std::path::Path::new(&src);
-                                    let dir = sp.parent().unwrap_or(std::path::Path::new("."));
-                                    let stem =
-                                        sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
-                                    let ext =
-                                        sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
-                                    let ts = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis())
-                                        .unwrap_or(0);
-                                    let undo_backup =
-                                        dir.join(format!(".{}_undo_{}.{}", stem, ts, ext));
-                                    // Save current project state before redo overwrites it
-                                    let current_proj = if proj_snapshot.is_some() {
-                                        Some(state.project.clone())
-                                    } else {
-                                        None
-                                    };
-                                    if std::fs::copy(&src, &undo_backup).is_ok() {
-                                        state.audio_undo_stack.push((
-                                            src.clone(),
-                                            undo_backup.to_string_lossy().to_string(),
-                                            desc.clone(),
-                                            current_proj,
-                                        ));
-                                    }
-                                    if std::fs::copy(&backup, &src).is_ok() {
-                                        let _ = std::fs::remove_file(&backup);
-                                        state.waveform_cache.remove(&src);
-                                        state.waveform_stereo_cache.remove(&src);
-                                        state.waveform_raw_cache.remove(&src);
-                                        state.audio_sample_invalidate.push(src.clone());
-                                        // Restore project snapshot (clip metadata) if present
-                                        if let Some(proj) = proj_snapshot {
-                                            state.project = proj;
-                                        }
-                                        state.push_status(format!("Redo: {}", desc));
-                                    }
-                                } else {
-                                    state.push_status("Nothing to redo");
-                                }
-                            }
-                            Keycode::Z
-                                if input.ctrl()
-                                    && state.focused_panel
-                                        == crate::app::state::FocusedPanel::AudioEditor =>
-                            {
-                                // Audio editor undo
-                                if let Some((src, backup, desc, proj_snapshot)) =
-                                    state.audio_undo_stack.pop()
-                                {
-                                    // Current state becomes redo backup
-                                    let sp = std::path::Path::new(&src);
-                                    let dir = sp.parent().unwrap_or(std::path::Path::new("."));
-                                    let stem =
-                                        sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
-                                    let ext =
-                                        sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
-                                    let ts = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis())
-                                        .unwrap_or(0);
-                                    let redo_backup =
-                                        dir.join(format!(".{}_redo_{}.{}", stem, ts, ext));
-                                    // Save current project state before undo overwrites it
-                                    let current_proj = if proj_snapshot.is_some() {
-                                        Some(state.project.clone())
-                                    } else {
-                                        None
-                                    };
-                                    if std::fs::copy(&src, &redo_backup).is_ok() {
-                                        state.audio_redo_stack.push((
-                                            src.clone(),
-                                            redo_backup.to_string_lossy().to_string(),
-                                            desc.clone(),
-                                            current_proj,
-                                        ));
-                                    }
-                                    if std::fs::copy(&backup, &src).is_ok() {
-                                        let _ = std::fs::remove_file(&backup);
-                                        state.waveform_cache.remove(&src);
-                                        state.waveform_stereo_cache.remove(&src);
-                                        state.waveform_raw_cache.remove(&src);
-                                        state.audio_sample_invalidate.push(src.clone());
-                                        // Restore project snapshot (clip metadata) if present
-                                        if let Some(proj) = proj_snapshot {
-                                            state.project = proj;
-                                        }
-                                        state.push_status(format!("Undo: {}", desc));
-                                    }
-                                } else {
-                                    state.push_status("Nothing to undo");
-                                }
-                            }
-                            Keycode::Z if input.ctrl() && input.shift() => {
-                                if let Some(desc) = state.commands.redo_description() {
-                                    state.push_status(format!("Redo: {}", desc));
-                                }
-                                state.commands.redo(&mut state.project);
-                            }
                             Keycode::Z if input.ctrl() => {
-                                if let Some(desc) = state.commands.undo_description() {
-                                    state.push_status(format!("Undo: {}", desc));
-                                }
-                                state.commands.undo(&mut state.project);
+                                state.apply_history(input.shift());
                             }
-                            Keycode::R if input.ctrl() => {
-                                if let Some(desc) = state.commands.redo_description() {
-                                    state.push_status(format!("Redo: {}", desc));
-                                }
-                                state.commands.redo(&mut state.project);
+                            Keycode::R | Keycode::Y if input.ctrl() => {
+                                state.apply_history(true);
                             }
                             // ── Audio editor tool shortcuts ──────────────────
                             Keycode::A
@@ -1944,6 +1827,11 @@ fn main() {
         // Apply global UI scale via SDL2 canvas transform.
         // apply_scale() converts raw physical coords → logical coords ONCE per frame.
         let sc = state.ui_scale;
+        // Keep the smallest supported logical layout usable at every UI scale.
+        let minimum = ((520.0 * sc).ceil() as u32, (600.0 * sc).ceil() as u32);
+        if canvas.window().minimum_size() != minimum {
+            let _ = canvas.window_mut().set_minimum_size(minimum.0, minimum.1);
+        }
         let _ = canvas.set_scale(sc, sc);
         let (out_w, out_h) = canvas.output_size().unwrap_or((1280, 800));
         state.window_width = (out_w as f32 / sc) as u32;
