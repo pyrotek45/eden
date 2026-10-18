@@ -7,7 +7,7 @@ use sdl2::video::Window;
 
 use crate::app::input::{InputState, WidgetId};
 use crate::theme::Theme;
-use crate::widgets::{draw_pixel_label, get_font_scale};
+use crate::widgets::{draw_pixel_label_scaled, get_font_scale};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ButtonIcon {
@@ -28,6 +28,8 @@ pub struct ButtonParams {
     pub height: i32,
     pub label: String,
     pub toggled: bool,
+    /// Disabled controls explain their unavailable state without accepting input.
+    pub enabled: bool,
     pub icon: ButtonIcon,
     /// Hover tooltip text
     pub hint: Option<String>,
@@ -47,6 +49,7 @@ impl Default for ButtonParams {
             height: 24,
             label: String::new(),
             toggled: false,
+            enabled: true,
             icon: ButtonIcon::None,
             hint: None,
             can_resize: false,
@@ -64,11 +67,11 @@ pub fn button(
     let hover = input.mouse_in_rect(params.x, params.y, params.width, params.height);
     let mut clicked = false;
 
-    if hover && input.mouse_pressed && !input.consumed {
+    if params.enabled && hover && input.mouse_pressed && !input.consumed {
         input.active_widget = params.id;
         input.consume();
     }
-    if hover && input.mouse_released && input.active_widget == params.id {
+    if params.enabled && hover && input.mouse_released && input.active_widget == params.id {
         clicked = true;
     }
     if hover {
@@ -79,8 +82,8 @@ pub fn button(
         }
     }
 
-    let is_active = input.active_widget == params.id && input.mouse_down && hover;
-    let is_hot = hover;
+    let is_active = params.enabled && input.active_widget == params.id && input.mouse_down && hover;
+    let is_hot = params.enabled && hover;
 
     let bg = if params.toggled {
         Theme::c(theme.accent_active)
@@ -115,7 +118,9 @@ pub fn button(
         params.height as u32,
     ));
 
-    let fg = if params.toggled {
+    let fg = if !params.enabled {
+        Theme::c(theme.text_dim)
+    } else if params.toggled {
         Theme::c(theme.bg_dark)
     } else {
         Theme::c(theme.button_text)
@@ -125,7 +130,9 @@ pub fn button(
 
     match params.icon {
         ButtonIcon::Play => {
-            let c = if params.toggled {
+            let c = if !params.enabled {
+                fg
+            } else if params.toggled {
                 Theme::c(theme.bg_dark)
             } else {
                 Theme::c(theme.play_color)
@@ -143,7 +150,9 @@ pub fn button(
             );
         }
         ButtonIcon::Stop => {
-            let c = if params.toggled {
+            let c = if !params.enabled {
+                fg
+            } else if params.toggled {
                 Theme::c(theme.bg_dark)
             } else {
                 Theme::c(theme.stop_color)
@@ -158,7 +167,9 @@ pub fn button(
             ));
         }
         ButtonIcon::Record => {
-            let c = if params.toggled {
+            let c = if !params.enabled {
+                fg
+            } else if params.toggled {
                 sdl2::pixels::Color::RGBA(255, 80, 80, 255)
             } else {
                 Theme::c(theme.record_color)
@@ -167,7 +178,9 @@ pub fn button(
             let _ = canvas.filled_circle(icx as i16, icy as i16, sz, c);
         }
         ButtonIcon::Loop => {
-            let c = if params.toggled {
+            let c = if !params.enabled {
+                fg
+            } else if params.toggled {
                 Theme::c(theme.bg_dark)
             } else {
                 Theme::c(theme.loop_color)
@@ -279,13 +292,20 @@ pub fn button(
         }
         ButtonIcon::None => {
             if !params.label.is_empty() {
-                let scale = get_font_scale();
-                let glyph_w = 4 * scale + 1;
-                let glyph_h = 5 * scale;
-                let tw = (params.label.len() as i32 * glyph_w).min(params.width - 4);
+                let mut scale = get_font_scale();
+                let count = params.label.chars().count() as i32;
+                while scale > 1 && (count * (4 * scale + scale / 2) > params.width - 8 || 5 * scale > params.height - 4) {
+                    scale -= 1;
+                }
+                let glyph_w = 4 * scale + scale / 2;
+                let capacity = ((params.width - 8).max(0) / glyph_w) as usize;
+                let label = if count as usize > capacity {
+                    params.label.chars().take(capacity.saturating_sub(1)).chain(std::iter::once('…')).collect::<String>()
+                } else { params.label.clone() };
+                let tw = label.chars().count() as i32 * glyph_w;
                 let tx = params.x + (params.width - tw) / 2;
-                let ty = params.y + (params.height - glyph_h) / 2;
-                draw_pixel_label(canvas, theme, &params.label, tx, ty, tw + 2, fg);
+                let ty = params.y + (params.height - 5 * scale) / 2;
+                draw_pixel_label_scaled(canvas, theme, &label, tx, ty, (params.width - 4).max(0), fg, scale);
             }
         }
     }

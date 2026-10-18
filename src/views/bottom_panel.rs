@@ -23,6 +23,7 @@ pub fn draw_bottom_panel(
     let panel_h = state.bottom_panel_effective_h();
     let panel_y = total_h - panel_h;
     let handle_h = state.bottom_panel_handle_h();
+    let tab_w = (6 * (4 * state.font_scale + 1) + 12).max(66);
 
     // ── Handle (drag zone + tab bar) ──
     let handle_hover = input.mouse_in_rect(0, panel_y, w, handle_h + 4);
@@ -41,8 +42,8 @@ pub fn draw_bottom_panel(
     canvas.set_draw_color(handle_bg);
     let _ = canvas.fill_rect(Rect::new(0, panel_y, w as u32, handle_h as u32));
 
-    // Grip dots in center of handle — highlight zone when hovered for double-click
-    {
+    // Hide the grip when wide tab labels occupy its space.
+    if w / 2 - 30 > 6 + 4 * (tab_w + 3) {
         let gx = w / 2 - 20;
         let dots_hover = input.mouse_in_rect(w / 2 - 30, panel_y, 60, handle_h);
         let dot_color = if dots_hover {
@@ -95,7 +96,6 @@ pub fn draw_bottom_panel(
 
     // Drag to resize (only when close wasn't clicked AND mouse is not over a tab button)
     let close_area = input.mouse_in_rect(w - 30, panel_y, 30, handle_h + 4);
-    let tab_w = 56i32;
     let tab_h = handle_h - 4;
     let tab_start_x = 6i32;
     let num_tabs = 4i32;

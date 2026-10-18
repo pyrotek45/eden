@@ -31,7 +31,7 @@ pub(super) fn draw_overlays(
             input,
             &state.theme,
             200,
-            424,
+            440,
             10,
             52,
             28,

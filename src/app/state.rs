@@ -617,8 +617,8 @@ pub struct AppState {
     pub mixer_scroll_x: f32,
     /// Horizontal scroll offset for bottom panel mixer (pixels)
     pub bottom_mixer_scroll_x: f32,
-    /// Tracks in slim mixer mode (show only vol, pan, meter)
-    pub mixer_slim_tracks: std::collections::HashSet<u32>,
+    /// Tracks expanded to show channel-strip controls; other tracks use the slim mixer.
+    pub mixer_expanded_tracks: std::collections::HashSet<u32>,
     /// Index of rack slot being dragged for reordering (source index)
     pub rack_reorder_drag: Option<usize>,
     /// Target insertion index while dragging
@@ -964,7 +964,7 @@ impl AppState {
             rack_scroll_x: 0.0,
             mixer_scroll_x: 0.0,
             bottom_mixer_scroll_x: 0.0,
-            mixer_slim_tracks: std::collections::HashSet::new(),
+            mixer_expanded_tracks: std::collections::HashSet::new(),
             rack_reorder_drag: None,
             rack_reorder_target: None,
             focused_panel: FocusedPanel::Arrangement,
@@ -1368,7 +1368,7 @@ impl AppState {
     // the visual magnification, so no ui_scale multiplication here).
 
     pub fn transport_bar_height(&self) -> i32 {
-        48
+        crate::widgets::transport_action_layout(self.window_width as i32, self.font_scale, self.piano_keyboard_mode).1
     }
     pub fn loop_ruler_height(&self) -> i32 {
         20
@@ -1392,6 +1392,8 @@ impl AppState {
 
     /// Minimum bottom panel height (collapsed = handle strip only).
     pub const BOTTOM_PANEL_HANDLE_H: i32 = 22;
+    /// Enough content space for a device header and four normal control rows.
+    pub const BOTTOM_PANEL_MIN_CONTENT_H: i32 = 360;
     pub fn bottom_panel_handle_h(&self) -> i32 {
         22
     }
@@ -1406,7 +1408,7 @@ impl AppState {
         if !self.bottom_panel_open {
             self.bottom_panel_handle_h()
         } else {
-            let min_h = self.bottom_panel_handle_h() + 60;
+            let min_h = (self.bottom_panel_handle_h() + Self::BOTTOM_PANEL_MIN_CONTENT_H).min(self.bottom_panel_max_h());
             let max_h = self.bottom_panel_max_h();
             self.bottom_panel_height.clamp(min_h, max_h)
         }
