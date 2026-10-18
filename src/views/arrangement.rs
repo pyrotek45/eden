@@ -64,7 +64,7 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     // The dropdown overlay (draw_overlays) processes item-click via
     // input.mouse_pressed directly, so consumed=true doesn't block it.
     if state.dropdown_open_id == 200 && layer == crate::app::state::UiLayer::Base {
-        let dd_x = 424i32;
+        let dd_x = 440i32;
         let dd_y = 10i32;
         let dd_w = 52i32;
         let dd_h = 28i32;

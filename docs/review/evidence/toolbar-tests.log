@@ -1,0 +1,9 @@
+   Compiling eden v0.1.0 (/workspace/eden)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.58s
+     Running unittests src/main.rs (target/debug/deps/eden-1ec80d6244b434cf)
+
+running 2 tests
+test widgets::row_layout::transport_tests::toolbar_reflows_without_covering_transport_or_other_actions ... ok
+test views::transport::toolbar_tests::toolbar_buttons_execute_actions_and_disabled_record_cannot_arm ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 562 filtered out; finished in 0.01s

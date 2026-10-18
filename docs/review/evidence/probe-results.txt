@@ -1,0 +1,9 @@
+SINGLE_RIGHT resized [5.0, 6.0]
+SINGLE_RIGHT undo [5.0, 6.0] expected [4,6]
+MULTI_LEFT frame1 [3.0, 5.0]
+MULTI_LEFT same cursor frame2 [2.0, 4.0] expected [3,5]
+SHIFT_STRETCH length=8 note_start=1 note_length=0.5 (notes unchanged)
+INVALID_COPY target_valid=false audio_track_clips=1 expected 0
+GROUP_MOVE_LEFT starts=[0.0, 0.0] expected preserved spacing
+STEREO counterphase load_audio peak=0 (original L=.5 R=-.5)
+AUDIO_SNAPSHOT_CLONE tracks=1 clips=100 notes=3200 allocations=106 bytes=83116

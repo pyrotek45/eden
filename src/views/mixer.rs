@@ -11,6 +11,16 @@ use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
+/// A device column must fit both its parameter caption and every selector option.
+fn rack_cell_width(slot: &crate::app::models::RackSlot, font_scale: i32) -> i32 {
+    let descriptions = crate::modules::get_param_descs(&slot.plugin_name);
+    let name_chars = slot.params.iter().map(|p| p.name.chars().count()).max().unwrap_or(0);
+    let option_chars = descriptions.iter().filter_map(|p| p.options)
+        .flat_map(|options| options.iter()).map(|s| s.chars().count()).max().unwrap_or(0);
+    // Include selector borders and inner padding in addition to glyph advances.
+    ((name_chars.max(option_chars) as i32 * (4 * font_scale + 1)) + 24).max(80)
+}
+
 pub(crate) fn meter_color(db: f64) -> sdl2::pixels::Color {
     if db >= 0.0 {
         sdl2::pixels::Color::RGBA(220, 40, 30, 240)
@@ -198,7 +208,7 @@ pub(super) fn draw_bottom_mixer(
             if t.track_type == crate::app::models::TrackType::Automation {
                 continue;
             }
-            let sw = if state.mixer_slim_tracks.contains(&t.id) {
+            let sw = if !state.mixer_expanded_tracks.contains(&t.id) {
                 strip_w_slim
             } else {
                 strip_w_full
@@ -225,8 +235,8 @@ pub(super) fn draw_bottom_mixer(
             continue;
         }
 
-        let is_slim = state
-            .mixer_slim_tracks
+        let is_slim = !state
+            .mixer_expanded_tracks
             .contains(&state.project.tracks[i].id);
         let strip_w = if is_slim { strip_w_slim } else { strip_w_full };
         let x = strip_x_accum - scroll_offset;
@@ -297,9 +307,9 @@ pub(super) fn draw_bottom_mixer(
         );
         if expand_clicked {
             if is_slim {
-                state.mixer_slim_tracks.remove(&track_id);
+                state.mixer_expanded_tracks.insert(track_id);
             } else {
-                state.mixer_slim_tracks.insert(track_id);
+                state.mixer_expanded_tracks.remove(&track_id);
             }
         }
 
@@ -1912,7 +1922,7 @@ pub(super) fn draw_instrument_rack(
                              // Modules maintain a comfortable minimum height and overflow/clip gracefully
                              // rather than squishing when the panel is short
     let natural_h = (h - 40 - scrollbar_h).max(60);
-    let slot_h = natural_h.max(300); // tall enough for 4 rows of knobs (need ~266px)
+    let slot_h = natural_h.max(96); // Short panels use more columns, not hidden knob rows.
     let slot_gap = 8i32;
     let scroll_offset = state.rack_scroll_x as i32;
     let mut sx = 10i32 - scroll_offset;
@@ -1947,18 +1957,17 @@ pub(super) fn draw_instrument_rack(
         let plugin_name_ref = &state.project.tracks[ti].rack[slot_idx].plugin_name;
         let _param_descs = crate::modules::get_param_descs(plugin_name_ref);
         let param_count = state.project.tracks[ti].rack[slot_idx].params.len();
-        // Calculate columns so that we have max 4 rows
-        // cols = ceil(param_count / 4)
+        // Use as many columns as needed to keep every parameter row visible.
         let _is_inst = crate::modules::is_instrument(plugin_name_ref);
         let is_sampler = plugin_name_ref == "Sampler";
-        let max_rows = 4usize;
+        let max_rows = ((slot_h - 74) / 64 + 1).clamp(1, 4) as usize;
         let cols = if param_count == 0 {
             2
         } else {
             param_count.div_ceil(max_rows)
         }
         .max(2);
-        let knob_cell_w = 80i32;
+        let knob_cell_w = rack_cell_width(&state.project.tracks[ti].rack[slot_idx], state.font_scale);
         let knob_cols_w = cols as i32 * knob_cell_w + 20;
 
         // Decide if we show an effect visual panel on the right side.
@@ -4161,12 +4170,10 @@ pub(super) fn draw_master_rack(
 
     let scrollbar_h = 18i32;
     let natural_h = (h - 40 - scrollbar_h).max(60);
-    let slot_h = natural_h.max(300); // tall enough for 4 rows of knobs (need ~266px)
+    let slot_h = natural_h.max(96); // Short panels use more columns, not hidden knob rows.
     let slot_gap = 8i32;
     let scroll_offset = state.rack_scroll_x as i32;
     let mut sx = 10i32 - scroll_offset;
-    let knob_cell_w = 80i32;
-
     canvas.set_clip_rect(Rect::new(0, top + 20, rack_w as u32, (slot_h + 24) as u32));
 
     for slot_idx in 0..slot_count {
@@ -4192,7 +4199,8 @@ pub(super) fn draw_master_rack(
         let sy = top + 24;
         let plugin_name = state.project.master_rack[slot_idx].plugin_name.clone();
         let param_count = state.project.master_rack[slot_idx].params.len();
-        let max_rows = 4usize;
+        let knob_cell_w = rack_cell_width(&state.project.master_rack[slot_idx], state.font_scale);
+        let max_rows = ((slot_h - 74) / 64 + 1).clamp(1, 4) as usize;
         let cols = if param_count == 0 {
             2
         } else {

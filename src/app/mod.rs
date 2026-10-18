@@ -6,6 +6,7 @@
 pub mod commands;
 pub mod config;
 pub mod input;
+mod history;
 pub mod models;
 pub mod state;
 
