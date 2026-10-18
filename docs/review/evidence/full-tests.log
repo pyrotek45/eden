@@ -569,4 +569,3 @@ test tests::test_render_volume_scales_linearly ... ok
 test tests::test_render_zero_volume_silent ... ok
 
 test result: ok. 564 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 77.99s
-
