@@ -575,11 +575,6 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
         let mut cb_track_rms_r: Vec<f32> = Vec::with_capacity(64);
         let mut cb_preview_rms: Vec<f32> = Vec::with_capacity(64);
         let mut cb_preview_rms_pre: Vec<f32> = Vec::with_capacity(64);
-        // Preview sample (file browser) RMS accumulators
-        #[allow(unused_assignments)]
-        let mut cb_preview_sample_rms_l: f32 = 0.0;
-        #[allow(unused_assignments)]
-        let mut cb_preview_sample_rms_r: f32 = 0.0;
         // Arp scratch — reused per-track per-sample.
         let mut cb_arp_active_pitches: Vec<u8> = Vec::with_capacity(32);
         let mut cb_arp_pool: Vec<u8> = Vec::with_capacity(64);
@@ -876,15 +871,16 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                     }
 
                     // Accumulate preview sample RMS for the preview meter strip
-                    cb_preview_sample_rms_l = 0.0;
-                    cb_preview_sample_rms_r = 0.0;
+                    // These sums belong to this buffer only, not closure state.
+                    let mut preview_sample_rms_l: f32 = 0.0;
+                    let mut preview_sample_rms_r: f32 = 0.0;
                     if snap.preview_playing && !snap.preview_samples.is_empty() && frames > 0 {
                         for fi in 0..frames {
-                            cb_preview_sample_rms_l += frame_samples_l[fi] * frame_samples_l[fi];
-                            cb_preview_sample_rms_r += frame_samples_r[fi] * frame_samples_r[fi];
+                            preview_sample_rms_l += frame_samples_l[fi] * frame_samples_l[fi];
+                            preview_sample_rms_r += frame_samples_r[fi] * frame_samples_r[fi];
                         }
-                        cb_preview_sample_rms_l = (cb_preview_sample_rms_l / frames as f32).sqrt();
-                        cb_preview_sample_rms_r = (cb_preview_sample_rms_r / frames as f32).sqrt();
+                        preview_sample_rms_l = (preview_sample_rms_l / frames as f32).sqrt();
+                        preview_sample_rms_r = (preview_sample_rms_r / frames as f32).sqrt();
                     }
 
                     // ── Process preview voices (note preview) even when stopped ──
@@ -1402,8 +1398,8 @@ pub fn start_audio_engine() -> Result<(SharedAudio, Arc<AtomicU64>), String> {
                         }
                         s.osc_write %= osc_len;
                         // Write preview sample RMS for preview meter strip
-                        s.preview_rms_l = s.preview_rms_l * 0.85 + cb_preview_sample_rms_l * 0.15;
-                        s.preview_rms_r = s.preview_rms_r * 0.85 + cb_preview_sample_rms_r * 0.15;
+                        s.preview_rms_l = s.preview_rms_l * 0.85 + preview_sample_rms_l * 0.15;
+                        s.preview_rms_r = s.preview_rms_r * 0.85 + preview_sample_rms_r * 0.15;
                         if s.preview_rms_l < 0.0005 {
                             s.preview_rms_l = 0.0;
                         }

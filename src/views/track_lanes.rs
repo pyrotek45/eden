@@ -483,12 +483,8 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         sdl2::rect::Point::new(clip_right, py),
                     );
                 }
-                // Restore previous clip rect
-                if let Some(r) = prev_clip_rect {
-                    canvas.set_clip_rect(Rect::new(r.x(), r.y(), r.width(), r.height()));
-                } else {
-                    canvas.set_clip_rect(None);
-                }
+                // Restore the full clipping state, including an empty or disabled rect.
+                canvas.set_clip_rect(prev_clip_rect);
             }
 
             // ── Audio waveform mini-preview ──
