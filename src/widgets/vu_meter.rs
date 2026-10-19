@@ -1,6 +1,6 @@
+use super::GfxRenderer;
 // Eden DAW — VU Meter widget
 
-use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
@@ -57,7 +57,7 @@ pub fn vu_meter(
     let cy_i16 = arc_cy as i16;
 
     // Draw arc tracks
-    let _ = canvas.arc(
+    let _ = canvas.gfx_arc(
         cx_i16,
         cy_i16,
         arc_r_i16,
@@ -66,7 +66,7 @@ pub fn vu_meter(
         sdl2::pixels::Color::RGBA(65, 70, 80, 200),
     );
     if arc_r_i16 > 2 {
-        let _ = canvas.arc(
+        let _ = canvas.gfx_arc(
             cx_i16,
             cy_i16,
             arc_r_i16 - 1,
@@ -135,7 +135,7 @@ pub fn vu_meter(
     {
         let zero_frac = 20.0 / 23.0;
         let red_start = start_deg + zero_frac * sweep;
-        let _ = canvas.arc(
+        let _ = canvas.gfx_arc(
             cx_i16,
             cy_i16,
             arc_r_i16,
@@ -144,7 +144,7 @@ pub fn vu_meter(
             sdl2::pixels::Color::RGBA(180, 50, 40, 160),
         );
         if arc_r_i16 > 3 {
-            let _ = canvas.arc(
+            let _ = canvas.gfx_arc(
                 cx_i16,
                 cy_i16,
                 arc_r_i16 - 1,
@@ -191,14 +191,14 @@ pub fn vu_meter(
         let pdy = pky - vis_pivot_y;
         let pdist = (pdx * pdx + pdy * pdy).sqrt();
         if pdist > 2.0 && pp > 0.01 {
-            let _ = canvas.aa_line(
+            let _ = canvas.gfx_aa_line(
                 vis_pivot_x as i16,
                 vis_pivot_y as i16,
                 pkx as i16,
                 pky as i16,
                 sdl2::pixels::Color::RGBA(230, 50, 35, 200),
             );
-            let _ = canvas.aa_line(
+            let _ = canvas.gfx_aa_line(
                 vis_pivot_x as i16 + 1,
                 vis_pivot_y as i16,
                 pkx as i16 + 1,
@@ -212,7 +212,7 @@ pub fn vu_meter(
     let dy = ny - vis_pivot_y;
     let dist = (dx * dx + dy * dy).sqrt();
     if dist > 2.0 {
-        let _ = canvas.aa_line(
+        let _ = canvas.gfx_aa_line(
             vis_pivot_x as i16,
             vis_pivot_y as i16 + 1,
             nx as i16 + 1,
@@ -229,14 +229,14 @@ pub fn vu_meter(
         } else {
             sdl2::pixels::Color::RGBA(235, 240, 245, 160)
         };
-        let _ = canvas.aa_line(
+        let _ = canvas.gfx_aa_line(
             vis_pivot_x as i16,
             vis_pivot_y as i16,
             nx as i16,
             ny as i16,
             needle_col,
         );
-        let _ = canvas.aa_line(
+        let _ = canvas.gfx_aa_line(
             vis_pivot_x as i16 + 1,
             vis_pivot_y as i16,
             nx as i16 + 1,
@@ -246,7 +246,7 @@ pub fn vu_meter(
     }
 
     // Pivot dot
-    let _ = canvas.filled_circle(
+    let _ = canvas.gfx_filled_circle(
         vis_pivot_x as i16,
         vis_pivot_y as i16,
         2,

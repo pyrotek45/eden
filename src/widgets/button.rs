@@ -1,6 +1,6 @@
+use super::GfxRenderer;
 // Eden DAW — Button widget
 
-use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
@@ -139,7 +139,7 @@ pub fn button(
             };
             let sz = (params.height as f32 * 0.3) as i16;
             let x1 = (icx - sz as i32 / 2) as i16;
-            let _ = canvas.filled_trigon(
+            let _ = canvas.gfx_filled_trigon(
                 x1,
                 (icy - sz as i32) as i16,
                 (icx + sz as i32) as i16,
@@ -175,7 +175,7 @@ pub fn button(
                 Theme::c(theme.record_color)
             };
             let sz = (params.height as f32 * 0.28) as i16;
-            let _ = canvas.filled_circle(icx as i16, icy as i16, sz, c);
+            let _ = canvas.gfx_filled_circle(icx as i16, icy as i16, sz, c);
         }
         ButtonIcon::Loop => {
             let c = if !params.enabled {
@@ -223,7 +223,7 @@ pub fn button(
             );
             let ax = icx + hw - 1;
             let ay = icy - hh;
-            let _ = canvas.filled_trigon(
+            let _ = canvas.gfx_filled_trigon(
                 ax as i16,
                 (ay - 3) as i16,
                 (ax + 4) as i16,
@@ -234,7 +234,7 @@ pub fn button(
             );
             let bx = icx - hw + 1;
             let by = icy + hh;
-            let _ = canvas.filled_trigon(
+            let _ = canvas.gfx_filled_trigon(
                 bx as i16,
                 (by - 3) as i16,
                 (bx - 4) as i16,
@@ -247,7 +247,7 @@ pub fn button(
         ButtonIcon::Rewind => {
             let c = fg;
             let sz = (params.height as f32 * 0.25) as i16;
-            let _ = canvas.filled_trigon(
+            let _ = canvas.gfx_filled_trigon(
                 (icx + 2) as i16,
                 (icy - sz as i32) as i16,
                 (icx - sz as i32 + 2) as i16,
@@ -267,7 +267,7 @@ pub fn button(
         ButtonIcon::AutoReturn => {
             let c = fg;
             let sz = (params.height as f32 * 0.25) as i16;
-            let _ = canvas.filled_trigon(
+            let _ = canvas.gfx_filled_trigon(
                 icx as i16,
                 (icy - sz as i32 + 2) as i16,
                 (icx - sz as i32) as i16,

@@ -2233,11 +2233,11 @@ pub(super) fn draw_instrument_rack(
                 let hover = input.mouse_in_rect(sel_x, sel_y, sel_w, sel_h);
                 let dragging = input.drag_widget == knob_id;
                 let bg_color = if dragging {
-                    sdl2::pixels::Color::RGBA(70, 80, 110, 255)
+                    Theme::c(state.theme.bg_light)
                 } else if hover {
-                    sdl2::pixels::Color::RGBA(60, 65, 80, 255)
+                    Theme::c(state.theme.button_hover)
                 } else {
-                    sdl2::pixels::Color::RGBA(40, 44, 56, 255)
+                    Theme::c(state.theme.button_bg)
                 };
                 canvas.set_draw_color(bg_color);
                 let _ = canvas.fill_rect(Rect::new(sel_x, sel_y, sel_w as u32, sel_h as u32));
@@ -2677,9 +2677,9 @@ pub(super) fn draw_instrument_rack(
                 let sc_btn_h = 14;
                 let sc_hover = input.mouse_in_rect(sc_btn_x, sc_y, sc_btn_w, sc_btn_h);
                 let sc_bg = if sc_hover {
-                    sdl2::pixels::Color::RGBA(60, 65, 90, 255)
+                    Theme::c(state.theme.button_hover)
                 } else {
-                    sdl2::pixels::Color::RGBA(35, 38, 50, 255)
+                    Theme::c(state.theme.button_bg)
                 };
                 canvas.set_draw_color(sc_bg);
                 let _ =
@@ -4382,11 +4382,11 @@ pub(super) fn draw_master_rack(
                 let hover = input.mouse_in_rect(sel_x, sel_y, sel_w, sel_h);
                 let dragging = input.drag_widget == knob_id;
                 canvas.set_draw_color(if dragging {
-                    sdl2::pixels::Color::RGBA(70, 80, 110, 255)
+                    Theme::c(state.theme.bg_light)
                 } else if hover {
-                    sdl2::pixels::Color::RGBA(60, 65, 80, 255)
+                    Theme::c(state.theme.button_hover)
                 } else {
-                    sdl2::pixels::Color::RGBA(40, 44, 56, 255)
+                    Theme::c(state.theme.button_bg)
                 });
                 let _ = canvas.fill_rect(Rect::new(sel_x, sel_y, sel_w as u32, sel_h as u32));
                 canvas.set_draw_color(Theme::c(state.theme.panel_border));

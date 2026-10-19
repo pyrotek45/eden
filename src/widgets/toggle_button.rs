@@ -6,7 +6,7 @@ use sdl2::video::Window;
 
 use crate::app::input::{InputState, WidgetId};
 use crate::theme::Theme;
-use crate::widgets::draw_pixel_label;
+use crate::widgets::{draw_pixel_label_scaled, get_font_scale};
 
 #[allow(clippy::too_many_arguments)]
 pub fn toggle_button(
@@ -57,10 +57,11 @@ pub fn toggle_button(
         } else {
             Theme::c(theme.button_text)
         };
-        let lw = (label.len() as i32 * 9).min(size - 4);
+        let scale = get_font_scale().min(((size - 4) / 5).max(1));
+        let lw = (label.chars().count() as i32 * (4 * scale + scale / 2)).min(size - 4);
         let lx = x + (size - lw) / 2;
-        let ly = y + (size - 10) / 2;
-        draw_pixel_label(canvas, theme, label, lx, ly, lw + 2, fg);
+        let ly = y + (size - 5 * scale) / 2;
+        draw_pixel_label_scaled(canvas, theme, label, lx, ly, lw + 2, fg, scale);
     }
 
     clicked

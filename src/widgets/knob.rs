@@ -1,6 +1,6 @@
+use super::GfxRenderer;
 // Eden DAW — Knob widget
 
-use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
@@ -156,7 +156,7 @@ pub fn knob(
     }
 
     // Shadow
-    let _ = canvas.filled_circle(cx, cy + 1, r + 1, sdl2::pixels::Color::RGBA(0, 0, 0, 50));
+    let _ = canvas.gfx_filled_circle(cx, cy + 1, r + 1, sdl2::pixels::Color::RGBA(0, 0, 0, 50));
 
     // Outer ring
     let outer_color = if is_active {
@@ -166,7 +166,7 @@ pub fn knob(
     } else {
         Theme::c(theme.panel_border)
     };
-    let _ = canvas.filled_circle(cx, cy, r, outer_color);
+    let _ = canvas.gfx_filled_circle(cx, cy, r, outer_color);
 
     // Main body
     let body_r = r - 2;
@@ -180,7 +180,7 @@ pub fn knob(
     } else {
         Theme::c(theme.knob_bg)
     };
-    let _ = canvas.filled_circle(cx, cy, body_r, body_color);
+    let _ = canvas.gfx_filled_circle(cx, cy, body_r, body_color);
 
     // Value arc
     let t = inv_lerp(params.min, params.max, *value);
@@ -247,7 +247,7 @@ pub fn knob(
     } else {
         Theme::c(theme.knob_indicator)
     };
-    let _ = canvas.thick_line(px1 as i16, py1 as i16, px2 as i16, py2 as i16, 2, ptr_col);
+    let _ = canvas.gfx_thick_line(px1 as i16, py1 as i16, px2 as i16, py2 as i16, 2, ptr_col);
 
     // Center dot
     let dot_col = if is_active {
@@ -255,13 +255,13 @@ pub fn knob(
     } else {
         Theme::c(theme.knob_fg)
     };
-    let _ = canvas.filled_circle(cx, cy, 2, dot_col);
+    let _ = canvas.gfx_filled_circle(cx, cy, 2, dot_col);
 
     // Active glow
     if is_active {
         let glow = sdl2::pixels::Color::RGBA(theme.accent[0], theme.accent[1], theme.accent[2], 35);
-        let _ = canvas.aa_circle(cx, cy, r + 3, glow);
-        let _ = canvas.aa_circle(cx, cy, r + 4, glow);
+        let _ = canvas.gfx_aa_circle(cx, cy, r + 3, glow);
+        let _ = canvas.gfx_aa_circle(cx, cy, r + 4, glow);
     }
 
     // Value display below knob

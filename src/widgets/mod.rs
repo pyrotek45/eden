@@ -6,6 +6,12 @@
 // Each widget lives in its own sub-module for easy navigation.
 // This mod.rs re-exports everything so `use crate::widgets::*` continues to work.
 
+mod gfx;
+pub(crate) use gfx::GfxRenderer;
+
+mod audio_toolbar;
+pub use audio_toolbar::*;
+
 mod button;
 mod clip_widgets;
 mod comp_curve;
@@ -83,21 +89,26 @@ pub(crate) fn draw_thick_arc(
     thickness: i32,
     color: sdl2::pixels::Color,
 ) {
-    use sdl2::gfx::primitives::DrawRenderer;
-    let steps = ((end_deg - start_deg).abs() / 3.0).max(8.0) as i32;
-    let step_a = (end_deg - start_deg) / steps as f64;
-    for t in -(thickness / 2)..=(thickness / 2) {
-        let r = radius + t as f64;
-        for i in 0..steps {
-            let a1 = (start_deg + i as f64 * step_a).to_radians();
-            let a2 = (start_deg + (i + 1) as f64 * step_a).to_radians();
-            let _ = canvas.aa_line(
-                (cx + a1.cos() * r) as i16,
-                (cy + a1.sin() * r) as i16,
-                (cx + a2.cos() * r) as i16,
-                (cy + a2.sin() * r) as i16,
-                color,
-            );
+    // A knob arc contains hundreds of segments; preserve state around the whole
+    // batch instead of querying/resetting SDL renderer state for every segment.
+    gfx::with_gfx_state(canvas, |canvas| {
+        use sdl2::gfx::primitives::DrawRenderer;
+        let color = gfx::gfx_color(color);
+        let steps = ((end_deg - start_deg).abs() / 3.0).max(8.0) as i32;
+        let step_a = (end_deg - start_deg) / steps as f64;
+        for t in -(thickness / 2)..=(thickness / 2) {
+            let r = radius + t as f64;
+            for i in 0..steps {
+                let a1 = (start_deg + i as f64 * step_a).to_radians();
+                let a2 = (start_deg + (i + 1) as f64 * step_a).to_radians();
+                let _ = canvas.aa_line(
+                    (cx + a1.cos() * r) as i16,
+                    (cy + a1.sin() * r) as i16,
+                    (cx + a2.cos() * r) as i16,
+                    (cy + a2.sin() * r) as i16,
+                    color,
+                );
+            }
         }
-    }
+    });
 }

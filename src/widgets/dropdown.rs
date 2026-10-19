@@ -6,7 +6,7 @@ use sdl2::video::Window;
 
 use crate::app::input::InputState;
 use crate::theme::Theme;
-use crate::widgets::draw_pixel_label;
+use crate::widgets::{draw_pixel_label, get_font_scale};
 
 #[allow(clippy::too_many_arguments)]
 pub fn dropdown(
@@ -69,9 +69,9 @@ pub fn dropdown(
         theme,
         label,
         x + 4,
-        y + (h - 10) / 2,
+        y + (h - 5 * get_font_scale()) / 2,
         w - 18,
-        sdl2::pixels::Color::RGBA(220, 220, 220, 255),
+        Theme::c(theme.button_text),
     );
 
     // Arrow chevron
@@ -119,12 +119,12 @@ pub fn dropdown(
                 theme,
                 opt,
                 x + 6,
-                iy + (item_h - 10) / 2,
+                iy + (item_h - 5 * get_font_scale()) / 2,
                 w - 10,
                 if i == *selected {
                     Theme::c(theme.accent)
                 } else {
-                    sdl2::pixels::Color::RGBA(210, 210, 210, 255)
+                    Theme::c(theme.text_primary)
                 },
             );
 
@@ -197,12 +197,12 @@ pub fn dropdown_popup_overlay(
             theme,
             opt,
             x + 6,
-            iy + (item_h - 10) / 2,
+            iy + (item_h - 5 * get_font_scale()) / 2,
             w - 10,
             if i == selected {
                 Theme::c(theme.accent)
             } else {
-                sdl2::pixels::Color::RGBA(210, 210, 210, 255)
+                Theme::c(theme.text_primary)
             },
         );
     }

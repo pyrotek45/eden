@@ -66,7 +66,7 @@ Acceptance includes switching between every editor while editing linked and uniq
 
 ## Visual follow-up recorded during validation
 
-At 800×700 with an audio clip open in the bottom Edit panel, the audio toolbar's later controls extend beyond the right window edge. A toolbar layout pass must wrap controls into measured rows (including UNIQUE when linked) and derive waveform/ruler positions from the resulting height. Acceptance: every tool, parameter and popup remains visible/reachable at 520, 800 and default widths, with no overlap and correct pointer coordinates. This existing audio-editor layout defect is recorded separately from the arranger transaction repair.
+The audio-toolbar overflow observed at 800×700 is repaired by the measured wrapping layout in [ui-controls.md](ui-controls.md), including UNIQUE and dropdown overlay positions. The full Edit-page sidebar issue remains separate. Audio/project history is still split: FIT stores a project snapshot, while focused audio Undo reads the file-history stack. A separate history pass must make interleaved file/clip-parameter edits undo in the user's actual edit order.
 
 ## Validation of this patch
 
