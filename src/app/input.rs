@@ -24,6 +24,9 @@ pub enum WidgetId {
     LeftPanelScrollbar,
     LeftPanelResize,
     ClipManagerScrollbar,
+    ChannelParam(u32, usize),
+    MixerChannelScroll(u32),
+    DeviceParam(Option<u32>, u32, usize),
 }
 
 /// What kind of click was it?

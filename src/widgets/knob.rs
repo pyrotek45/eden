@@ -266,13 +266,13 @@ pub fn knob(
 
     // Value display below knob
     let below_y = params.y + params.radius + 3;
-    if is_active || hover {
+    if is_active || hover || params.label.is_some() {
         let val_str = if (params.max - params.min).abs() > 10.0 {
             format!("{:.1}", *value)
         } else {
             format!("{:.2}", *value)
         };
-        let val_w = val_str.len() as i32 * 9 + 2;
+        let val_w = val_str.len() as i32 * (4 * super::get_font_scale() + 1) + 2;
         let val_x = params.x - val_w / 2;
         let val_col = Theme::c(theme.accent);
         draw_pixel_label(canvas, theme, &val_str, val_x, below_y, val_w + 4, val_col);
@@ -280,15 +280,10 @@ pub fn knob(
 
     // Label below the knob
     if let Some(ref label) = params.label {
-        let label_scale = 1i32;
-        let glyph_w = 4 * label_scale * 2 + 1;
+        let glyph_w = 4 * super::get_font_scale() + 1;
         let label_px_w = label.len() as i32 * glyph_w;
         let label_x = params.x - label_px_w / 2;
-        let label_y = if is_active || hover {
-            below_y + 12
-        } else {
-            below_y
-        };
+        let label_y = below_y + 5 * super::get_font_scale() + 3;
         let label_col = if is_active {
             Theme::c(theme.accent)
         } else if hover {
