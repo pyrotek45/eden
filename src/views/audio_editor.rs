@@ -167,8 +167,38 @@ pub(super) fn draw_audio_editor(
     let clip_win_start_secs = clip_offset_secs.min(total_secs);
     let clip_win_end_secs = (clip_offset_secs + clip_len_secs).min(total_secs);
 
+    let is_clone = if !source_file.is_empty() {
+        let sf = &source_file;
+        let mut count = 0usize;
+        for track in &state.project.tracks {
+            for clip in &track.clips {
+                if let crate::app::models::Clip::Audio(ac) = clip {
+                    if ac.source_file == *sf {
+                        count += 1;
+                        if count > 1 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if count > 1 {
+                break;
+            }
+        }
+        count > 1
+    } else {
+        false
+    };
     // ── Layout constants ─────────────────────────────────────────────
-    let toolbar_h = 28i32;
+    use AudioControl::*;
+    let toolbar = audio_toolbar_layout(w, get_font_scale(), is_clone);
+    let control = |id| {
+        let mut rect = toolbar.control(id);
+        rect.set_y(rect.y() + top);
+        rect
+    };
+    let toolbar_h = toolbar.height;
+    let control_h = control(Rewind).height() as i32;
     let loop_ruler_h = 14i32; // NEW: loop region bar
     let ruler_h = 20i32;
     let info_h = 18i32;
@@ -214,13 +244,13 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             &ButtonParams {
                 id: __auto_id_rw,
-                x: 6,
-                y: top + 4,
-                width: 22,
-                height: 20,
+                x: control(Rewind).x(),
+                y: control(Rewind).y(),
+                width: control(Rewind).width() as i32,
+                height: control_h,
                 label: "|◀".into(),
                 toggled: false,
-                icon: ButtonIcon::None,
+                icon: ButtonIcon::Rewind,
                 hint: Some("Rewind to start".into()),
                 ..Default::default()
             },
@@ -254,13 +284,13 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             &ButtonParams {
                 id: __auto_id_stop,
-                x: 30,
-                y: top + 4,
-                width: 22,
-                height: 20,
+                x: control(Stop).x(),
+                y: control(Stop).y(),
+                width: control(Stop).width() as i32,
+                height: control_h,
                 label: "■".into(),
                 toggled: false,
-                icon: ButtonIcon::None,
+                icon: ButtonIcon::Stop,
                 hint: Some("Stop playback".into()),
                 ..Default::default()
             },
@@ -281,13 +311,13 @@ pub(super) fn draw_audio_editor(
         &state.theme,
         &ButtonParams {
             id: __auto_id_56,
-            x: 54,
-            y: top + 4,
-            width: 22,
-            height: 20,
+            x: control(Play).x(),
+            y: control(Play).y(),
+            width: control(Play).width() as i32,
+            height: control_h,
             label: "▶".into(),
             toggled: is_previewing,
-            icon: ButtonIcon::None,
+            icon: ButtonIcon::Play,
             hint: Some("Play / pause preview".into()),
             ..Default::default()
         },
@@ -343,9 +373,9 @@ pub(super) fn draw_audio_editor(
             canvas,
             input,
             &state.theme,
-            80,
-            top + 4,
-            20,
+            control(Loop).x(),
+            control(Loop).y(),
+            control_h,
             state.theme.loop_color,
             state.audio_editor_loop_enabled,
             loop_id,
@@ -359,28 +389,6 @@ pub(super) fn draw_audio_editor(
 
     // ── Make Unique button ──
     // Only available when the current clip's source_file is shared by another clip.
-    let is_clone = if !source_file.is_empty() {
-        let sf = &source_file;
-        let mut count = 0usize;
-        for track in &state.project.tracks {
-            for clip in &track.clips {
-                if let crate::app::models::Clip::Audio(ac) = clip {
-                    if ac.source_file == *sf {
-                        count += 1;
-                        if count > 1 {
-                            break;
-                        }
-                    }
-                }
-            }
-            if count > 1 {
-                break;
-            }
-        }
-        count > 1
-    } else {
-        false
-    };
     if is_clone {
         let unique_id = input.next_id();
         let unique_clicked = button(
@@ -389,10 +397,10 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             &ButtonParams {
                 id: unique_id,
-                x: 106,
-                y: top + 4,
-                width: 52,
-                height: 20,
+                x: control(Unique).x(),
+                y: control(Unique).y(),
+                width: control(Unique).width() as i32,
+                height: control_h,
                 label: "UNIQUE".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
@@ -454,7 +462,6 @@ pub(super) fn draw_audio_editor(
 
     // Toolbar buttons — SEL, NORM, TRIM, FIT, CUT, PASTE
     let tool_labels = ["SEL", "NORM", "TRIM", "FIT", "CUT", "PASTE"];
-    let mut bx = if is_clone { 164i32 } else { 106i32 };
 
     // ── Keyboard shortcuts for toolbar tools (left-hand keys) ────────
     // Q=SEL(all), W=NORM, E=TRIM, R=FIT, T=CUT, Y=PASTE
@@ -521,7 +528,8 @@ pub(super) fn draw_audio_editor(
         "Paste — insert clipboard audio at playhead position (Y)",
     ];
     for (i, &label) in tool_labels.iter().enumerate() {
-        let bw = (label.len() as i32 * 8 + 12).max(40);
+        let rect = control([Select, Normalize, Trim, Fit, Cut, Paste][i]);
+        let bw = rect.width() as i32;
         let __auto_id_57 = input.next_id();
         let clicked = button(
             canvas,
@@ -529,10 +537,10 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             &ButtonParams {
                 id: __auto_id_57,
-                x: bx,
-                y: top + 4,
+                x: rect.x(),
+                y: rect.y(),
                 width: bw,
-                height: 20,
+                height: control_h,
                 label: label.into(),
                 toggled: false,
                 icon: ButtonIcon::None,
@@ -972,7 +980,6 @@ pub(super) fn draw_audio_editor(
                 _ => {}
             }
         }
-        bx += bw + 4;
     }
 
     // ── Audio editor snap toggle ──────────────────────────────────────
@@ -982,9 +989,9 @@ pub(super) fn draw_audio_editor(
             canvas,
             input,
             &state.theme,
-            bx,
-            top + 4,
-            20,
+            control(Snap).x(),
+            control(Snap).y(),
+            control_h,
             state.theme.accent,
             state.audio_editor_snap_enabled,
             snap_id,
@@ -994,11 +1001,10 @@ pub(super) fn draw_audio_editor(
         if snap_clicked {
             state.audio_editor_snap_enabled = !state.audio_editor_snap_enabled;
         }
-        bx += 24;
     }
 
     // ── Audio editor snap resolution dropdown ─────────────────────────
-    let snap_dropdown_x = bx;
+    let snap_rect = control(Grid);
     {
         let snap_labels: Vec<&str> = SNAP_RESOLUTIONS.iter().map(|(l, _)| *l).collect();
         let changed = dropdown(
@@ -1006,32 +1012,33 @@ pub(super) fn draw_audio_editor(
             input,
             &state.theme,
             7073,
-            snap_dropdown_x,
-            top + 4,
-            56,
-            20,
+            snap_rect.x(),
+            snap_rect.y(),
+            snap_rect.width() as i32,
+            control_h,
             &snap_labels,
             &mut state.audio_editor_snap_idx,
             &mut state.dropdown_open_id,
         );
         let _ = changed;
-        bx += 60;
     }
 
     // ── Gain slider in toolbar ────────────────────────────────────────
     {
         let slider_w = 70i32;
         let slider_h = 16i32;
-        let slider_x = bx;
-        let slider_y = top + 6;
+        let rect = control(Gain);
+        let label_w = 4 * toolbar.label_advance + 6;
+        let slider_x = rect.x();
+        let slider_y = rect.y() + (control_h - slider_h) / 2;
         let mut gain_val = clip_gain.clamp(0.0, 4.0);
         draw_pixel_label(
             canvas,
             &state.theme,
             "GAIN",
             slider_x,
-            slider_y - 1,
-            28,
+            rect.y() + (control_h - 5 * get_font_scale()) / 2,
+            label_w - 6,
             Theme::c(state.theme.text_secondary),
         );
         let gain_changed = slider(
@@ -1040,7 +1047,7 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             &SliderParams {
                 id: WidgetId::Auto(7070),
-                x: slider_x + 30,
+                x: slider_x + label_w,
                 y: slider_y,
                 width: slider_w,
                 height: slider_h,
@@ -1080,15 +1087,16 @@ pub(super) fn draw_audio_editor(
                 }
             }
         }
-        bx += 30 + slider_w + 8;
     }
 
     // ── Fade In slider ────────────────────────────────────────────────
     {
         let slider_w = 50i32;
         let slider_h = 16i32;
-        let slider_x = bx;
-        let slider_y = top + 6;
+        let rect = control(FadeIn);
+        let label_w = 3 * toolbar.label_advance + 6;
+        let slider_x = rect.x();
+        let slider_y = rect.y() + (control_h - slider_h) / 2;
         let max_fade = total_secs.min(10.0) as f32;
         let mut fade_val = (state.audio_editor_fade_in as f32).clamp(0.0, max_fade);
         draw_pixel_label(
@@ -1096,8 +1104,8 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             "FIN",
             slider_x,
-            slider_y - 1,
-            20,
+            rect.y() + (control_h - 5 * get_font_scale()) / 2,
+            label_w - 6,
             Theme::c(state.theme.text_secondary),
         );
         let fade_changed = slider(
@@ -1106,7 +1114,7 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             &SliderParams {
                 id: WidgetId::Auto(7075),
-                x: slider_x + 22,
+                x: slider_x + label_w,
                 y: slider_y,
                 width: slider_w,
                 height: slider_h,
@@ -1130,15 +1138,16 @@ pub(super) fn draw_audio_editor(
                 }
             }
         }
-        bx += 22 + slider_w + 6;
     }
 
     // ── Fade Out slider ───────────────────────────────────────────────
     {
         let slider_w = 50i32;
         let slider_h = 16i32;
-        let slider_x = bx;
-        let slider_y = top + 6;
+        let rect = control(FadeOut);
+        let label_w = 4 * toolbar.label_advance + 6;
+        let slider_x = rect.x();
+        let slider_y = rect.y() + (control_h - slider_h) / 2;
         let max_fade = total_secs.min(10.0) as f32;
         let mut fade_val = (state.audio_editor_fade_out as f32).clamp(0.0, max_fade);
         draw_pixel_label(
@@ -1146,8 +1155,8 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             "FOUT",
             slider_x,
-            slider_y - 1,
-            28,
+            rect.y() + (control_h - 5 * get_font_scale()) / 2,
+            label_w - 6,
             Theme::c(state.theme.text_secondary),
         );
         let fade_changed = slider(
@@ -1156,7 +1165,7 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             &SliderParams {
                 id: WidgetId::Auto(7076),
-                x: slider_x + 30,
+                x: slider_x + label_w,
                 y: slider_y,
                 width: slider_w,
                 height: slider_h,
@@ -1180,24 +1189,24 @@ pub(super) fn draw_audio_editor(
                 }
             }
         }
-        bx += 30 + slider_w + 8;
     }
 
     // ── Export button ────────────────────────────────────────────────
     {
         let export_id = input.next_id();
-        let export_w = 52i32;
+        let export_rect = control(Export);
+        let export_w = export_rect.width() as i32;
         let export_clicked = button(
             canvas,
             input,
             &state.theme,
             &ButtonParams {
                 id: export_id,
-                x: bx,
-                y: top + 4,
+                x: export_rect.x(),
+                y: export_rect.y(),
                 width: export_w,
-                height: 20,
-                label: "EXP".into(),
+                height: control_h,
+                label: "Export".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
                 hint: Some("Export audio clip to WAV file".into()),
@@ -1220,7 +1229,6 @@ pub(super) fn draw_audio_editor(
                 .unwrap_or_else(|| ".".to_string());
             state.audio_export_popup_open = true;
         }
-        bx += export_w + 4;
     }
 
     // ── Effects dropdown + APPLY button (right side of toolbar) ──────
@@ -1233,20 +1241,18 @@ pub(super) fn draw_audio_editor(
         "Gain -6dB",
         "Invert",
     ];
-    let fx_dropdown_w = 80i32;
-    let apply_w = 50i32;
-    let fx_area_w = fx_dropdown_w + 4 + apply_w;
-    let fx_x = w - fx_area_w - 8;
+    let fx_rect = control(Effect);
+    let apply_rect = control(Apply);
     {
         let _changed = dropdown(
             canvas,
             input,
             &state.theme,
             7074,
-            fx_x,
-            top + 4,
-            fx_dropdown_w,
-            20,
+            fx_rect.x(),
+            fx_rect.y(),
+            fx_rect.width() as i32,
+            control_h,
             &audio_fx_labels,
             &mut state.audio_editor_effect_idx,
             &mut state.dropdown_open_id,
@@ -1268,10 +1274,10 @@ pub(super) fn draw_audio_editor(
             &state.theme,
             &ButtonParams {
                 id: apply_id,
-                x: fx_x + fx_dropdown_w + 4,
-                y: top + 4,
-                width: apply_w,
-                height: 20,
+                x: apply_rect.x(),
+                y: apply_rect.y(),
+                width: apply_rect.width() as i32,
+                height: control_h,
                 label: "APPLY".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
@@ -1413,8 +1419,8 @@ pub(super) fn draw_audio_editor(
         }
     }
 
-    // Clip name + info (between left controls and right FX area)
-    let info_max_w = (fx_x - bx - 16).max(10);
+    // Context gets its own row; it never competes with clickable controls.
+    let info_max_w = toolbar.info.width() as i32;
     let info_str = format!(
         "{}   file:{:.1}s  window:{:.2}s",
         clip_name, total_secs, clip_len_secs,
@@ -1423,8 +1429,8 @@ pub(super) fn draw_audio_editor(
         canvas,
         &state.theme,
         &info_str,
-        bx + 8,
-        top + 8,
+        toolbar.info.x(),
+        top + toolbar.info.y() + 4,
         info_max_w,
         Theme::c(state.theme.text_primary),
     );
@@ -2329,11 +2335,11 @@ pub(super) fn draw_audio_editor(
             canvas,
             &state.theme,
             7073,
-            snap_dropdown_x,
-            top + 4,
-            56,
-            20,
-            56,
+            snap_rect.x(),
+            snap_rect.y(),
+            snap_rect.width() as i32,
+            control_h,
+            snap_rect.width() as i32,
             &snap_labels,
             state.audio_editor_snap_idx,
             state.dropdown_open_id,
@@ -2351,19 +2357,15 @@ pub(super) fn draw_audio_editor(
             "Gain -6dB",
             "Invert",
         ];
-        let fx_dropdown_w = 80i32;
-        let apply_w = 50i32;
-        let fx_area_w = fx_dropdown_w + 4 + apply_w;
-        let fx_x = w - fx_area_w - 8;
         dropdown_popup_overlay(
             canvas,
             &state.theme,
             7074,
-            fx_x,
-            top + 4,
-            fx_dropdown_w,
-            20,
-            fx_dropdown_w,
+            fx_rect.x(),
+            fx_rect.y(),
+            fx_rect.width() as i32,
+            control_h,
+            fx_rect.width() as i32,
             &fx_labels,
             state.audio_editor_effect_idx,
             state.dropdown_open_id,

@@ -1,6 +1,6 @@
+use super::GfxRenderer;
 // Eden DAW — Compressor Curve widget
 
-use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
@@ -81,13 +81,13 @@ pub fn comp_curve_widget(
         };
         let dot_px = cx0 + (in_frac * cw as f32) as i32;
         let dot_py = cy0 - (out_frac * ch as f32) as i32;
-        let _ = canvas.filled_circle(
+        let _ = canvas.gfx_filled_circle(
             dot_px as i16,
             dot_py as i16,
             3,
             sdl2::pixels::Color::RGBA(255, 200, 80, 255),
         );
-        let _ = canvas.circle(
+        let _ = canvas.gfx_circle(
             dot_px as i16,
             dot_py as i16,
             3,

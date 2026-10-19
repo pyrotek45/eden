@@ -60,6 +60,9 @@ fn main() {
         .present_vsync()
         .build()
         .expect("Failed to create canvas");
+    // UI overlays and theme colors use alpha; do not depend on a graphics
+    // primitive incidentally enabling blending while it draws a knob.
+    canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
 
     // ── Set window icon (32×32 music note) ──
     {
