@@ -102,6 +102,26 @@ The script will guide you through installing the MinGW toolchain and SDL2 Window
 
 Or use `cargo run --release`.
 
+### Startup abort: invalid SDL event enum (for example `0x207`)
+
+The Rust SDL2 0.37 bindings used an unsafe enum conversion for unfamiliar backend
+events. Newer Rust debug builds can abort before the window becomes usable.
+Eden now requires the fixed SDL2 0.38 bindings. Update both `Cargo.toml` and
+`Cargo.lock` from the fixed version of Eden, then rebuild:
+
+```bash
+# Inside your normal development environment:
+cargo run --locked
+
+# Or from outside the Nix development shell:
+nix-shell --run 'cargo run --locked'
+```
+
+No SDL driver override or downgrade is needed for this event-conversion defect.
+The regression tests inject the reported event through SDL's actual event queue.
+The upstream checked conversion is in
+[SDL2 0.38's event bindings](https://docs.rs/crate/sdl2/0.38.0/source/src/sdl2/event.rs).
+
 ## Packaging for Distribution
 
 A packaging script bundles the binary with SDL2 libraries into a portable tarball:
