@@ -21,6 +21,26 @@ fn rack_cell_width(slot: &crate::app::models::RackSlot, font_scale: i32) -> i32 
     ((name_chars.max(option_chars) as i32 * (4 * font_scale + 1)) + 24).max(80)
 }
 
+const DEVICE_HEADER_HEIGHT: i32 = 40;
+
+fn device_grid(height: i32, font: i32) -> (usize, i32, i32) {
+    let text_height = 5 * font;
+    let selector_height = (text_height + 8).max(18);
+    let first_center = DEVICE_HEADER_HEIGHT + text_height + selector_height / 2 + 4;
+    let row_height = (32 + 2 * text_height + 10).max(64);
+    let label_bottom = 16 + 3 + 2 * text_height + 3;
+    let rows = ((height - first_center - label_bottom) / row_height + 1).clamp(1, 4);
+    (rows as usize, first_center, row_height)
+}
+
+fn device_header(canvas: &mut Canvas<Window>, theme: &Theme, name: &str, x: i32, y: i32, width: i32) {
+    canvas.set_draw_color(Theme::c(theme.bg_light));
+    let _ = canvas.fill_rect(Rect::new(x + 1, y + 1, (width - 2) as u32, (DEVICE_HEADER_HEIGHT - 1) as u32));
+    let category = if crate::modules::is_midi_effect(name) { "MIDI FX" }
+        else if crate::modules::is_instrument(name) { "INSTRUMENT" } else { "AUDIO FX" };
+    draw_pixel_label_scaled(canvas, theme, category, x + 8, y + 27, width - 16, Theme::c(theme.text_secondary), 1);
+}
+
 pub(crate) fn meter_color(db: f64) -> sdl2::pixels::Color {
     if db >= 0.0 {
         sdl2::pixels::Color::RGBA(220, 40, 30, 240)
@@ -181,11 +201,15 @@ pub(super) fn draw_bottom_mixer(
     w: i32,
     h: i32,
 ) {
+    if input.mouse_pressed && input.mouse_in_rect(0, top, w, h) {
+        state.focused_panel = FocusedPanel::Arrangement;
+    }
+
     if h < 40 {
         return;
     }
 
-    let strip_w_full = 260i32;
+    let strip_w_full = (2 * (7 * (4 * state.font_scale + 1) + 16) + 80).max(260);
     let strip_w_slim = 80i32;
     let strip_gap = 6i32;
     let track_count = state.project.tracks.len();
@@ -272,11 +296,7 @@ pub(super) fn draw_bottom_mixer(
 
         // Track name
         let name_y = sy + cap_h as i32 + 2;
-        let name_col = if selected {
-            sdl2::pixels::Color::RGBA(255, 255, 255, 255)
-        } else {
-            sdl2::pixels::Color::RGBA(190, 195, 200, 220)
-        };
+        let name_col = Theme::c(if selected { state.theme.text_primary } else { state.theme.text_secondary });
         // ── Expand / Slim toggle button (top-right corner of strip) ──
         let expand_btn_sz = 14i32;
         let expand_btn_x = x + strip_w - expand_btn_sz - 4;
@@ -374,26 +394,9 @@ pub(super) fn draw_bottom_mixer(
         let content_top = name_y + 18; // more padding below name
         let bottom_bar_h = 40i32; // mute/solo/pan row (taller for label)
         let content_bottom = sy + sh - bottom_bar_h;
-        let avail_h = (content_bottom - content_top).max(10);
 
-        // ── VU meter gauge (top of content area, full width) — skip in slim mode ──
-        let vu_h = if !is_slim { 73i32.min(avail_h / 3) } else { 0 };
-        if vu_h >= 30 && !is_slim {
-            let vu_pos = state.meters.vu_needle.get(i).copied().unwrap_or(0.0);
-            let vu_peak = state.meters.vu_peak_needle.get(i).copied().unwrap_or(0.0);
-            vu_meter(
-                canvas,
-                &state.theme,
-                x + 6,
-                content_top,
-                strip_w - 12,
-                vu_h,
-                vu_pos,
-                vu_peak,
-            );
-        }
-
-        let below_vu = content_top + if vu_h >= 30 { vu_h + 8 } else { 0 }; // more padding after VU
+        // Stereo meters remain beside the fader; reserve the rest for channel controls.
+        let below_vu = content_top;
         let below_vu_avail = (content_bottom - below_vu).max(10);
 
         // ── Left column: Fader + Stereo meters ──
@@ -601,355 +604,87 @@ pub(super) fn draw_bottom_mixer(
             1,
         );
 
-        // ── Right column: CStrip2 knobs + EQ + Comp curve (skip in slim mode) ──
+        // Console-style sections share the existing CStrip2 parameter bindings.
         let right_x = x + 8 + left_col_w + 30;
         let right_w = strip_w - (right_x - x) - 6;
         if !is_slim && right_w > 40 && below_vu_avail > 60 {
             let cs_descs = crate::modules::get_param_descs("CStrip2");
-            if state.project.tracks[i].cstrip2_params.is_empty() && !cs_descs.is_empty() {
-                state.project.tracks[i].cstrip2_params = cs_descs
-                    .iter()
-                    .map(|d| (d.id.to_string(), d.default))
-                    .collect();
+            let layout = channel_layout(right_w - 10, state.font_scale);
+            let max_scroll = (layout.height - below_vu_avail).max(0);
+            let scroll = state.mixer_channel_scroll.entry(track_id).or_default();
+            *scroll = (*scroll).clamp(0, max_scroll);
+            if input.mouse_in_rect(right_x, below_vu, right_w, below_vu_avail)
+                && input.scroll_y != 0 && !input.scroll_consumed && !input.shift() {
+                *scroll = (*scroll - input.scroll_y * layout.row_height).clamp(0, max_scroll);
+                input.scroll_consumed = true;
             }
-
-            // ── CStrip2 bypass is now in the bottom bar (right of Solo) ──
-
-            let knob_r = 13i32;
-            let cell_w = (right_w / 2).max(30);
-            let cell_h = 42i32;
-            let knob_base_y = below_vu + 4;
-
-            for (pi, desc) in cs_descs.iter().enumerate() {
-                let col = (pi / 5) as i32;
-                let row = (pi % 5) as i32;
-                let kx = right_x + cell_w / 2 + col * cell_w;
-                let ky = knob_base_y + 12 + row * cell_h;
-                if ky + knob_r + 8 > content_bottom {
-                    break;
-                }
-
-                let cur_val = state.project.tracks[i]
-                    .cstrip2_params
-                    .iter()
-                    .find(|(id, _)| id == desc.id)
-                    .map(|(_, v)| *v)
-                    .unwrap_or(desc.default);
+            if max_scroll > 0 {
+                let fraction = scrollbar(canvas, input, &state.theme,
+                    WidgetId::MixerChannelScroll(track_id), right_x + right_w - 8,
+                    below_vu, below_vu_avail, 8, ScrollbarDir::Vertical,
+                    *scroll as f32 / max_scroll as f32,
+                    below_vu_avail as f32 / layout.height as f32);
+                *scroll = (fraction * max_scroll as f32).round() as i32;
+            }
+            let origin_y = below_vu - *scroll;
+            let old_clip = canvas.clip_rect();
+            let viewport = Rect::new(right_x, below_vu, (right_w - 10) as u32, below_vu_avail as u32);
+            let clipped = match old_clip {
+                sdl2::render::ClippingRect::Some(rect) => rect.intersection(viewport),
+                sdl2::render::ClippingRect::None => Some(viewport),
+                sdl2::render::ClippingRect::Zero => None,
+            };
+            canvas.set_clip_rect(clipped.unwrap_or(Rect::new(0, 0, 0, 0)));
+            for section in &layout.sections {
+                let section_y = origin_y + section.y;
+                canvas.set_draw_color(Theme::c(state.theme.bg_medium));
+                let _ = canvas.fill_rect(Rect::new(right_x, section_y,
+                    (right_w - 10) as u32, section.height as u32));
+                draw_pixel_label(canvas, &state.theme, section.label, right_x + 4,
+                    section_y + 2, right_w - 18, Theme::c(state.theme.text_secondary));
+            }
+            for cell in &layout.cells {
+                let Some((pi, desc)) = cs_descs.iter().enumerate().find(|(_, d)| d.id == cell.id) else { continue; };
+                let kx = right_x + cell.x;
+                let caption_y = origin_y + cell.y;
+                let ky = caption_y + 5 * state.font_scale + 14;
+                // Only fully visible knobs receive pointer input; scrolling exposes the rest.
+                if caption_y < below_vu || ky + 13 > content_bottom { continue; }
+                let caption_width = cell.caption.len() as i32 * (4 * state.font_scale + 1);
+                draw_pixel_label(canvas, &state.theme, cell.caption, kx - caption_width / 2,
+                    caption_y, caption_width + 1, Theme::c(state.theme.text_secondary));
+                let cur_val = state.project.tracks[i].cstrip2_params.iter()
+                    .find(|(id, _)| id == desc.id).map(|(_, v)| *v).unwrap_or(desc.default);
                 let mut val = cur_val;
-                let cs_knob_id = input.next_id();
-                let is_bipolar = desc.id == "output"
-                    || desc.id == "treble"
-                    || desc.id == "mid"
-                    || desc.id == "bass";
-                let changed = knob(
-                    canvas,
-                    input,
-                    &state.theme,
-                    &KnobParams {
-                        id: cs_knob_id,
-                        x: kx,
-                        y: ky,
-                        radius: knob_r,
-                        min: desc.min,
-                        max: desc.max,
-                        sensitivity: 0.005,
-                        label: None,
-                        bipolar: is_bipolar,
-                        default_value: Some(desc.default),
-                        hint: Some(desc.name.into()),
-                        snap_points: vec![],
-                    },
-                    &mut val,
-                );
-                // Label above knob
-                draw_pixel_label(
-                    canvas,
-                    &state.theme,
-                    desc.name,
-                    kx - cell_w / 2,
-                    ky - knob_r - 9,
-                    cell_w,
-                    sdl2::pixels::Color::RGBA(130, 135, 145, 170),
-                );
-                if changed {
-                    // Snapshot before first CStrip2 knob change in this drag
+                if knob(canvas, input, &state.theme, &KnobParams {
+                    id: WidgetId::ChannelParam(track_id, pi), x: kx, y: ky, radius: 12,
+                    min: desc.min, max: desc.max, sensitivity: 0.005, label: None,
+                    bipolar: matches!(desc.id, "output" | "treble" | "mid" | "bass"),
+                    default_value: Some(desc.default), hint: Some(desc.name.into()), snap_points: vec![],
+                }, &mut val) {
                     if state.cstrip2_knob_snapshot.is_none() {
                         state.cstrip2_knob_snapshot = Some(state.project.clone());
                     }
                     let delta = val - cur_val;
-                    if let Some(entry) = state.project.tracks[i]
-                        .cstrip2_params
-                        .iter_mut()
-                        .find(|(id, _)| id == desc.id)
-                    {
-                        entry.1 = val;
-                    }
-                    // Propagate to all other selected tracks
-                    if state.selected_tracks.contains(&track_id) {
-                        for j in 0..state.project.tracks.len() {
-                            if j == i {
-                                continue;
-                            }
-                            let other_id = state.project.tracks[j].id;
-                            if state.selected_tracks.contains(&other_id) {
-                                if let Some(entry) = state.project.tracks[j]
-                                    .cstrip2_params
-                                    .iter_mut()
-                                    .find(|(id, _)| id == desc.id)
-                                {
-                                    entry.1 = (entry.1 + delta).clamp(desc.min, desc.max);
-                                }
-                            }
+                    let edit_selected = state.selected_tracks.contains(&track_id);
+                    for (j, track) in state.project.tracks.iter_mut().enumerate() {
+                        if j != i && !(edit_selected && state.selected_tracks.contains(&track.id)) { continue; }
+                        if let Some(entry) = track.cstrip2_params.iter_mut().find(|(id, _)| id == desc.id) {
+                            entry.1 = if j == i { val } else { (entry.1 + delta).clamp(desc.min, desc.max) };
+                        } else {
+                            track.cstrip2_params.push((desc.id.into(), if j == i { val } else {
+                                (desc.default + delta).clamp(desc.min, desc.max)
+                            }));
                         }
                     }
                     state.dirty = true;
                 }
             }
-
-            // Commit CStrip2 knob snapshot on mouse release
-            if input.mouse_released {
-                if let Some(snapshot) = state.cstrip2_knob_snapshot.take() {
-                    state
-                        .commands
-                        .push_undo_snapshot(snapshot, "Adjust CStrip2");
-                }
-            }
-
-            // ── EQ curve visual (below knobs) ──
-            let eq_y = knob_base_y + 12 + 5 * cell_h + 4;
-            let eq_h = 50i32;
-            let eq_w = right_w.min(cell_w * 2);
-            if eq_y + eq_h < content_bottom && eq_w > 20 {
-                // Background
-                canvas.set_draw_color(sdl2::pixels::Color::RGBA(18, 20, 26, 200));
-                let _ = canvas.fill_rect(Rect::new(right_x, eq_y, eq_w as u32, eq_h as u32));
-                // 0 dB center line
-                let mid_line = eq_y + eq_h / 2;
-                canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 100));
-                let _ = canvas.draw_line(
-                    sdl2::rect::Point::new(right_x, mid_line),
-                    sdl2::rect::Point::new(right_x + eq_w, mid_line),
-                );
-
-                // Read all relevant params
-                let treble = state.project.tracks[i]
-                    .cstrip2_params
-                    .iter()
-                    .find(|(id, _)| id == "treble")
-                    .map(|(_, v)| *v)
-                    .unwrap_or(0.5);
-                let mid = state.project.tracks[i]
-                    .cstrip2_params
-                    .iter()
-                    .find(|(id, _)| id == "mid")
-                    .map(|(_, v)| *v)
-                    .unwrap_or(0.5);
-                let bass = state.project.tracks[i]
-                    .cstrip2_params
-                    .iter()
-                    .find(|(id, _)| id == "bass")
-                    .map(|(_, v)| *v)
-                    .unwrap_or(0.5);
-                let treb_frq = state.project.tracks[i]
-                    .cstrip2_params
-                    .iter()
-                    .find(|(id, _)| id == "treb_frq")
-                    .map(|(_, v)| *v)
-                    .unwrap_or(0.55);
-                let bass_frq = state.project.tracks[i]
-                    .cstrip2_params
-                    .iter()
-                    .find(|(id, _)| id == "bass_frq")
-                    .map(|(_, v)| *v)
-                    .unwrap_or(0.15);
-                let lo_cap = state.project.tracks[i]
-                    .cstrip2_params
-                    .iter()
-                    .find(|(id, _)| id == "lo_cap")
-                    .map(|(_, v)| *v)
-                    .unwrap_or(0.0);
-                let hi_cap = state.project.tracks[i]
-                    .cstrip2_params
-                    .iter()
-                    .find(|(id, _)| id == "hi_cap")
-                    .map(|(_, v)| *v)
-                    .unwrap_or(0.0);
-
-                // Compute frequency response at each pixel column
-                // X axis: log frequency from 20 Hz to 20 kHz
-                // Y axis: dB, scaled to fit eq_h (±12 dB range)
-                let db_range = 14.0_f64; // ±7 dB visible range (enough for ±3.5 dB EQ + HP/LP)
-                let log_min = (20.0_f64).ln();
-                let log_max = (20000.0_f64).ln();
-                let sr = 44100.0_f64;
-
-                // Filter coefficients (matching DSP)
-                let hp_coef = if lo_cap > 0.0 {
-                    (lo_cap as f64).powf(2.0) * 0.4995 + 0.0001
-                } else {
-                    0.0
-                };
-                let lp_coef = if hi_cap > 0.0 {
-                    (hi_cap as f64).powf(2.0) * 0.4995 + 0.0001
-                } else {
-                    0.0
-                };
-                let bass_coef = (bass_frq as f64) * (bass_frq as f64) * 0.499 + 0.001;
-                let treb_coef = treb_frq as f64 * treb_frq as f64 * 0.499 + 0.001;
-                let bass_g = ((bass as f64) * 2.0 - 1.0) * 0.5 + 1.0;
-                let mid_g = ((mid as f64) * 2.0 - 1.0) * 0.5 + 1.0;
-                let treb_g = ((treble as f64) * 2.0 - 1.0) * 0.5 + 1.0;
-
-                // Compute EQ response once per pixel column, then draw fill + curve in two passes.
-
-                // Helper: evaluate EQ magnitude (dB) at a normalised angular frequency omega.
-                let eval_eq_db = |omega: f64| -> f64 {
-                    let lp_complex = |c: f64| -> (f64, f64) {
-                        if c < 1e-8 {
-                            return (1.0, 0.0);
-                        }
-                        let omc = 1.0 - c;
-                        let dr = 1.0 - omc * omega.cos();
-                        let di = omc * omega.sin();
-                        let ds = dr * dr + di * di;
-                        if ds < 1e-15 {
-                            (1.0, 0.0)
-                        } else {
-                            (c * dr / ds, c * di / ds)
-                        }
-                    };
-
-                    let hp_mag = if hp_coef > 1e-8 {
-                        let omc = 1.0 - hp_coef;
-                        let cos_w = omega.cos();
-                        let sin_w = omega.sin();
-                        let den_sq = 1.0 - 2.0 * omc * cos_w + omc * omc;
-                        if den_sq < 1e-15 {
-                            1.0
-                        } else {
-                            let re_lp = hp_coef * (1.0 - omc * cos_w) / den_sq;
-                            let im_lp = hp_coef * omc * sin_w / den_sq;
-                            let re_hp = 1.0 - re_lp;
-                            let im_hp = -im_lp;
-                            (re_hp * re_hp + im_hp * im_hp).sqrt()
-                        }
-                    } else {
-                        1.0
-                    };
-
-                    let lp_mag = if lp_coef > 1e-8 {
-                        let omc = 1.0 - lp_coef;
-                        let num = lp_coef * lp_coef;
-                        let den = 1.0 - 2.0 * omc * omega.cos() + omc * omc;
-                        if den > 1e-12 {
-                            (num / den).sqrt()
-                        } else {
-                            1.0
-                        }
-                    } else {
-                        1.0
-                    };
-
-                    let (lbr, lbi) = lp_complex(bass_coef);
-                    let (ltr, lti) = lp_complex(treb_coef);
-                    let eq_re = lbr * (bass_g - mid_g) + ltr * (mid_g - treb_g) + treb_g;
-                    let eq_im = lbi * (bass_g - mid_g) + lti * (mid_g - treb_g);
-                    let eq_mag = (eq_re * eq_re + eq_im * eq_im).sqrt();
-
-                    let total = hp_mag * lp_mag * eq_mag;
-                    if total > 1e-10 {
-                        20.0 * total.log10()
-                    } else {
-                        -db_range
-                    }
-                };
-
-                // Build pixel array: one Y value per screen pixel column (no gaps).
-                // We iterate over integer pixel columns [0 .. eq_w) directly so each
-                // column is covered exactly once — no aliasing / missing columns.
-                let mut curve_py: Vec<i32> = Vec::with_capacity(eq_w as usize);
-                for col in 0..eq_w {
-                    let t = col as f64 / (eq_w - 1).max(1) as f64;
-                    let freq = (log_min + t * (log_max - log_min)).exp();
-                    let omega = 2.0 * std::f64::consts::PI * freq / sr;
-                    let db = eval_eq_db(omega).clamp(-db_range, db_range);
-                    let py = mid_line - (db / db_range * (eq_h as f64 / 2.0)) as i32;
-                    // Clamp to widget bounds so fill rects never escape.
-                    curve_py.push(py.clamp(eq_y, eq_y + eq_h - 1));
-                }
-
-                // Pass 1: filled area between curve and centre line — use fill_rect so
-                // every pixel column is fully covered with no gaps or bleed.
-                canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 200, 140, 30));
-                for col in 0..eq_w {
-                    let px = right_x + col;
-                    let py = curve_py[col as usize];
-                    let (ya, yb) = if py <= mid_line {
-                        (py, mid_line)
-                    } else {
-                        (mid_line, py)
-                    };
-                    let fill_h = (yb - ya + 1).max(1) as u32;
-                    let _ = canvas.fill_rect(Rect::new(px, ya, 1, fill_h));
-                }
-
-                // Pass 2: curve line — connect adjacent columns with draw_line so
-                // steep slopes have no holes.
-                canvas.set_draw_color(sdl2::pixels::Color::RGBA(80, 200, 140, 200));
-                for col in 1..eq_w {
-                    let ppx = right_x + col - 1;
-                    let ppy = curve_py[(col - 1) as usize];
-                    let px = right_x + col;
-                    let py = curve_py[col as usize];
-                    let _ = canvas.draw_line(
-                        sdl2::rect::Point::new(ppx, ppy),
-                        sdl2::rect::Point::new(px, py),
-                    );
-                }
-
-                // Label and border
-                draw_pixel_label(
-                    canvas,
-                    &state.theme,
-                    "EQ",
-                    right_x + 2,
-                    eq_y + 1,
-                    16,
-                    sdl2::pixels::Color::RGBA(80, 200, 140, 110),
-                );
-                canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 55, 65, 80));
-                let _ = canvas.draw_rect(Rect::new(right_x, eq_y, eq_w as u32, eq_h as u32));
-
-                // ── Compressor curve + GR bar (actual gain reduction from audio) ──
-                let comp_y = eq_y + eq_h + 4;
-                let comp_h = 50i32;
-                if comp_y + comp_h < content_bottom && eq_w > 20 {
-                    let compress = state.project.tracks[i]
-                        .cstrip2_params
-                        .iter()
-                        .find(|(id, _)| id == "compress")
-                        .map(|(_, v)| *v)
-                        .unwrap_or(0.0);
-                    // Get actual gain reduction from metering (sum of all effect slot GR for this track)
-                    let gr_db = state
-                        .meters
-                        .track_effect_gr
-                        .get(i)
-                        .map(|slots| slots.iter().sum::<f32>())
-                        .unwrap_or(0.0);
-                    let track_rms = state.meters.track_rms.get(i).copied().unwrap_or(0.0);
-                    comp_curve_widget(
-                        canvas,
-                        &state.theme,
-                        right_x,
-                        comp_y,
-                        eq_w,
-                        comp_h,
-                        compress,
-                        gr_db,
-                        track_rms,
-                    );
-                }
+            canvas.set_clip_rect(old_clip);
+        }
+        if input.mouse_released {
+            if let Some(snapshot) = state.cstrip2_knob_snapshot.take() {
+                state.commands.push_undo_snapshot(snapshot, "Adjust CStrip2");
             }
         }
 
@@ -1320,6 +1055,9 @@ pub(super) fn draw_bottom_mixer(
     }
 
     // ══════════════════════════════════════════════════════════════════
+    // Dense meter summaries retain a readable size inside their fixed-width strip.
+    let master_font_scale = get_font_scale();
+    set_font_scale(master_font_scale.min(2));
     // ── MASTER OUTPUT STRIP (right side) ──
     // ══════════════════════════════════════════════════════════════════
     let mx = w - master_strip_w;
@@ -1858,6 +1596,7 @@ pub(super) fn draw_bottom_mixer(
     // Master border
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(70, 80, 120, 200));
     let _ = canvas.draw_rect(Rect::new(mx, my, master_strip_w as u32, mh as u32));
+    set_font_scale(master_font_scale);
 }
 
 pub(super) fn draw_instrument_rack(
@@ -1868,6 +1607,10 @@ pub(super) fn draw_instrument_rack(
     w: i32,
     h: i32,
 ) {
+    if input.mouse_pressed && input.mouse_in_rect(0, top, w, h) {
+        state.focused_panel = FocusedPanel::Arrangement;
+    }
+
     canvas.set_draw_color(Theme::c(state.theme.bg_dark));
     let _ = canvas.fill_rect(Rect::new(0, top, w as u32, h as u32));
 
@@ -1960,7 +1703,7 @@ pub(super) fn draw_instrument_rack(
         // Use as many columns as needed to keep every parameter row visible.
         let _is_inst = crate::modules::is_instrument(plugin_name_ref);
         let is_sampler = plugin_name_ref == "Sampler";
-        let max_rows = ((slot_h - 74) / 64 + 1).clamp(1, 4) as usize;
+        let (max_rows, first_center, row_height) = device_grid(slot_h, state.font_scale);
         let cols = if param_count == 0 {
             2
         } else {
@@ -1999,6 +1742,8 @@ pub(super) fn draw_instrument_rack(
         canvas.set_draw_color(Theme::c(state.theme.panel_border));
         let _ = canvas.draw_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
 
+        device_header(canvas, &state.theme, plugin_name_ref, sx, sy, slot_w);
+
         // Slot header (plugin name)
         let plugin_name = state.project.tracks[ti].rack[slot_idx].plugin_name.clone();
         draw_pixel_label(
@@ -2007,7 +1752,7 @@ pub(super) fn draw_instrument_rack(
             &plugin_name,
             sx + 8,
             sy + 6,
-            slot_w - 40,
+            slot_w - 78,
             if slot_enabled {
                 Theme::c(state.theme.text_primary)
             } else {
@@ -2026,7 +1771,7 @@ pub(super) fn draw_instrument_rack(
                 x: sx + slot_w - 58,
                 y: sy + 3,
                 width: 28,
-                height: 14,
+                height: 20,
                 label: if slot_enabled { "ON" } else { "OFF" }.into(),
                 toggled: slot_enabled,
                 icon: ButtonIcon::None,
@@ -2059,7 +1804,7 @@ pub(super) fn draw_instrument_rack(
                 x: sx + slot_w - 26,
                 y: sy + 3,
                 width: 20,
-                height: 14,
+                height: 20,
                 label: "X".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
@@ -2170,7 +1915,7 @@ pub(super) fn draw_instrument_rack(
         }
 
         // Draw parameters as knobs (or dropdowns for option params)
-        let knob_y_start = sy + 24;
+        let knob_y_start = sy + first_center;
 
         // Get track_id and slot_id for highlight check
         let track_id = state.project.tracks[ti].id;
@@ -2180,14 +1925,14 @@ pub(super) fn draw_instrument_rack(
             let col = pi % cols;
             let row = pi / cols;
             let kx = sx + (knob_cell_w / 2) + col as i32 * knob_cell_w;
-            let ky = knob_y_start + 20 + row as i32 * 64;
+            let ky = knob_y_start + row as i32 * row_height;
 
-            if ky + 30 > sy + slot_h {
+            if ky + 16 + 6 + 10 * state.font_scale > sy + slot_h {
                 break; // Don't draw knobs that would overflow
             }
 
             let param = &state.project.tracks[ti].rack[slot_idx].params[pi];
-            let knob_id = input.next_id();
+            let knob_id = WidgetId::DeviceParam(Some(track_id), slot_id, pi);
             let mut val = param.value;
             let p_min = param.min;
             let p_max = param.max;
@@ -2226,8 +1971,8 @@ pub(super) fn draw_instrument_rack(
                 let label_text = if idx < opts.len() { opts[idx] } else { "?" };
                 let sel_w = (knob_cell_w - 8).max(36);
                 let sel_x = kx - sel_w / 2;
-                let sel_y = ky - 8;
-                let sel_h = 18;
+                let sel_h = (5 * state.font_scale + 8).max(18);
+                let sel_y = ky - sel_h / 2;
 
                 // Draw background
                 let hover = input.mouse_in_rect(sel_x, sel_y, sel_w, sel_h);
@@ -2250,7 +1995,7 @@ pub(super) fn draw_instrument_rack(
                     &state.theme,
                     &p_name,
                     sel_x,
-                    sel_y - 12,
+                    sel_y - 5 * state.font_scale - 3,
                     sel_w,
                     Theme::c(state.theme.text_dim),
                 );
@@ -2260,7 +2005,7 @@ pub(super) fn draw_instrument_rack(
                     &state.theme,
                     label_text,
                     sel_x + 4,
-                    sel_y + 4,
+                    sel_y + (sel_h - 5 * state.font_scale) / 2,
                     sel_w - 8,
                     Theme::c(state.theme.text_primary),
                 );
@@ -2820,9 +2565,9 @@ pub(super) fn draw_instrument_rack(
         // a useful graph. Instrument slots and Gain/Utility/Reverb/Chorus have no visual.
         if has_vis_panel && !is_sampler {
             let vis_x = sx + knob_cols_w + 4;
-            let vis_y = sy + 22; // just below the header
+            let vis_y = sy + DEVICE_HEADER_HEIGHT + 4;
             let vis_w = (vis_col_w - 8).max(20) as u32;
-            let vis_h = (slot_h - 26).max(20);
+            let vis_h = (slot_h - DEVICE_HEADER_HEIGHT - 8).max(20);
 
             // Background
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(18, 18, 22, 255));
@@ -4147,6 +3892,10 @@ pub(super) fn draw_master_rack(
     w: i32,
     h: i32,
 ) {
+    if input.mouse_pressed && input.mouse_in_rect(0, top, w, h) {
+        state.focused_panel = FocusedPanel::Arrangement;
+    }
+
     use sdl2::rect::Rect;
 
     canvas.set_draw_color(Theme::c(state.theme.bg_dark));
@@ -4200,7 +3949,7 @@ pub(super) fn draw_master_rack(
         let plugin_name = state.project.master_rack[slot_idx].plugin_name.clone();
         let param_count = state.project.master_rack[slot_idx].params.len();
         let knob_cell_w = rack_cell_width(&state.project.master_rack[slot_idx], state.font_scale);
-        let max_rows = ((slot_h - 74) / 64 + 1).clamp(1, 4) as usize;
+        let (max_rows, first_center, row_height) = device_grid(slot_h, state.font_scale);
         let cols = if param_count == 0 {
             2
         } else {
@@ -4230,6 +3979,8 @@ pub(super) fn draw_master_rack(
         canvas.set_draw_color(Theme::c(state.theme.panel_border));
         let _ = canvas.draw_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
 
+        device_header(canvas, &state.theme, &plugin_name, sx, sy, slot_w);
+
         // Slot header
         draw_pixel_label(
             canvas,
@@ -4237,7 +3988,7 @@ pub(super) fn draw_master_rack(
             &plugin_name,
             sx + 8,
             sy + 6,
-            slot_w - 40,
+            slot_w - 78,
             if slot_enabled {
                 Theme::c(state.theme.text_primary)
             } else {
@@ -4256,7 +4007,7 @@ pub(super) fn draw_master_rack(
                 x: sx + slot_w - 58,
                 y: sy + 3,
                 width: 28,
-                height: 14,
+                height: 20,
                 label: if slot_enabled { "ON" } else { "OFF" }.into(),
                 toggled: slot_enabled,
                 icon: ButtonIcon::None,
@@ -4285,7 +4036,7 @@ pub(super) fn draw_master_rack(
                 x: sx + slot_w - 26,
                 y: sy + 3,
                 width: 20,
-                height: 14,
+                height: 20,
                 label: "X".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
@@ -4345,18 +4096,18 @@ pub(super) fn draw_master_rack(
         }
 
         // Draw parameter knobs
-        let knob_y_start = sy + 24;
+        let knob_y_start = sy + first_center;
         for pi in 0..param_count {
             let col = pi % cols;
             let row = pi / cols;
             let kx = sx + (knob_cell_w / 2) + col as i32 * knob_cell_w;
-            let ky = knob_y_start + 20 + row as i32 * 64;
-            if ky + 30 > sy + slot_h {
+            let ky = knob_y_start + row as i32 * row_height;
+            if ky + 16 + 6 + 10 * state.font_scale > sy + slot_h {
                 break;
             }
 
             let param = &state.project.master_rack[slot_idx].params[pi];
-            let knob_id = input.next_id();
+            let knob_id = WidgetId::DeviceParam(None, state.project.master_rack[slot_idx].slot_id, pi);
             let mut val = param.value;
             let p_min = param.min;
             let p_max = param.max;
@@ -4377,8 +4128,8 @@ pub(super) fn draw_master_rack(
                 let label_text = if idx < opts.len() { opts[idx] } else { "?" };
                 let sel_w = (knob_cell_w - 8).max(36);
                 let sel_x = kx - sel_w / 2;
-                let sel_y = ky - 8;
-                let sel_h = 18;
+                let sel_h = (5 * state.font_scale + 8).max(18);
+                let sel_y = ky - sel_h / 2;
                 let hover = input.mouse_in_rect(sel_x, sel_y, sel_w, sel_h);
                 let dragging = input.drag_widget == knob_id;
                 canvas.set_draw_color(if dragging {
@@ -4396,7 +4147,7 @@ pub(super) fn draw_master_rack(
                     &state.theme,
                     &p_name,
                     sel_x,
-                    sel_y - 12,
+                    sel_y - 5 * state.font_scale - 3,
                     sel_w,
                     Theme::c(state.theme.text_dim),
                 );
@@ -4405,7 +4156,7 @@ pub(super) fn draw_master_rack(
                     &state.theme,
                     label_text,
                     sel_x + 4,
-                    sel_y + 4,
+                    sel_y + (sel_h - 5 * state.font_scale) / 2,
                     sel_w - 8,
                     Theme::c(state.theme.text_primary),
                 );
@@ -4520,9 +4271,9 @@ pub(super) fn draw_master_rack(
         // Effect visualisation panel (right side of slot)
         if has_vis_panel && slot_enabled {
             let vis_x = sx + knob_cols_w;
-            let vis_y = sy + 24;
+            let vis_y = sy + DEVICE_HEADER_HEIGHT + 4;
             let vis_w = (vis_col_w - 8) as u32;
-            let vis_h = (slot_h - 32).max(20);
+            let vis_h = (slot_h - DEVICE_HEADER_HEIGHT - 8).max(20);
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(20, 20, 26, 220));
             let _ = canvas.fill_rect(Rect::new(vis_x, vis_y, vis_w, vis_h as u32));
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(50, 50, 60, 150));
@@ -5389,6 +5140,8 @@ pub(super) fn draw_master_rack(
     }
 
     // ══════════════════════════════════════════════════════════════════
+    let master_font_scale = get_font_scale();
+    set_font_scale(master_font_scale.min(2));
     // ── MASTER METER STRIP (right side of rack view) ──
     // Full metering matching the mixer master strip: VU, fader, Pre/Out
     // meters, peak holds, clip LEDs, dB labels, info readout.
@@ -5931,5 +5684,22 @@ pub(super) fn draw_master_rack(
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(70, 80, 120, 200));
         let _ = canvas.draw_rect(Rect::new(rmx, rmy, rack_master_w as u32, rmh as u32));
     }
+    set_font_scale(master_font_scale);
 }
 // ── Sample Browser (left panel) ─────────────────────────────────────
+
+#[cfg(test)]
+mod device_layout_tests {
+    use super::*;
+    #[test]
+    fn device_grid_keeps_captions_and_last_row_inside_card() {
+        for font in 1..=4 {
+            for height in [240, 304, 440] {
+                let (rows, first, spacing) = device_grid(height, font);
+                let selector_height = (5 * font + 8).max(18);
+                assert!(first - selector_height / 2 - 5 * font - 3 >= DEVICE_HEADER_HEIGHT);
+                assert!(first + (rows as i32 - 1) * spacing + 16 + 6 + 10 * font <= height);
+            }
+        }
+    }
+}

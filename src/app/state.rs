@@ -616,6 +616,7 @@ pub struct AppState {
     pub bottom_mixer_scroll_x: f32,
     /// Tracks expanded to show channel-strip controls; other tracks use the slim mixer.
     pub mixer_expanded_tracks: std::collections::HashSet<u32>,
+    pub mixer_channel_scroll: std::collections::HashMap<u32, i32>,
     /// Index of rack slot being dragged for reordering (source index)
     pub rack_reorder_drag: Option<usize>,
     /// Target insertion index while dragging
@@ -963,6 +964,7 @@ impl AppState {
             mixer_scroll_x: 0.0,
             bottom_mixer_scroll_x: 0.0,
             mixer_expanded_tracks: std::collections::HashSet::new(),
+            mixer_channel_scroll: std::collections::HashMap::new(),
             rack_reorder_drag: None,
             rack_reorder_target: None,
             focused_panel: FocusedPanel::Arrangement,

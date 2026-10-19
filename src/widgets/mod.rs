@@ -12,9 +12,11 @@ pub(crate) use gfx::GfxRenderer;
 mod audio_toolbar;
 pub use audio_toolbar::*;
 
+mod console_layout;
+pub use console_layout::*;
+
 mod button;
 mod clip_widgets;
-mod comp_curve;
 mod dropdown;
 mod knob;
 mod number_spinner;
@@ -31,7 +33,6 @@ mod vu_meter;
 
 pub use button::*;
 pub use clip_widgets::*;
-pub use comp_curve::*;
 pub use dropdown::*;
 pub use knob::*;
 pub use number_spinner::*;
