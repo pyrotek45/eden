@@ -217,6 +217,7 @@ pub fn draw_bottom_panel(
                 draw_bottom_mixer(canvas, input, state, content_y, w, content_h);
             }
             BottomPanelTab::PianoRoll => {
+                state.sync_editor_selection();
                 // Route to the right editor based on selected clip type
                 let clip_type = state.selected_clip.and_then(|(tid, ci)| {
                     state
