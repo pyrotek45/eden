@@ -1256,7 +1256,7 @@ pub(super) fn draw_piano_roll_impl(
                         state.piano_roll_selected_notes.clear();
                         state.piano_roll_selected_notes.insert(ni);
                     }
-                    let (orig_start, orig_len) = state
+                    let (_, orig_len) = state
                         .project
                         .tracks
                         .iter()
@@ -1288,9 +1288,6 @@ pub(super) fn draw_piano_roll_impl(
                     input.drag_start_x = input.mouse_x;
                     input.drag_start_value = orig_len;
                     input.drag_start_value2 = ni as f64;
-                    state
-                        .drag_original_positions
-                        .insert((track_id, clip_idx), orig_start);
                 } else {
                     // Click on existing note body: start move
                     if !state.piano_roll_selected_notes.contains(&ni) {

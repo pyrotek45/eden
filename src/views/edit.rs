@@ -39,6 +39,7 @@ pub fn draw_edit(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mu
     let editor_x = sidebar_w + 1;
     let editor_w = w - editor_x;
 
+    state.sync_editor_selection();
     let clip_type = state.selected_clip.and_then(|(tid, ci)| {
         state
             .project

@@ -7,6 +7,7 @@ pub mod commands;
 pub mod config;
 pub mod input;
 mod history;
+pub(crate) mod clip_edit;
 pub mod models;
 pub mod state;
 

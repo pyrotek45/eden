@@ -449,12 +449,9 @@ pub struct AppState {
     // ── Clip drag state ──────────────────────────────────────────────
     /// Whether the current clip drag is a copy (Ctrl+drag)
     pub clip_drag_is_copy: bool,
-    /// The cloned copy made at drag start for Ctrl+drag (track_id, clip_index)
-    pub clip_drag_copy: Option<(u32, usize)>,
-    /// Stores original start times of clips when a drag operation begins
-    pub drag_original_positions: std::collections::HashMap<(u32, usize), f64>,
-    /// Stores original audio offset for left-edge resize of audio clips
-    pub drag_audio_offset_orig: f64,
+    pub(crate) clip_drag_moved: bool,
+    pub(crate) editor_clip_context: Option<(u32, usize, String)>,
+    pub(crate) clip_drag_baseline: Vec<super::clip_edit::ClipBaseline>,
     /// Ghost positions for clone drag visual feedback: (display_track_id, source_track_id, clip_idx, new_start)
     pub clip_drag_ghost_positions: Vec<(u32, u32, usize, f64)>,
     /// Target track for cross-track clip drag (None = same track)
@@ -807,6 +804,7 @@ pub struct AppState {
     pub help_screen_visible: bool,
     /// Currently selected tab index in the help screen
     pub help_screen_tab: usize,
+    pub help_screen_scroll: i32,
     // ── Audio editor export ────────────────────────────────────────
     /// Whether the audio export popup is open
     pub audio_export_popup_open: bool,
@@ -888,9 +886,9 @@ impl AppState {
             render_progress: None,
             render_result: None,
             clip_drag_is_copy: false,
-            clip_drag_copy: None,
-            drag_original_positions: std::collections::HashMap::new(),
-            drag_audio_offset_orig: 0.0,
+            clip_drag_moved: false,
+            editor_clip_context: None,
+            clip_drag_baseline: Vec::new(),
             clip_drag_ghost_positions: Vec::new(),
             clip_drag_target_track: None,
             clip_drag_target_valid: false,
@@ -1052,6 +1050,7 @@ impl AppState {
             recent_projects: Vec::new(),
             help_screen_visible: false,
             help_screen_tab: 0,
+            help_screen_scroll: 0,
             piano_keyboard_mode: false,
             piano_keyboard_octave: 4,
             piano_keyboard_held: std::collections::HashSet::new(),

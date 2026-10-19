@@ -228,6 +228,16 @@ fn main() {
                     // Dimensions will be recalculated from output_size()/scale in the render loop.
                     // Don't set them here to avoid scale mismatch on HiDPI.
                 }
+                Event::Window {
+                    win_event: sdl2::event::WindowEvent::FocusLost,
+                    ..
+                } => {
+                    state.cancel_clip_drag();
+                    input.drag_widget = crate::app::input::WidgetId::None;
+                    input.active_widget = crate::app::input::WidgetId::None;
+                    input.dragging = false;
+                    input.mouse_down = false;
+                }
                 Event::Window { .. } => {}
                 Event::MouseMotion { x, y, .. } => {
                     input.on_mouse_move(x, y);
@@ -294,9 +304,12 @@ fn main() {
                                 } else {
                                     state.selected_clip = None;
                                     state.selected_clips.clear();
-                                    // Cancel any in-progress clip drag
+                                    // Restore preview mutations before discarding a gesture.
+                                    state.cancel_clip_drag();
+                                    input.drag_widget = crate::app::input::WidgetId::None;
+                                    input.active_widget = crate::app::input::WidgetId::None;
+                                    input.dragging = false;
                                     state.clip_drag_ghost_positions.clear();
-                                    state.drag_original_positions.clear();
                                     state.clip_drag_target_track = None;
                                     state.clip_drag_target_valid = false;
                                     state.clip_drag_is_copy = false;
@@ -914,92 +927,7 @@ fn main() {
                                         }
                                     }
                                     _ => {
-                                        // Duplicate selected clips, placing them immediately after originals
-                                        let mut to_dup: Vec<(u32, usize)> =
-                                            state.selected_clips.iter().cloned().collect();
-                                        if to_dup.is_empty() {
-                                            if let Some(sel) = state.selected_clip {
-                                                to_dup.push(sel);
-                                            }
-                                        }
-
-                                        // Find the span of all selected clips (max end - min start)
-                                        let mut span_min = f64::MAX;
-                                        let mut span_max = 0.0_f64;
-                                        for &(tid, ci) in &to_dup {
-                                            if let Some(track) =
-                                                state.project.tracks.iter().find(|t| t.id == tid)
-                                            {
-                                                if let Some(orig) = track.clips.get(ci) {
-                                                    let s = orig.start_time();
-                                                    let e = s + orig.length();
-                                                    if s < span_min {
-                                                        span_min = s;
-                                                    }
-                                                    if e > span_max {
-                                                        span_max = e;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        let dup_offset = if span_max > span_min {
-                                            span_max - span_min
-                                        } else {
-                                            1.0 // fallback
-                                        };
-
-                                        let mut new_clips = Vec::new();
-                                        for (tid, ci) in to_dup {
-                                            if let Some(track) =
-                                                state.project.tracks.iter().find(|t| t.id == tid)
-                                            {
-                                                if let Some(orig) = track.clips.get(ci).cloned() {
-                                                    let new_start = orig.start_time() + dup_offset;
-                                                    let mut dup = orig.clone();
-                                                    match &mut dup {
-                                                        crate::app::models::Clip::Midi(c) => {
-                                                            c.start_time = new_start
-                                                        }
-                                                        crate::app::models::Clip::Audio(c) => {
-                                                            c.start_time = new_start
-                                                        }
-                                                        crate::app::models::Clip::Automation(c) => {
-                                                            c.start_time = new_start
-                                                        }
-                                                    }
-                                                    new_clips.push((tid, dup));
-                                                }
-                                            }
-                                        }
-
-                                        if !new_clips.is_empty() {
-                                            // Select newly added clips: they will be appended to tracks
-                                            state.selected_clips.clear();
-                                            for (tid, _) in &new_clips {
-                                                let track = state
-                                                    .project
-                                                    .tracks
-                                                    .iter()
-                                                    .find(|t| t.id == *tid)
-                                                    .unwrap();
-                                                let idx = track.clips.len()
-                                                    + state
-                                                        .selected_clips
-                                                        .iter()
-                                                        .filter(|(t, _)| t == tid)
-                                                        .count();
-                                                state.selected_clips.insert((*tid, idx));
-                                            }
-
-                                            state.commands.execute(
-                                                Box::new(crate::app::commands::AddClips {
-                                                    clips: new_clips,
-                                                    added_indices: Vec::new(),
-                                                }),
-                                                &mut state.project,
-                                            );
-                                            state.dirty = true;
-                                        }
+                                        state.duplicate_selected_clips();
                                     } // end _ => (arrangement duplicate)
                                 } // end match focused_panel
                             }

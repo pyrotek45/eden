@@ -62,9 +62,9 @@ Decode, waveform generation and offline stretch run in worker jobs with cancella
 - `rescale_audio_clips` also scales MIDI clips, MIDI notes and automation, despite its comment saying otherwise. This preserves seconds rather than musical positions.
 - Playback and export use initial BPM. Fixing only `bpm_at` will not fix their constant-rate stepping or render-duration calculations.
 - Several bar/position displays assume four beats per bar instead of the project's time signature.
-- Shift-resize displays TIME STRETCH but only changes clip length. There is no clip source-rate/warp map.
-- Source-bound validation depends on waveform-cache readiness.
-- Repeated group trim frames, right-resize undo, invalid copy destinations and beat-zero group clamping have reproducible defects.
+- True stretch remains unavailable: the misleading TIME STRETCH decoration has been removed. There is no clip source-rate/warp map.
+- WAV trims now read source bounds before waveform generation when needed; cold non-WAV source bounds still depend on available metadata.
+- Repeated group trim frames, right-resize undo, invalid group/copy destinations and beat-zero group clamping are repaired by immutable gesture baselines. See [clip-editing.md](clip-editing.md) for the implemented contract and remaining ownership gaps.
 
 ## Migration order and completion checks
 

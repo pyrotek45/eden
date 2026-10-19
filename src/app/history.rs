@@ -14,6 +14,7 @@ impl AppState {
     }
 
     pub fn apply_history(&mut self, redo: bool) {
+        self.cancel_clip_drag();
         let action = if redo { "Redo" } else { "Undo" };
         let Some(description) = self.history_description(redo) else {
             self.push_status(format!("Nothing to {}", action.to_lowercase()));
@@ -55,6 +56,7 @@ impl AppState {
         } else {
             self.commands.undo(&mut self.project);
         }
+        self.sync_editor_selection();
         self.dirty = true;
         self.push_status(format!("{}: {}", action, description));
     }

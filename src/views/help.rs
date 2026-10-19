@@ -91,6 +91,7 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
         if hover && input.mouse_pressed {
             state.help_screen_tab = i;
+            state.help_screen_scroll = 0;
             input.mouse_pressed = false;
         }
     }
@@ -185,12 +186,18 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             ("Delete / Backspace", "Delete selected clips", false),
             ("", "", false),
             ("── Clip Editing ──", "", true),
-            ("Drag clip", "Move clip; hold Ctrl to copy", false),
+            ("Drag clip", "Move selection; Ctrl+drag copies", false),
             ("Drag clip up / down", "Move clip to another track", false),
             ("Drag clip edge", "Resize clip (trim start/end)", false),
             (
-                "Double-click clip",
-                "Open in Piano Roll / Audio Editor",
+                "Double-click clip body",
+                "Open the selected clip editor",
+                false,
+            ),
+            ("Double-click clip name", "Rename clip", false),
+            (
+                "Escape (during drag)",
+                "Cancel and restore original clips",
                 false,
             ),
             ("Double-click empty lane", "Create new clip", false),
@@ -579,13 +586,42 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     let key_w = (content_w as f32 * 0.45) as i32;
     let desc_x = content_x + key_w + 4;
     let desc_w = content_w - key_w - 4;
-    let mut y = content_top;
+    let total_height: i32 = entries
+        .iter()
+        .map(|(k, d, _)| {
+            if k.is_empty() && d.is_empty() {
+                5
+            } else {
+                line_h
+            }
+        })
+        .sum();
+    let max_scroll = (total_height - (content_bot - content_top)).max(0);
+    if input.mouse_in_rect(content_x, content_top, content_w, content_bot - content_top)
+        && input.scroll_y != 0
+        && !input.scroll_consumed
+    {
+        state.help_screen_scroll -= input.scroll_y * line_h * 3;
+        input.scroll_consumed = true;
+    }
+    state.help_screen_scroll = state.help_screen_scroll.clamp(0, max_scroll);
+    canvas.set_clip_rect(sdl2::rect::Rect::new(
+        content_x,
+        content_top,
+        content_w.max(0) as u32,
+        (content_bot - content_top).max(0) as u32,
+    ));
+    let mut y = content_top - state.help_screen_scroll;
     for (key, desc, is_section) in &entries {
         if y + line_h > content_bot {
             break;
         }
         if key.is_empty() && desc.is_empty() {
             y += 5;
+            continue;
+        }
+        if y + line_h < content_top {
+            y += line_h;
             continue;
         }
         if *is_section {
@@ -609,6 +645,8 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         }
         y += line_h;
     }
+
+    canvas.set_clip_rect(None);
 
     // Click outside sidebar to dismiss (but not on sidebar tabs)
     if input.mouse_pressed

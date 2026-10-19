@@ -295,6 +295,8 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     && input.mouse_pressed
                     && !input.consumed
                     && input.click_type == Some(crate::app::input::ClickType::Double)
+                    && !input.shift()
+                    && !input.ctrl()
                     && max_w > 4
                     && topmost_hovered_ci == Some(ci)
                 {
@@ -573,58 +575,32 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 && input.active_widget == WidgetId::None
                 && topmost_hovered_ci == Some(ci)
             {
-                let zone = hover_zone;
+                let zone = if input.shift() {
+                    ClipHitZone::Body
+                } else {
+                    hover_zone
+                };
+                if matches!(zone, ClipHitZone::LeftHandle | ClipHitZone::RightHandle) {
+                    if !state.selected_clips.contains(&(track_id, ci)) {
+                        state.selected_clips.clear();
+                        state.selected_clips.insert((track_id, ci));
+                    }
+                    state.selected_clip = Some((track_id, ci));
+                    state.selected_track = Some(track_id);
+                }
                 match zone {
                     ClipHitZone::LeftHandle => {
                         input.active_widget = WidgetId::ClipLeftHandle(track_id, ci);
-                        input.drag_widget = WidgetId::ClipLeftHandle(track_id, ci);
-                        input.drag_start_value = clip_start + clip_len;
-                        input.drag_start_value2 = clip_start;
-                        if let crate::app::models::Clip::Audio(ref ac) =
-                            state.project.tracks[track_idx].clips[ci]
-                        {
-                            state.drag_audio_offset_orig = ac.offset;
-                        } else {
-                            state.drag_audio_offset_orig = 0.0;
-                        }
-                        state.drag_original_positions.clear();
-                        for &(t_id, c_idx) in &state.selected_clips {
-                            if let Some(tr) = state.project.tracks.iter().find(|t| t.id == t_id) {
-                                if let Some(c) = tr.clips.get(c_idx) {
-                                    state
-                                        .drag_original_positions
-                                        .insert((t_id, c_idx), c.start_time());
-                                }
-                            }
-                        }
+                        input.drag_widget = input.active_widget;
                     }
                     ClipHitZone::RightHandle => {
                         input.active_widget = WidgetId::ClipRightHandle(track_id, ci);
-                        input.drag_widget = WidgetId::ClipRightHandle(track_id, ci);
-                        input.drag_start_value = clip_len;
-                        input.drag_start_value2 = clip_start;
-                        if let crate::app::models::Clip::Audio(ref ac) =
-                            state.project.tracks[track_idx].clips[ci]
-                        {
-                            state.drag_audio_offset_orig = ac.offset;
-                        } else {
-                            state.drag_audio_offset_orig = 0.0;
-                        }
-                        state.drag_original_positions.clear();
-                        for &(t_id, c_idx) in &state.selected_clips {
-                            if let Some(tr) = state.project.tracks.iter().find(|t| t.id == t_id) {
-                                if let Some(c) = tr.clips.get(c_idx) {
-                                    state
-                                        .drag_original_positions
-                                        .insert((t_id, c_idx), c.length());
-                                }
-                            }
-                        }
+                        input.drag_widget = input.active_widget;
                     }
-                    ClipHitZone::Header => {
-                        // Header is the ONLY zone that selects/drags a clip.
+                    ClipHitZone::Header | ClipHitZone::Body => {
+                        // Body and header share selection and movement semantics.
                         if input.shift() {
-                            // Shift+click header: toggle clip in multi-select
+                            // Shift+click: toggle membership without moving clips.
                             if state.selected_clips.contains(&(track_id, ci)) {
                                 state.selected_clips.remove(&(track_id, ci));
                                 // Clear selected_clip so is_selected becomes false
@@ -646,72 +622,42 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             state.selected_tracks.clear();
                             state.selected_tracks.insert(track_id);
 
-                            if input.click_type == Some(crate::app::input::ClickType::Double) {
-                                // Double-click header = rename (handled above in text-field block)
-                                input.active_widget = WidgetId::ClipBody(track_id, ci);
-                            } else if input.ctrl() || input.alt() {
-                                // Ctrl+drag from header = clone drag
+                            if input.click_type == Some(crate::app::input::ClickType::Double)
+                                && !input.ctrl()
+                            {
+                                // Header double-click renames; body double-click opens Edit.
+                                if zone == ClipHitZone::Body {
+                                    state.bottom_panel_tab = BottomPanelTab::PianoRoll;
+                                    state.bottom_panel_open = true;
+                                }
+                                input.active_widget = WidgetId::None;
+                            } else if input.ctrl() {
+                                // Ctrl+drag = copy.
                                 state.clip_drag_is_copy = true;
-                                state.clip_drag_copy = None;
                                 input.active_widget = WidgetId::ClipBody(track_id, ci);
                                 input.drag_widget = WidgetId::ClipBody(track_id, ci);
                                 input.drag_start_value = clip_start;
                             } else {
-                                // Normal drag from header = move
+                                // Normal drag = move.
                                 state.clip_drag_is_copy = false;
-                                state.clip_drag_copy = None;
                                 input.active_widget = WidgetId::ClipBody(track_id, ci);
                                 input.drag_widget = WidgetId::ClipBody(track_id, ci);
                                 input.drag_start_value = clip_start;
                             }
 
-                            // Snapshot original positions for ALL selected clips
-                            state.drag_original_positions.clear();
-                            for &(tid, cidx) in &state.selected_clips {
-                                if let Some(track) =
-                                    state.project.tracks.iter().find(|t| t.id == tid)
-                                {
-                                    if let Some(c) = track.clips.get(cidx) {
-                                        state
-                                            .drag_original_positions
-                                            .insert((tid, cidx), c.start_time());
-                                    }
-                                }
-                            }
                         }
                     }
-                    ClipHitZone::Body | ClipHitZone::None => {
-                        // Double-click on clip body → open the clip in the editor.
-                        // Single body clicks pass through (allow rubber-band and lane clicks).
-                        if input.click_type == Some(crate::app::input::ClickType::Double)
-                            && topmost_hovered_ci == Some(ci)
-                            && !input.consumed
-                        {
-                            // Select this clip
-                            state.selected_clip = Some((track_id, ci));
-                            state.selected_clips.clear();
-                            state.selected_clips.insert((track_id, ci));
-                            state.selected_track = Some(track_id);
-                            state.selected_tracks.clear();
-                            state.selected_tracks.insert(track_id);
-                            // Open the appropriate editor panel tab
-                            let tab = match &state.project.tracks[track_idx].clips[ci] {
-                                crate::app::models::Clip::Midi(_) => BottomPanelTab::PianoRoll,
-                                crate::app::models::Clip::Audio(_) => BottomPanelTab::PianoRoll,
-                                crate::app::models::Clip::Automation(_) => {
-                                    BottomPanelTab::PianoRoll
-                                }
-                            };
-                            state.bottom_panel_tab = tab;
-                            if !state.bottom_panel_open {
-                                state.bottom_panel_open = true;
-                                state.bottom_panel_height = 320;
-                            }
-                            input.consume();
-                        }
-                        // Non-double-click body clicks still pass through for rubber-band etc.
-                    }
+                    ClipHitZone::None => {}
                 }
+                if matches!(
+                    input.drag_widget,
+                    WidgetId::ClipBody(_, _)
+                        | WidgetId::ClipLeftHandle(_, _)
+                        | WidgetId::ClipRightHandle(_, _)
+                ) {
+                    state.begin_clip_drag(track_id, ci);
+                }
+                input.consume();
             }
         }
 
@@ -1093,62 +1039,6 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         );
     }
 
-    // ── Shift+drag right handle: time stretch visual indicator ────────
-    if let WidgetId::ClipRightHandle(_, _) = input.drag_widget {
-        if input.mouse_down && input.shift() {
-            let mx = input.mouse_x;
-            let my = input.mouse_y;
-            // Draw a "TIME STRETCH" label near the cursor
-            let label = "TIME STRETCH";
-            let lw = label.len() as i32 * 9 + 12;
-            let lh = 18;
-            let lx = mx + 12;
-            let ly = my - 24;
-            canvas.set_draw_color(sdl2::pixels::Color::RGBA(200, 140, 40, 230));
-            let _ = canvas.fill_rect(Rect::new(lx, ly, lw as u32, lh as u32));
-            canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 200, 80, 255));
-            let _ = canvas.draw_rect(Rect::new(lx, ly, lw as u32, lh as u32));
-            draw_pixel_label(
-                canvas,
-                &state.theme,
-                label,
-                lx + 6,
-                ly + 4,
-                lw - 12,
-                sdl2::pixels::Color::RGBA(30, 20, 10, 255),
-            );
-            // Draw stretch arrows icon (← →) next to handle
-            let arrow_y = my;
-            canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 200, 80, 200));
-            // Right arrow
-            let _ = canvas.draw_line(
-                sdl2::rect::Point::new(mx + 4, arrow_y),
-                sdl2::rect::Point::new(mx + 14, arrow_y),
-            );
-            let _ = canvas.draw_line(
-                sdl2::rect::Point::new(mx + 11, arrow_y - 3),
-                sdl2::rect::Point::new(mx + 14, arrow_y),
-            );
-            let _ = canvas.draw_line(
-                sdl2::rect::Point::new(mx + 11, arrow_y + 3),
-                sdl2::rect::Point::new(mx + 14, arrow_y),
-            );
-            // Left arrow
-            let _ = canvas.draw_line(
-                sdl2::rect::Point::new(mx - 4, arrow_y),
-                sdl2::rect::Point::new(mx - 14, arrow_y),
-            );
-            let _ = canvas.draw_line(
-                sdl2::rect::Point::new(mx - 11, arrow_y - 3),
-                sdl2::rect::Point::new(mx - 14, arrow_y),
-            );
-            let _ = canvas.draw_line(
-                sdl2::rect::Point::new(mx - 11, arrow_y + 3),
-                sdl2::rect::Point::new(mx - 14, arrow_y),
-            );
-        }
-    }
-
     // Scroll and zoom
     let in_lane = input.mouse_in_rect(lane_left, top, lane_area_w, state.track_area_height())
         && input.mouse_y < state.bottom_panel_y();
@@ -1338,12 +1228,11 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
     // Reset ctrl+drag copy state on release
     if input.mouse_released {
         state.clip_drag_is_copy = false;
-        state.clip_drag_copy = None;
         state.clip_drag_ghost_positions.clear();
         state.clip_drag_target_track = None;
         state.clip_drag_target_valid = false;
-        // Clear drag snapshots — they're only valid during an active drag
-        state.drag_original_positions.clear();
+        // Clear drag snapshots — they're only valid during an active drag.
+        state.clip_drag_baseline.clear();
     }
 
     // ── Draw clip drag preview (actual clip appearance, red for invalid cross-track) ──
@@ -1368,8 +1257,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         let gw = (cl * zoom) as i32;
 
                         // Determine if this is a cross-track drag to an incompatible track
-                        let is_cross = display_tid != src_tid;
-                        let show_invalid = is_cross && !target_valid;
+                        let show_invalid = !target_valid;
 
                         if show_invalid {
                             // Red block for invalid cross-track target
@@ -1559,662 +1447,10 @@ fn handle_clip_drag(
     state: &mut AppState,
     input: &InputState,
     zoom: f64,
-    scroll_x: f64,
-    header_w: i32,
+    _scroll_x: f64,
+    _header_w: i32,
 ) {
-    // On the release frame, input.dragging is already false (cleared in apply_scale),
-    // so we must also check for mouse_released with an active clip drag widget.
-    let is_clip_drag_release = input.mouse_released
-        && matches!(
-            input.active_widget,
-            WidgetId::ClipBody(_, _)
-                | WidgetId::ClipLeftHandle(_, _)
-                | WidgetId::ClipRightHandle(_, _)
-        );
-
-    if !input.dragging && !is_clip_drag_release {
-        return;
-    }
-
-    let snap_threshold = state.snap.resolution_beats() * 0.30;
-    // Minimum clip length = snap grid resolution (so you can zoom in and make very small clips)
-    let min_clip_len = if state.snap.enabled {
-        state.snap.resolution_beats()
-    } else {
-        0.03125 // 1/128 note, effectively no minimum
-    };
-    let cursor_beat = scroll_x + (input.mouse_x - header_w) as f64 / zoom;
-
-    // On the release frame, drag_widget is already cleared to None (in apply_scale),
-    // so use active_widget (which survives until begin_frame) for release detection.
-    let effective_widget = if input.dragging {
-        input.drag_widget
-    } else {
-        input.active_widget
-    };
-
-    match effective_widget {
-        WidgetId::ClipBody(tid, ci) => {
-            let total_dx_px = input.mouse_x - input.drag_start_x;
-            let raw_delta = total_dx_px as f64 / zoom;
-            let raw = (input.drag_start_value + raw_delta).max(0.0);
-            let snapped = state.snap.snap_proximity(raw, snap_threshold);
-            let actual_delta = snapped - input.drag_start_value;
-
-            let top = state.track_area_top();
-            let scroll_y = state.arrangement.scroll_y;
-            let mut ty = top - scroll_y;
-            let mut target_track_id: Option<u32> = None;
-            let orig_track_type = state
-                .project
-                .tracks
-                .iter()
-                .find(|t| t.id == tid)
-                .map(|t| t.track_type);
-
-            for track in &state.project.tracks {
-                let bot = ty + track.height;
-                if input.mouse_y >= ty && input.mouse_y < bot {
-                    target_track_id = Some(track.id);
-                    break;
-                }
-                ty = bot;
-            }
-
-            // Check if the target track is compatible (same track type)
-            let target_valid = match (orig_track_type, target_track_id) {
-                (Some(orig_tt), Some(tgt_id)) => state
-                    .project
-                    .tracks
-                    .iter()
-                    .find(|t| t.id == tgt_id)
-                    .map(|t| t.track_type == orig_tt)
-                    .unwrap_or(false),
-                _ => false,
-            };
-
-            // Store target track for visual feedback
-            state.clip_drag_target_track = target_track_id;
-            state.clip_drag_target_valid = target_valid;
-
-            let is_multi = state.selected_clips.contains(&(tid, ci));
-            let is_single_selected = state.selected_clips.len() == 1;
-            let mut moves = Vec::new();
-
-            // For multi-clip drags, compute per-clip destination tracks
-            // based on relative track index offsets from the dragged clip.
-            let dragged_track_idx = state.project.tracks.iter().position(|t| t.id == tid);
-            let target_track_idx = target_track_id
-                .and_then(|ttid| state.project.tracks.iter().position(|t| t.id == ttid));
-            let track_idx_delta: i32 = match (dragged_track_idx, target_track_idx) {
-                (Some(d), Some(t)) => t as i32 - d as i32,
-                _ => 0,
-            };
-            // Build track id list for index-based lookup
-            let track_ids: Vec<u32> = state.project.tracks.iter().map(|t| t.id).collect();
-            let track_types: Vec<crate::app::models::TrackType> =
-                state.project.tracks.iter().map(|t| t.track_type).collect();
-
-            if is_multi {
-                for (&(t_id, c_idx), &old_start) in &state.drag_original_positions {
-                    let new_start = (old_start + actual_delta).max(0.0);
-                    // Also trigger move on cross-track even without horizontal movement
-                    let cross_track = target_valid
-                        && target_track_id.is_some()
-                        && target_track_id.unwrap() != t_id;
-                    if input.mouse_released
-                        && (state.clip_drag_is_copy
-                            || (new_start - old_start).abs() > 1e-9
-                            || cross_track)
-                    {
-                        moves.push(((t_id, c_idx), old_start, new_start));
-                    } else if !state.clip_drag_is_copy && !input.mouse_released {
-                        // Only move originals live when NOT cloning
-                        if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == t_id)
-                        {
-                            if let Some(clip) = track.clips.get_mut(c_idx) {
-                                clip.set_start_time(new_start);
-                            }
-                        }
-                    }
-                }
-            } else if input.mouse_released
-                && (state.clip_drag_is_copy
-                    || (snapped - input.drag_start_value).abs() > 1e-9
-                    || (target_valid
-                        && target_track_id.is_some()
-                        && target_track_id.unwrap() != tid))
-            {
-                moves.push(((tid, ci), input.drag_start_value, snapped));
-            } else if !state.clip_drag_is_copy && !input.mouse_released {
-                // Only move originals live when NOT cloning and staying on the same track
-                let same_track = target_track_id.is_none() || target_track_id == Some(tid);
-                if same_track {
-                    if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == tid) {
-                        if let Some(clip) = track.clips.get_mut(ci) {
-                            clip.set_start_time(snapped);
-                        }
-                    }
-                }
-            }
-
-            // Store ghost positions for visual feedback during drag
-            if !input.mouse_released {
-                state.clip_drag_ghost_positions.clear();
-                if is_multi {
-                    // Multi-select drag: show ghost for all selected clips.
-                    // Each clip gets its own destination track based on relative offset
-                    // from the dragged clip, preserving the lane layout.
-                    for (&(t_id, c_idx), &old_start) in &state.drag_original_positions {
-                        let new_start = (old_start + actual_delta).max(0.0);
-                        let ghost_tid = if track_idx_delta != 0 {
-                            // Resolve destination for this clip's track
-                            if let Some(src_idx) = track_ids.iter().position(|&id| id == t_id) {
-                                let dst_idx = (src_idx as i32 + track_idx_delta).max(0) as usize;
-                                track_ids.get(dst_idx).copied().unwrap_or(t_id)
-                            } else {
-                                t_id
-                            }
-                        } else {
-                            t_id
-                        };
-                        state
-                            .clip_drag_ghost_positions
-                            .push((ghost_tid, t_id, c_idx, new_start));
-                    }
-                } else {
-                    // Single clip: always show ghost (on target track or same track)
-                    let ghost_tid = target_track_id.unwrap_or(tid);
-                    state
-                        .clip_drag_ghost_positions
-                        .push((ghost_tid, tid, ci, snapped));
-                }
-            }
-
-            if input.mouse_released && !moves.is_empty() {
-                state.clip_drag_ghost_positions.clear();
-                if state.clip_drag_is_copy {
-                    // Ctrl+drag: instead of moving, create copies at the new positions
-                    // Revert everything to original first
-                    if is_multi {
-                        for (&(t_id, c_idx), &old_start) in &state.drag_original_positions {
-                            if let Some(track) =
-                                state.project.tracks.iter_mut().find(|t| t.id == t_id)
-                            {
-                                if let Some(clip) = track.clips.get_mut(c_idx) {
-                                    clip.set_start_time(old_start);
-                                }
-                            }
-                        }
-                    } else if let Some(track) =
-                        state.project.tracks.iter_mut().find(|t| t.id == tid)
-                    {
-                        if let Some(clip) = track.clips.get_mut(ci) {
-                            clip.set_start_time(input.drag_start_value);
-                        }
-                    }
-                    // Build clone clips at new positions
-                    let mut new_clips: Vec<(u32, crate::app::models::Clip)> = Vec::new();
-                    for ((t_id, c_idx), _, new_start) in &moves {
-                        if let Some(track) = state.project.tracks.iter().find(|t| t.id == *t_id) {
-                            if let Some(orig) = track.clips.get(*c_idx).cloned() {
-                                let mut new_clip = orig;
-                                new_clip.set_start_time(*new_start);
-                                // Resolve per-clip destination using track index offset
-                                let dest_tid = if track_idx_delta != 0 && is_multi {
-                                    if let Some(src_idx) =
-                                        track_ids.iter().position(|&id| id == *t_id)
-                                    {
-                                        let dst_idx =
-                                            (src_idx as i32 + track_idx_delta).max(0) as usize;
-                                        track_ids.get(dst_idx).copied().unwrap_or(*t_id)
-                                    } else {
-                                        *t_id
-                                    }
-                                } else if !is_multi {
-                                    target_track_id.unwrap_or(*t_id)
-                                } else {
-                                    *t_id
-                                };
-                                new_clips.push((dest_tid, new_clip));
-                            }
-                        }
-                    }
-                    if !new_clips.is_empty() {
-                        state.commands.execute(
-                            Box::new(crate::app::commands::AddClips {
-                                clips: new_clips,
-                                added_indices: Vec::new(),
-                            }),
-                            &mut state.project,
-                        );
-                    }
-                } else {
-                    // Revert live view before submitting command
-                    if is_multi {
-                        for (&(t_id, c_idx), &old_start) in &state.drag_original_positions {
-                            if let Some(track) =
-                                state.project.tracks.iter_mut().find(|t| t.id == t_id)
-                            {
-                                if let Some(clip) = track.clips.get_mut(c_idx) {
-                                    clip.set_start_time(old_start);
-                                }
-                            }
-                        }
-                    } else if let Some(track) =
-                        state.project.tracks.iter_mut().find(|t| t.id == tid)
-                    {
-                        if let Some(clip) = track.clips.get_mut(ci) {
-                            clip.set_start_time(input.drag_start_value);
-                        }
-                    }
-
-                    // Check if this is a cross-track move (using per-clip track offset)
-                    let is_cross_track = track_idx_delta != 0;
-
-                    if is_cross_track && target_valid {
-                        if is_single_selected {
-                            // Single clip: use the simpler single-clip command
-                            let target_tid = target_track_id.unwrap();
-                            let new_start = moves[0].2;
-                            let old_start = moves[0].1;
-                            state.commands.execute(
-                                Box::new(crate::app::commands::MoveClipCrossTrack {
-                                    src_track_id: tid,
-                                    src_clip_idx: ci,
-                                    dst_track_id: target_tid,
-                                    old_start,
-                                    new_start,
-                                    dst_clip_idx: None,
-                                }),
-                                &mut state.project,
-                            );
-                            // Update selection to the new location
-                            if let Some(dst_ci) = state
-                                .project
-                                .tracks
-                                .iter()
-                                .find(|t| t.id == target_tid)
-                                .map(|t| t.clips.len().saturating_sub(1))
-                            {
-                                state.selected_clip = Some((target_tid, dst_ci));
-                                state.selected_clips.clear();
-                                state.selected_clips.insert((target_tid, dst_ci));
-                            }
-                        } else {
-                            // Multiple clips: move each to its own destination track
-                            // based on relative track index offset.
-                            // Collect clips to remove and re-add at new positions.
-                            let mut clips_to_delete: Vec<(u32, usize, crate::app::models::Clip)> =
-                                Vec::new();
-                            let mut clips_to_add: Vec<(u32, crate::app::models::Clip)> = Vec::new();
-                            for &((t_id, c_idx), _old, new_start) in &moves {
-                                let dest_tid = if let Some(src_idx) =
-                                    track_ids.iter().position(|&id| id == t_id)
-                                {
-                                    let dst_idx =
-                                        (src_idx as i32 + track_idx_delta).max(0) as usize;
-                                    track_ids.get(dst_idx).copied().unwrap_or(t_id)
-                                } else {
-                                    t_id
-                                };
-                                // Verify destination track is compatible
-                                let src_tt = track_ids
-                                    .iter()
-                                    .position(|&id| id == t_id)
-                                    .and_then(|i| track_types.get(i));
-                                let dst_tt = track_ids
-                                    .iter()
-                                    .position(|&id| id == dest_tid)
-                                    .and_then(|i| track_types.get(i));
-                                if src_tt == dst_tt && dest_tid != t_id {
-                                    if let Some(track) =
-                                        state.project.tracks.iter().find(|t| t.id == t_id)
-                                    {
-                                        if let Some(clip) = track.clips.get(c_idx) {
-                                            clips_to_delete.push((t_id, c_idx, clip.clone()));
-                                            let mut new_clip = clip.clone();
-                                            new_clip.set_start_time(new_start);
-                                            clips_to_add.push((dest_tid, new_clip));
-                                        }
-                                    }
-                                }
-                            }
-                            if !clips_to_delete.is_empty() {
-                                // Use a composite of Delete + Add for proper undo
-                                let cmds: Vec<Box<dyn crate::app::commands::Command>> = vec![
-                                    Box::new(crate::app::commands::DeleteClips {
-                                        clips: clips_to_delete,
-                                    }),
-                                    Box::new(crate::app::commands::AddClips {
-                                        clips: clips_to_add,
-                                        added_indices: Vec::new(),
-                                    }),
-                                ];
-                                state.commands.execute(
-                                    Box::new(crate::app::commands::CompositeCommand {
-                                        desc: "Move Clips Cross-Track".to_string(),
-                                        cmds,
-                                    }),
-                                    &mut state.project,
-                                );
-                                // Update selection to new locations
-                                state.selected_clips.clear();
-                                state.selected_clip = None;
-                            }
-                        }
-                    } else {
-                        let move_cmd = crate::app::commands::MoveClips { moves };
-                        state
-                            .commands
-                            .execute(Box::new(move_cmd), &mut state.project);
-                    }
-                }
-                state.dirty = true;
-            } else {
-                state.dirty = true;
-            }
-        }
-        WidgetId::ClipLeftHandle(tid, ci) => {
-            let orig_end = input.drag_start_value; // fixed right edge (clip end beat)
-            let orig_start = input.drag_start_value2; // original left edge (for undo)
-            let orig_len = orig_end - orig_start;
-            let raw_start = cursor_beat.max(0.0).min(orig_end - min_clip_len);
-            let snapped_start = state
-                .snap
-                .snap_proximity(raw_start, snap_threshold)
-                .clamp(0.0, orig_end - min_clip_len);
-            let new_len = orig_end - snapped_start;
-            let delta_start = snapped_start - orig_start;
-            let is_multi_resize =
-                state.selected_clips.len() > 1 && state.selected_clips.contains(&(tid, ci));
-
-            if input.mouse_released {
-                if is_multi_resize {
-                    // Build multi-clip resize command using snapshots for orig values
-                    let sel: Vec<(u32, usize)> = state.selected_clips.iter().cloned().collect();
-                    let mut ops: Vec<(u32, usize, f64, f64, f64, f64)> = Vec::new();
-                    for (t_id, c_idx) in &sel {
-                        let c_orig_start = state
-                            .drag_original_positions
-                            .get(&(*t_id, *c_idx))
-                            .cloned()
-                            .unwrap_or(orig_start);
-                        if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == *t_id)
-                        {
-                            if let Some(clip) = track.clips.get_mut(*c_idx) {
-                                // end is fixed: orig_end = c_orig_start + orig_len
-                                // now: new_start = clip.start_time(), new_len = clip.length()
-                                // so orig_len = new_len + (new_start - c_orig_start)
-                                let c_new_start = clip.start_time();
-                                let c_new_len = clip.length();
-                                let c_orig_len = c_new_len + (c_new_start - c_orig_start);
-                                ops.push((
-                                    *t_id,
-                                    *c_idx,
-                                    c_orig_start,
-                                    c_orig_len,
-                                    c_new_start,
-                                    c_new_len,
-                                ));
-                                // revert live view so command.apply() sets it correctly
-                                clip.set_start_time(c_orig_start);
-                                clip.set_length(c_orig_len);
-                            }
-                        }
-                    }
-                    state.commands.execute(
-                        Box::new(crate::app::commands::ResizeClips { clips: ops }),
-                        &mut state.project,
-                    );
-                } else {
-                    // Compute audio offset change for left-edge resize.
-                    // For audio clips: clamp so offset never goes below 0.
-                    // Read the actual live state.
-                    let old_audio_off = state.drag_audio_offset_orig;
-                    // Check if the clip is audio
-                    let is_audio = state
-                        .project
-                        .tracks
-                        .iter()
-                        .find(|t| t.id == tid)
-                        .and_then(|t| t.clips.get(ci))
-                        .map(|c| matches!(c, crate::app::models::Clip::Audio(_)))
-                        .unwrap_or(false);
-                    // Read the actual current state set by the live update
-                    let (actual_new_start, actual_new_len, actual_new_audio_off) = state
-                        .project
-                        .tracks
-                        .iter()
-                        .find(|t| t.id == tid)
-                        .and_then(|t| t.clips.get(ci))
-                        .map(|c| {
-                            let s = c.start_time();
-                            let l = c.length();
-                            let off = if let crate::app::models::Clip::Audio(ac) = c {
-                                ac.offset
-                            } else {
-                                0.0
-                            };
-                            (s, l, off)
-                        })
-                        .unwrap_or((snapped_start, new_len, 0.0));
-                    // Revert live state before command applies it
-                    if is_audio {
-                        if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == tid) {
-                            if let Some(clip) = track.clips.get_mut(ci) {
-                                clip.set_start_time(orig_start);
-                                clip.set_length(orig_len);
-                                if let crate::app::models::Clip::Audio(ref mut ac) = clip {
-                                    ac.offset = old_audio_off;
-                                }
-                            }
-                        }
-                    } else if let Some(track) =
-                        state.project.tracks.iter_mut().find(|t| t.id == tid)
-                    {
-                        if let Some(clip) = track.clips.get_mut(ci) {
-                            clip.set_start_time(orig_start);
-                            clip.set_length(orig_len);
-                        }
-                    }
-                    let cmd = crate::app::commands::ResizeClip {
-                        track_id: tid,
-                        clip_idx: ci,
-                        old_start: orig_start,
-                        old_len: orig_len,
-                        new_start: actual_new_start,
-                        new_len: actual_new_len,
-                        old_audio_offset: if is_audio { Some(old_audio_off) } else { None },
-                        new_audio_offset: if is_audio {
-                            Some(actual_new_audio_off)
-                        } else {
-                            None
-                        },
-                    };
-                    state.commands.execute(Box::new(cmd), &mut state.project);
-                }
-            } else if is_multi_resize {
-                let sel: Vec<(u32, usize)> = state.selected_clips.iter().cloned().collect();
-                for (t_id, c_idx) in sel {
-                    if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == t_id) {
-                        if let Some(clip) = track.clips.get_mut(c_idx) {
-                            // drag_original_positions stores each clip's original start
-                            let c_orig_start = *state
-                                .drag_original_positions
-                                .get(&(t_id, c_idx))
-                                .unwrap_or(&clip.start_time());
-                            let c_orig_end = c_orig_start + clip.length(); // end stays fixed per clip
-                            let c_new_start = (c_orig_start + delta_start)
-                                .max(0.0)
-                                .min(c_orig_end - min_clip_len);
-                            let c_new_len = (c_orig_end - c_new_start).max(min_clip_len);
-                            clip.set_start_time(c_new_start);
-                            clip.set_length(c_new_len);
-                        }
-                    }
-                }
-                state.dirty = true;
-            } else {
-                if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == tid) {
-                    if let Some(clip) = track.clips.get_mut(ci) {
-                        // For audio clips: adjust offset as left edge moves.
-                        // Clamp so offset never goes below 0 (can't reveal audio
-                        // before the start of the source file).
-                        let (new_st, new_ln, new_off) =
-                            if let crate::app::models::Clip::Audio(ref _ac) = *clip {
-                                let bpm = state.project.tempo_map.bpm_at(0.0);
-                                let delta_beats = snapped_start - orig_start;
-                                let delta_secs = delta_beats * 60.0 / bpm;
-                                let desired_offset = state.drag_audio_offset_orig + delta_secs;
-                                if desired_offset < 0.0 {
-                                    // Clamp: only allow dragging left until offset = 0
-                                    let max_left_beats = state.drag_audio_offset_orig * bpm / 60.0;
-                                    let clamped_start = (orig_start - max_left_beats).max(0.0);
-                                    let clamped_len = orig_end - clamped_start;
-                                    (clamped_start, clamped_len.max(min_clip_len), Some(0.0_f64))
-                                } else {
-                                    (snapped_start, new_len, Some(desired_offset))
-                                }
-                            } else {
-                                (snapped_start, new_len, None)
-                            };
-                        clip.set_start_time(new_st);
-                        clip.set_length(new_ln);
-                        if let (Some(off), crate::app::models::Clip::Audio(ref mut ac)) =
-                            (new_off, clip)
-                        {
-                            ac.offset = off;
-                        }
-                    }
-                }
-                state.dirty = true;
-            }
-        }
-        WidgetId::ClipRightHandle(tid, ci) => {
-            let orig_start = input.drag_start_value2; // unchanged clip start
-            let orig_len = input.drag_start_value; // original length
-            let total_dx_px = input.mouse_x - input.drag_start_x;
-            let raw_len = (orig_len + total_dx_px as f64 / zoom).max(min_clip_len);
-
-            let bpm = state.project.tempo_map.bpm_at(0.0).max(1.0);
-
-            // For audio clips: clamp length so we can't drag past the end of the
-            // audio file (at the CURRENT offset). Offset never changes on right drag.
-            let snapped_len = {
-                let audio_max_len: Option<f64> = state
-                    .project
-                    .tracks
-                    .iter()
-                    .find(|t| t.id == tid)
-                    .and_then(|t| t.clips.get(ci))
-                    .and_then(|c| {
-                        if let crate::app::models::Clip::Audio(ac) = c {
-                            if !ac.source_file.is_empty() {
-                                if let Some((_, total_dur)) =
-                                    state.waveform_cache.get(&ac.source_file)
-                                {
-                                    // Available audio = total_duration - current_offset
-                                    let avail_secs = (*total_dur - ac.offset).max(0.0);
-                                    Some(avail_secs * bpm / 60.0)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    });
-
-                if let Some(max_len) = audio_max_len {
-                    state
-                        .snap
-                        .snap_proximity(raw_len, snap_threshold)
-                        .max(min_clip_len)
-                        .min(max_len)
-                } else {
-                    // MIDI clip or no waveform info — allow free resize
-                    state
-                        .snap
-                        .snap_proximity(raw_len, snap_threshold)
-                        .max(min_clip_len)
-                }
-            };
-
-            let delta_len = snapped_len - orig_len;
-            let is_multi_resize =
-                state.selected_clips.len() > 1 && state.selected_clips.contains(&(tid, ci));
-
-            if input.mouse_released {
-                if is_multi_resize {
-                    let sel: Vec<(u32, usize)> = state.selected_clips.iter().cloned().collect();
-                    let mut ops: Vec<(u32, usize, f64, f64, f64, f64)> = Vec::new();
-                    for (t_id, c_idx) in &sel {
-                        if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == *t_id)
-                        {
-                            if let Some(clip) = track.clips.get_mut(*c_idx) {
-                                let c_orig_len = clip.length() - delta_len;
-                                let c_new_len = clip.length();
-                                ops.push((
-                                    *t_id,
-                                    *c_idx,
-                                    clip.start_time(),
-                                    c_orig_len,
-                                    clip.start_time(),
-                                    c_new_len,
-                                ));
-                                clip.set_length(c_orig_len); // revert
-                            }
-                        }
-                    }
-                    state.commands.execute(
-                        Box::new(crate::app::commands::ResizeClips { clips: ops }),
-                        &mut state.project,
-                    );
-                } else {
-                    // Audio offset never changes on right-handle drag
-                    let old_offset = Some(state.drag_audio_offset_orig);
-                    let cmd = crate::app::commands::ResizeClip {
-                        track_id: tid,
-                        clip_idx: ci,
-                        old_start: orig_start,
-                        old_len: orig_len,
-                        new_start: orig_start,
-                        new_len: snapped_len,
-                        old_audio_offset: old_offset,
-                        new_audio_offset: old_offset, // offset unchanged
-                    };
-                    state.commands.execute(Box::new(cmd), &mut state.project);
-                }
-            } else if is_multi_resize {
-                let sel: Vec<(u32, usize)> = state.selected_clips.iter().cloned().collect();
-                for (t_id, c_idx) in sel {
-                    if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == t_id) {
-                        if let Some(clip) = track.clips.get_mut(c_idx) {
-                            let c_orig_len = *state
-                                .drag_original_positions
-                                .get(&(t_id, c_idx))
-                                .unwrap_or(&clip.length());
-                            let c_new_len = (c_orig_len + delta_len).max(min_clip_len);
-                            clip.set_length(c_new_len);
-                        }
-                    }
-                }
-                state.dirty = true;
-            } else {
-                if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == tid) {
-                    if let Some(clip) = track.clips.get_mut(ci) {
-                        clip.set_length(snapped_len);
-                        // Offset is NEVER changed by right-handle drag
-                    }
-                }
-                state.dirty = true;
-            }
-        }
-        _ => {}
-    }
+    state.update_clip_drag(input, zoom);
 }
 
 // ── Bottom panel ─────────────────────────────────────────────────────
