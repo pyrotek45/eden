@@ -21,6 +21,7 @@ pub mod dsp_primitives;
 pub mod effects;
 pub mod instruments;
 pub mod midi_effects;
+pub mod response;
 
 // Re-export everything from sub-modules so existing `use crate::modules::*` works.
 pub use dsp_primitives::*;

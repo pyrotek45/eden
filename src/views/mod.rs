@@ -65,6 +65,7 @@ mod mixer;
 mod mixer_view;
 mod overlays;
 mod piano_roll;
+mod rack_visuals;
 mod project_manager;
 mod track_headers;
 mod track_lanes;
