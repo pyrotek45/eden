@@ -396,6 +396,7 @@ pub const VIS_PANEL_EFFECTS: &[&str] = &[
     "Distortion",
     "Delay",
     "Limiter",
+    "Reverb",
 ];
 
 /// Returns true if this effect has a visual panel (graph/meter) in the mixer.

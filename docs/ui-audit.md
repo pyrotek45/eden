@@ -9,6 +9,7 @@ Reviewed so far: transport/toolbar buttons, Add Track menu and all three track t
 | Trigger | Fix |
 |---|---|
 | Audio editor on an audio clip with no source file: NORM, TRIM, CUT, PASTE, Export and APPLY looked enabled and did nothing when clicked or triggered by W/E/T/Y/B. | These buttons are disabled with the reason as the hover hint ("This clip has no audio file to edit", or "Audio file not found: name"). Using the keyboard shortcut shows the same reason as a toast. |
+| Tooltips were drawn above the pointer and covered the menu row or tab above the hovered control. | Tooltips sit below the pointer and flip above only when there is no room; placement is a tested pure function. |
 | TRIM or CUT with no selection did nothing. | A toast explains that a selection is needed (drag across the waveform, or SEL). |
 | NORM, TRIM, CUT, PASTE and APPLY silently did nothing when the source file could not be decoded. | A toast names the file and the decode error. |
 
@@ -16,7 +17,7 @@ Regression tests: `views::audio_editor::tests` cover the reason text for empty, 
 
 ## Open, with triggers and acceptance criteria
 
-1. **Tooltip covers other controls.** Trigger: click "+ Add Track" and hover it; the "Add a new track" tooltip is drawn over the "Auto Track" menu row and the button label. Hovering the bottom tabs (MIXER/EDIT/RACK/MASTER) shows the tooltip over the neighbouring tab labels. Acceptance: a tooltip never covers the control it describes or an open menu entry.
+1. **Tooltip over open menus.** The tooltip still appears while the Add Track menu is open. It no longer covers the rows above, but it can cover the row below the pointer. Acceptance: no tooltip while a menu is open. Re-verify visually; only the placement function is unit tested.
 2. **New clips are all named "Clip".** Trigger: double-click an empty lane on three tracks. The CLIPS library then lists three entries named "Clip". Acceptance: new clips get distinct names, or the library distinguishes them without relying on the name. This needs a naming decision and ties into the clip-identity migration in [clip-editing.md](clip-editing.md).
 3. **Clips created by double-click stay selected together.** Trigger: create a clip on each of three tracks; all three show selection handles. Acceptance: creating a clip selects only that clip. Needs reproduction in a unit test before changing.
 4. **Truncated labels.** Trigger: select an automation clip; the editor header reads "AUTO: volum". MIDI editor header text "MIDI 1 / Clip (1b DRAW" is also cut off at the default size. Mixer strip titles truncate ("Audio" for "Audio 1"). Acceptance: labels fit or are shortened deliberately with the full text in a hover hint.

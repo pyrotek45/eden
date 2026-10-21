@@ -11,7 +11,7 @@ use sdl2::rect::Rect;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
 
-use crate::modules::response::{filter_cutoff_hz, svf_magnitude_db, SvfOutput};
+use crate::modules::response::{filter_cutoff_hz, reverb_early_taps, svf_magnitude_db, SvfOutput};
 use crate::theme::Theme;
 use crate::widgets::*;
 
@@ -137,6 +137,97 @@ fn draw_filter_display(
 }
 
 
+/// Longest time axis a reverb display uses, in seconds (the Decay control's maximum).
+const REVERB_AXIS_MAX_S: f64 = 12.0;
+/// Shortest time axis, so a very short decay still shows its pre-delay and early taps.
+const REVERB_AXIS_MIN_S: f64 = 0.5;
+/// The axis extends this far past the decay so the tail reaches the floor with room to spare.
+const REVERB_AXIS_HEADROOM: f64 = 1.25;
+/// Decay in dB the tail reaches at the RT60 time (the definition of RT60).
+const RT60_DECAY_DB: f64 = 60.0;
+/// Fraction of the display height used by the tallest early-reflection stem.
+const EARLY_STEM_MAX_HEIGHT_FRACTION: f64 = 0.45;
+/// Opacity (0-255) of the area under the late-tail decay line.
+const REVERB_TAIL_FILL_ALPHA: u8 = 45;
+
+/// Smallest gap between two time-axis ticks, in pixels: a label such as "0.5s"
+/// is four glyphs wide, so this keeps neighbouring labels from touching.
+const MIN_TICK_SPACING_PX: f64 = 56.0;
+
+/// Tick spacing in seconds for a time axis spanning `axis_s` seconds across
+/// `width_px` pixels: the finest round step whose ticks are far enough apart to label.
+pub(super) fn time_axis_step_s(axis_s: f64, width_px: i32) -> f64 {
+    const STEPS_S: [f64; 8] = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0];
+    STEPS_S
+        .iter()
+        .copied()
+        .find(|step| step / axis_s * width_px as f64 >= MIN_TICK_SPACING_PX)
+        .unwrap_or(STEPS_S[STEPS_S.len() - 1])
+}
+
+/// Reverb display: level against time after an impulse. Shows the pre-delay,
+/// the early reflections at their real tap times (`reverb_early_taps`) and the
+/// late tail as a line that falls 60 dB over the Decay (RT60) time, which is how
+/// `FxReverb::process_late` sets its comb feedback.
+fn draw_reverb_display(canvas: &mut Canvas<Window>, theme: &Theme, area: Rect, params: &[(String, f32)]) {
+    let (x0, y0) = (area.x(), area.y());
+    let (w, h) = (area.width() as i32, area.height() as i32);
+    let predelay_s = param_or(params, "predelay", 14.0) as f64 / 1000.0;
+    let decay_s = param_or(params, "decay", 1.6) as f64;
+    let size = param_or(params, "size", 24.0) as f64;
+    let axis_s = (decay_s * REVERB_AXIS_HEADROOM + predelay_s).clamp(REVERB_AXIS_MIN_S, REVERB_AXIS_MAX_S);
+    let t_to_x = |t: f64| x0 + ((t / axis_s).clamp(0.0, 1.0) * (w - 1) as f64).round() as i32;
+    let db_to_y = |db: f64| y0 + ((-db / RT60_DECAY_DB).clamp(0.0, 1.0) * (h - 1) as f64).round() as i32;
+    let grid = sdl2::pixels::Color::RGBA(120, 124, 140, 45);
+    let label_color = sdl2::pixels::Color::RGBA(130, 134, 150, 200);
+
+    // Level lines every 20 dB and time ticks.
+    for db in [-20.0, -40.0] {
+        canvas.set_draw_color(grid);
+        let _ = canvas.draw_line(sdl2::rect::Point::new(x0 + 1, db_to_y(db)), sdl2::rect::Point::new(x0 + w - 2, db_to_y(db)));
+    }
+    let step = time_axis_step_s(axis_s, w);
+    let mut tick = step;
+    while tick < axis_s {
+        let x = t_to_x(tick);
+        canvas.set_draw_color(grid);
+        let _ = canvas.draw_line(sdl2::rect::Point::new(x, y0 + 1), sdl2::rect::Point::new(x, y0 + h - 2));
+        let text = if step < 1.0 { format!("{:.1}s", tick) } else { format!("{:.0}s", tick) };
+        let text_w = text.chars().count() as i32 * LABEL_CHAR_PX;
+        draw_pixel_label(canvas, theme, &text, (x + 2).min(x0 + w - text_w - 2), y0 + h - 12, text_w, label_color);
+        tick += step;
+    }
+
+    // Late tail: 0 dB at the end of the pre-delay, -60 dB one RT60 later.
+    let accent = Theme::c(theme.accent);
+    let tail_start_x = t_to_x(predelay_s);
+    let tail_end_x = t_to_x(predelay_s + decay_s);
+    let (tail_start_y, tail_end_y) = (db_to_y(0.0), db_to_y(-RT60_DECAY_DB));
+    for x in tail_start_x..=tail_end_x.min(x0 + w - 2) {
+        let t = if tail_end_x > tail_start_x { (x - tail_start_x) as f64 / (tail_end_x - tail_start_x) as f64 } else { 1.0 };
+        let y = tail_start_y + (t * (tail_end_y - tail_start_y) as f64).round() as i32;
+        canvas.set_draw_color(sdl2::pixels::Color::RGBA(accent.r, accent.g, accent.b, REVERB_TAIL_FILL_ALPHA));
+        let _ = canvas.draw_line(sdl2::rect::Point::new(x, y), sdl2::rect::Point::new(x, y0 + h - 2));
+    }
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(accent.r, accent.g, accent.b, 235));
+    let _ = canvas.draw_line(sdl2::rect::Point::new(tail_start_x, tail_start_y), sdl2::rect::Point::new(tail_end_x, tail_end_y));
+
+    // Early reflections, drawn as stems rising from the floor.
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(235, 235, 240, 200));
+    for tap in reverb_early_taps(size) {
+        let x = t_to_x(predelay_s + tap.time_ms / 1000.0);
+        let stem = (tap.relative_level * EARLY_STEM_MAX_HEIGHT_FRACTION * (h - 1) as f64).round() as i32;
+        let _ = canvas.draw_line(sdl2::rect::Point::new(x, y0 + h - 2), sdl2::rect::Point::new(x, y0 + h - 2 - stem));
+    }
+
+    // Pre-delay marker and RT60 readout.
+    canvas.set_draw_color(sdl2::pixels::Color::RGBA(255, 255, 255, 90));
+    let _ = canvas.draw_line(sdl2::rect::Point::new(tail_start_x, y0 + 1), sdl2::rect::Point::new(tail_start_x, y0 + h - 2));
+    let label = format!("RT60 {:.1}s", decay_s);
+    let label_w = label.chars().count() as i32 * LABEL_CHAR_PX;
+    draw_pixel_label(canvas, theme, &label, x0 + w - label_w - 3, y0 + 3, label_w, sdl2::pixels::Color::RGBA(235, 235, 240, 230));
+}
+
 /// Draw the display for `plugin_ref` into `area` (background and border included).
 pub(super) fn draw_device_visual(
     canvas: &mut Canvas<Window>,
@@ -165,6 +256,8 @@ pub(super) fn draw_device_visual(
             params_snap,
             live.sample_rate_hz,
         ),
+
+        "Reverb" => draw_reverb_display(canvas, theme, area, params_snap),
 
         "Compressor" => {
             // Static compression curve on top half
@@ -839,5 +932,17 @@ mod tests {
         assert_eq!(format_hz(80.0), "80");
         assert_eq!(format_hz(1200.0), "1.2k");
         assert_eq!(format_hz(10_000.0), "10k");
+    }
+
+    #[test]
+    fn time_axis_ticks_leave_room_for_their_labels() {
+        let width_px = 220;
+        for axis_s in [0.5, 1.0, 3.75, 7.5, 12.0] {
+            let step = time_axis_step_s(axis_s, width_px);
+            let spacing_px = step / axis_s * width_px as f64;
+            assert!(spacing_px >= MIN_TICK_SPACING_PX, "axis {axis_s}s: ticks {spacing_px:.0}px apart");
+        }
+        // A short axis uses fine steps; a long one uses coarse steps.
+        assert!(time_axis_step_s(0.5, width_px) < time_axis_step_s(12.0, width_px));
     }
 }

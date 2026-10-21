@@ -5,6 +5,7 @@
 // effect in the tests below, so a display cannot drift from the sound.
 
 use super::dsp_primitives::fast_tan;
+use super::effects::{early_unit_ms, EARLY_TAP_PRIMES};
 
 /// Lowest cutoff of the LP/HP filters in Hz (normalized cutoff 0.0).
 pub const FILTER_MIN_CUTOFF_HZ: f64 = 20.0;
@@ -32,17 +33,21 @@ pub fn filter_cutoff_hz(cutoff_norm: f64, sample_rate: f64) -> f64 {
 /// Magnitude in dB at `freq_hz` of the filter implemented by `svf_tick`
 /// (output gain not included).
 ///
-/// `svf_tick` is the trapezoidal-integration ("topology-preserving transform")
-/// state-variable filter from Andrew Simper's *Linear Trapezoidal Integrated
-/// SVF* (Cytomic, 2013) / Zavalishin, *The Art of VA Filter Design*. With
-/// `g = tan(pi*fc/fs)` and damping `k = 2 - 2*resonance`, its transfer functions in
-/// the normalized variable `s = j * tan(pi*f/fs) / g` are
+/// `svf_tick` is a trapezoidal-integration ("topology-preserving transform")
+/// state-variable filter, the family described in Zavalishin's *The Art of VA
+/// Filter Design* and in Simper's (Cytomic) trapezoidal SVF notes. Eden's source
+/// does not record which reference it follows and this module was written without
+/// consulting them online, so the transfer functions below are derived from the
+/// code itself and checked numerically against it (see the tests).
+///
+/// With `g = tan(pi*fc/fs)` and damping `k = 2 - 2*resonance`, the response in the
+/// normalized variable `s = j * tan(pi*f/fs) / g` is
 ///
 /// * low-pass  `1 / (s^2 + k*s + 1)`
 /// * high-pass `s^2 / (s^2 + k*s + 1)`
 ///
-/// The only deviation from the textbook form is that Eden computes `g` with
-/// `fast_tan` (a Pade approximation), so the same function is used here.
+/// Eden computes `g` with `fast_tan` (a Pade approximation), so the same function
+/// is used here.
 pub fn svf_magnitude_db(
     output: SvfOutput,
     freq_hz: f64,
@@ -60,6 +65,28 @@ pub fn svf_magnitude_db(
         SvfOutput::HighPass => r2,
     };
     20.0 * (numerator / denominator).max(1e-9).log10()
+}
+
+/// One early reflection of the reverb: delay after the pre-delayed input and its
+/// level relative to the strongest tap (`process_early` weights tap `i` by `1/(i+2)`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EarlyTap {
+    pub time_ms: f64,
+    pub relative_level: f64,
+}
+
+/// Early-reflection taps of the reverb for a `size` parameter value, in time order.
+pub fn reverb_early_taps(size: f64) -> Vec<EarlyTap> {
+    let unit_ms = early_unit_ms(size);
+    let strongest = 1.0 / 2.0;
+    EARLY_TAP_PRIMES
+        .iter()
+        .enumerate()
+        .map(|(i, &prime)| EarlyTap {
+            time_ms: prime * unit_ms,
+            relative_level: (1.0 / (i as f64 + 2.0)) / strongest,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -141,5 +168,34 @@ mod tests {
         let flat = svf_magnitude_db(SvfOutput::LowPass, cutoff_hz, cutoff_hz, 0.0, SAMPLE_RATE_HZ);
         let resonant = svf_magnitude_db(SvfOutput::LowPass, cutoff_hz, cutoff_hz, 0.9, SAMPLE_RATE_HZ);
         assert!(resonant > flat + 6.0, "flat {flat:.1} dB vs resonant {resonant:.1} dB");
+    }
+
+    #[test]
+    fn reverb_early_taps_match_real_impulse_response() {
+        use crate::modules::FxReverb;
+        const SIZE: f32 = 24.0;
+        /// Allowed disagreement between displayed and measured tap time.
+        const TAP_TOLERANCE_SAMPLES: f64 = 2.0;
+        let params: Vec<(String, f32)> = [
+            ("mix", 100.0), ("early", 100.0), ("early_send", 0.0), ("late", 0.0),
+            ("size", SIZE), ("predelay", 0.0), ("width", 100.0), ("output_db", 0.0),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+        let mut reverb = FxReverb::new(SAMPLE_RATE_HZ as u32);
+        let length = (0.3 * SAMPLE_RATE_HZ) as usize;
+        let response: Vec<f64> = (0..length)
+            .map(|n| reverb.process(if n == 0 { 1.0 } else { 0.0 }, 0.0, &params, SAMPLE_RATE_HZ).0)
+            .collect();
+        for tap in reverb_early_taps(SIZE as f64) {
+            let expected = tap.time_ms * SAMPLE_RATE_HZ / 1000.0;
+            let lo = (expected - TAP_TOLERANCE_SAMPLES).floor().max(0.0) as usize;
+            let hi = (expected + TAP_TOLERANCE_SAMPLES).ceil() as usize;
+            let peak = response[lo..=hi].iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            let background = response[hi + 4..hi + 40].iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            assert!(peak > 0.0 && peak > 4.0 * background,
+                "no reflection near {:.2} ms (peak {:e}, background {:e})", tap.time_ms, peak, background);
+        }
     }
 }
