@@ -9,6 +9,39 @@ use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
+/// Decode `path` for a destructive editing operation. A failure is reported in the
+/// status toast so the button that triggered it never fails silently.
+fn load_for_edit(state: &mut AppState, path: &std::path::Path) -> Option<(Vec<f32>, usize, u32)> {
+    match crate::engine::load_audio_interleaved(path) {
+        Ok(decoded) => Some(decoded),
+        Err(e) => {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("audio file");
+            state.push_status(format!("Cannot read {}: {}", name, e));
+            None
+        }
+    }
+}
+
+/// Why source-dependent editing tools are unavailable for `source_file`, if they are.
+fn source_unavailable_reason(source_file: &str) -> Option<String> {
+    if source_file.is_empty() {
+        return Some("This clip has no audio file to edit".to_string());
+    }
+    let path = std::path::Path::new(source_file);
+    if path.is_file() {
+        None
+    } else {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(source_file);
+        Some(format!("Audio file not found: {}", name))
+    }
+}
+
 /// Find the nearest zero crossing to `idx` in `samples`, searching up to `max_search`
 /// samples in each direction. A zero crossing is where the sample value crosses zero
 /// (sign change) or is exactly zero. Returns the adjusted index.
@@ -527,8 +560,18 @@ pub(super) fn draw_audio_editor(
         "Cut — remove selection from file and copy to clipboard (T)",
         "Paste — insert clipboard audio at playhead position (Y)",
     ];
+    let source_problem = source_unavailable_reason(&source_file);
+    // NORM, TRIM, CUT and PASTE rewrite the source file; SEL and FIT only change the view/clip window.
+    const SOURCE_TOOLS: [usize; 4] = [1, 2, 4, 5];
+    // TRIM and CUT act on the current selection.
+    const SELECTION_TOOLS: [usize; 2] = [2, 4];
     for (i, &label) in tool_labels.iter().enumerate() {
         let rect = control([Select, Normalize, Trim, Fit, Cut, Paste][i]);
+        let tool_blocked = if SOURCE_TOOLS.contains(&i) {
+            source_problem.clone()
+        } else {
+            None
+        };
         let bw = rect.width() as i32;
         let __auto_id_57 = input.next_id();
         let clicked = button(
@@ -544,11 +587,29 @@ pub(super) fn draw_audio_editor(
                 label: label.into(),
                 toggled: false,
                 icon: ButtonIcon::None,
-                hint: Some(tool_hints.get(i).unwrap_or(&"").to_string()),
+                hint: Some(
+                    tool_blocked
+                        .clone()
+                        .unwrap_or_else(|| tool_hints.get(i).unwrap_or(&"").to_string()),
+                ),
+                enabled: tool_blocked.is_none(),
                 ..Default::default()
             },
         );
-        if clicked || key_triggered_tool == Some(i) {
+        let mut activated = clicked || key_triggered_tool == Some(i);
+        if activated {
+            if let Some(reason) = tool_blocked {
+                state.push_status(reason);
+                activated = false;
+            } else if SELECTION_TOOLS.contains(&i) && state.audio_editor_selection.is_none() {
+                state.push_status(format!(
+                    "{} needs a selection: drag across the waveform, or press SEL to select all",
+                    label
+                ));
+                activated = false;
+            }
+        }
+        if activated {
             match i {
                 0 => {
                     // Select all
@@ -563,8 +624,7 @@ pub(super) fn draw_audio_editor(
                             .unwrap_or((0.0, total_secs));
                         if (sel_e - sel_s) > 0.001 {
                             let path = std::path::Path::new(&source_file);
-                            if let Ok((raw, channels, sr)) =
-                                crate::engine::load_audio_interleaved(path)
+                            if let Some((raw, channels, sr)) = load_for_edit(state, path)
                             {
                                 let total_frames = raw.len() / channels.max(1);
                                 let start_frame = ((sel_s * sr as f64) as usize).min(total_frames);
@@ -641,8 +701,7 @@ pub(super) fn draw_audio_editor(
                         let e = sel_s.max(sel_e);
                         if (e - s) > 0.01 {
                             let path = std::path::Path::new(&source_file);
-                            if let Ok((raw, channels, sr)) =
-                                crate::engine::load_audio_interleaved(path)
+                            if let Some((raw, channels, sr)) = load_for_edit(state, path)
                             {
                                 let ch = channels.max(1);
                                 let total_frames = raw.len() / ch;
@@ -770,8 +829,7 @@ pub(super) fn draw_audio_editor(
                         let e = sel_s.max(sel_e);
                         if (e - s) > 0.001 {
                             let path = std::path::Path::new(&source_file);
-                            if let Ok((raw, channels, sr)) =
-                                crate::engine::load_audio_interleaved(path)
+                            if let Some((raw, channels, sr)) = load_for_edit(state, path)
                             {
                                 let ch = channels.max(1);
                                 let total_frames = raw.len() / ch;
@@ -877,7 +935,7 @@ pub(super) fn draw_audio_editor(
                     if let Some(ref clip_data) = state.audio_clipboard.clone() {
                         let paste_sec = state.audio_editor_playhead;
                         let path = std::path::Path::new(&source_file);
-                        if let Ok((raw, channels, sr)) = crate::engine::load_audio_interleaved(path)
+                        if let Some((raw, channels, sr)) = load_for_edit(state, path)
                         {
                             match make_undo_backup(&source_file) {
                                 Ok(backup) => {
@@ -1209,11 +1267,16 @@ pub(super) fn draw_audio_editor(
                 label: "Export".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
-                hint: Some("Export audio clip to WAV file".into()),
+                hint: Some(
+                    source_problem
+                        .clone()
+                        .unwrap_or_else(|| "Export audio clip to WAV file".into()),
+                ),
+                enabled: source_problem.is_none(),
                 ..Default::default()
             },
         );
-        if export_clicked && !source_file.is_empty() {
+        if export_clicked {
             // Populate the export popup with a default filename
             let src_path = std::path::Path::new(&source_file);
             let stem = src_path
@@ -1281,18 +1344,27 @@ pub(super) fn draw_audio_editor(
                 label: "APPLY".into(),
                 toggled: false,
                 icon: ButtonIcon::None,
-                hint: Some("Apply selected effect to selection (B)".into()),
+                hint: Some(
+                    source_problem
+                        .clone()
+                        .unwrap_or_else(|| "Apply selected effect to selection (B)".into()),
+                ),
+                enabled: source_problem.is_none(),
                 ..Default::default()
             },
         );
-        if apply_clicked || apply_key_triggered {
+        if (apply_clicked || apply_key_triggered) && source_problem.is_some() {
+            if let Some(reason) = source_problem.clone() {
+                state.push_status(reason);
+            }
+        } else if apply_clicked || apply_key_triggered {
             let (sel_s, sel_e) = state
                 .audio_editor_selection
                 .map(|(a, b)| (a.min(b), a.max(b)))
                 .unwrap_or((0.0, total_secs));
             if (sel_e - sel_s) > 0.001 {
                 let path = std::path::Path::new(&source_file);
-                if let Ok((raw, channels, sr)) = crate::engine::load_audio_interleaved(path) {
+                if let Some((raw, channels, sr)) = load_for_edit(state, path) {
                     let total_frames = raw.len() / channels.max(1);
                     let start_frame = ((sel_s * sr as f64) as usize).min(total_frames);
                     let end_frame = ((sel_e * sr as f64) as usize).min(total_frames);
@@ -2372,5 +2444,38 @@ pub(super) fn draw_audio_editor(
             input.mouse_x,
             input.mouse_y,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_source_disables_editing_tools_with_reason() {
+        let reason = source_unavailable_reason("").expect("empty source must be unavailable");
+        assert!(reason.contains("no audio file"), "{}", reason);
+    }
+
+    #[test]
+    fn missing_source_names_the_file() {
+        let reason = source_unavailable_reason("/nonexistent-eden-dir/take 1.wav")
+            .expect("missing file must be unavailable");
+        assert!(reason.contains("take 1.wav"), "{}", reason);
+    }
+
+    #[test]
+    fn existing_source_is_available() {
+        let existing = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        assert!(source_unavailable_reason(existing).is_none());
+    }
+
+    #[test]
+    fn undecodable_source_reports_failure_in_status_toast() {
+        let mut state = AppState::new();
+        let not_audio = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        assert!(load_for_edit(&mut state, not_audio).is_none());
+        let message = state.status_message.expect("failure must be visible");
+        assert!(message.contains("Cargo.toml"), "{}", message);
     }
 }
