@@ -14,6 +14,39 @@ use crate::app::input::InputState;
 use crate::app::state::*;
 use crate::widgets::*;
 
+/// Tooltip box height in logical pixels (one pixel-font text row plus padding).
+const TOOLTIP_HEIGHT_PX: i32 = 18;
+/// Gap between the pointer hotspot and the tooltip. Roughly the height of a
+/// standard arrow cursor so the tooltip does not cover the control being hovered.
+const TOOLTIP_POINTER_GAP_PX: i32 = 20;
+/// Minimum distance kept between a tooltip and the window edge.
+const TOOLTIP_EDGE_MARGIN_PX: i32 = 2;
+
+/// Top-left corner for a tooltip of `size` shown for a pointer at `mouse`.
+///
+/// The tooltip sits below-right of the pointer, like operating-system tooltips,
+/// so it never covers menu rows or tabs above the hovered control. It flips above
+/// the pointer only when there is no room below, and is always clamped inside
+/// the window.
+pub(crate) fn tooltip_origin(
+    mouse: (i32, i32),
+    size: (i32, i32),
+    window: (i32, i32),
+) -> (i32, i32) {
+    let (tw, th) = size;
+    let below = mouse.1 + TOOLTIP_POINTER_GAP_PX;
+    let y = if below + th + TOOLTIP_EDGE_MARGIN_PX <= window.1 {
+        below
+    } else {
+        mouse.1 - TOOLTIP_POINTER_GAP_PX / 2 - th
+    };
+    let x = (mouse.0 + 12).min(window.0 - tw - TOOLTIP_EDGE_MARGIN_PX);
+    (
+        x.max(TOOLTIP_EDGE_MARGIN_PX),
+        y.max(TOOLTIP_EDGE_MARGIN_PX),
+    )
+}
+
 pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
     // Reset viewport and clip rect to full window to prevent stale state from prior frames
     canvas.set_viewport(None);
@@ -682,17 +715,16 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
 
         // Show after ~20 frames (~330ms at 60fps)
         if state.hover_timer > 20 {
-            let tip_x = input.mouse_x + 12;
-            let tip_y = input.mouse_y - 22;
             let char_w = 9; // pixel font width at 2x (8px glyph + 1px gap)
-            let text_w = hint_text.len() as i32 * char_w;
+            let text_w = hint_text.chars().count() as i32 * char_w;
             let pad = 4;
             let tw = text_w + pad * 2;
-            let th = 18;
-
-            // Clamp to screen
-            let tx = tip_x.min(state.window_width as i32 - tw - 4);
-            let ty = tip_y.max(2);
+            let th = TOOLTIP_HEIGHT_PX;
+            let (tx, ty) = tooltip_origin(
+                (input.mouse_x, input.mouse_y),
+                (tw, th),
+                (state.window_width as i32, state.window_height as i32),
+            );
 
             // Shadow
             canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 140));
@@ -815,6 +847,43 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         }
         if state.status_timer == 0 {
             state.status_message = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tooltip_tests {
+    use super::*;
+
+    const WINDOW: (i32, i32) = (1280, 800);
+    const SIZE: (i32, i32) = (200, TOOLTIP_HEIGHT_PX);
+
+    fn contains(origin: (i32, i32), p: (i32, i32)) -> bool {
+        p.0 >= origin.0 && p.0 < origin.0 + SIZE.0 && p.1 >= origin.1 && p.1 < origin.1 + SIZE.1
+    }
+
+    #[test]
+    fn tooltip_is_below_pointer_so_it_never_covers_controls_above() {
+        let mouse = (400, 300);
+        let (_, y) = tooltip_origin(mouse, SIZE, WINDOW);
+        assert!(y > mouse.1, "tooltip must start below the pointer, got y={}", y);
+    }
+
+    #[test]
+    fn tooltip_flips_above_near_bottom_without_covering_pointer() {
+        let mouse = (400, WINDOW.1 - 5);
+        let origin = tooltip_origin(mouse, SIZE, WINDOW);
+        assert!(origin.1 + SIZE.1 <= WINDOW.1);
+        assert!(!contains(origin, mouse));
+    }
+
+    #[test]
+    fn tooltip_stays_inside_window_at_every_corner() {
+        for &mouse in &[(0, 0), (WINDOW.0, 0), (0, WINDOW.1), (WINDOW.0, WINDOW.1)] {
+            let (x, y) = tooltip_origin(mouse, SIZE, WINDOW);
+            assert!(x >= 0 && y >= 0, "{:?} -> {:?}", mouse, (x, y));
+            assert!(x + SIZE.0 <= WINDOW.0, "{:?} -> {:?}", mouse, (x, y));
+            assert!(y + SIZE.1 <= WINDOW.1, "{:?} -> {:?}", mouse, (x, y));
         }
     }
 }

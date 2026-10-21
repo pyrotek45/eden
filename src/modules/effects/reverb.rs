@@ -35,8 +35,22 @@ pub struct FxReverb {
     sm_output: SmoothedParam,
 }
 
+/// Spacing unit of the early-reflection taps at the smallest `size`, in ms.
+pub const EARLY_UNIT_MIN_MS: f64 = 4.0;
+/// Extra spacing added as `size` rises to `EARLY_SIZE_MAX`, in ms.
+pub const EARLY_UNIT_SPAN_MS: f64 = 26.0;
+/// `size` value at which the early-reflection spacing stops growing.
+pub const EARLY_SIZE_MAX: f64 = 60.0;
+/// Early-reflection tap delays are these multiples of the spacing unit
+/// (primes, so the taps do not form a regular comb).
+pub const EARLY_TAP_PRIMES: [f64; 8] = [2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0];
+
+/// Early-reflection spacing unit in ms for a given `size` parameter.
+pub fn early_unit_ms(size: f64) -> f64 {
+    EARLY_UNIT_MIN_MS + (size / EARLY_SIZE_MAX).clamp(0.0, 1.0) * EARLY_UNIT_SPAN_MS
+}
+
 impl FxReverb {
-    const EARLY_TAP_PRIMES: [f64; 8] = [2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0];
     const COMB_MS_L: [f64; 4] = [29.13, 34.07, 38.93, 43.11];
     const COMB_MS_R: [f64; 4] = [30.61, 35.29, 40.37, 44.71];
     const AP_MS_L: [f64; 4] = [5.02, 1.68, 4.01, 1.24];
@@ -123,12 +137,12 @@ impl FxReverb {
         self.early_buf_r[(self.early_head + 1) % len] = input as f32;
         self.early_head = (self.early_head + 1) % len;
 
-        let unit_ms = 4.0 + (size / 60.0).clamp(0.0, 1.0) * 26.0;
+        let unit_ms = early_unit_ms(size);
         let unit_samples = unit_ms * self.sr / 1000.0;
 
         let mut out_l = 0.0_f64;
         let mut out_r = 0.0_f64;
-        for (i, &prime) in Self::EARLY_TAP_PRIMES.iter().enumerate() {
+        for (i, &prime) in EARLY_TAP_PRIMES.iter().enumerate() {
             let tap = prime * unit_samples;
             if tap >= len as f64 {
                 continue;
@@ -138,7 +152,7 @@ impl FxReverb {
             out_l += sign * gain * Self::read_interp(&self.early_buf_l, self.early_head, tap);
             out_r += sign * gain * Self::read_interp(&self.early_buf_r, self.early_head, tap + 0.5);
         }
-        let n = Self::EARLY_TAP_PRIMES.len() as f64;
+        let n = EARLY_TAP_PRIMES.len() as f64;
         (out_l / n, out_r / n)
     }
 
