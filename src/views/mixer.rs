@@ -14,14 +14,27 @@ use crate::widgets::*;
 /// A device column must fit both its parameter caption and every selector option.
 fn rack_cell_width(slot: &crate::app::models::RackSlot, font_scale: i32) -> i32 {
     let descriptions = crate::modules::get_param_descs(&slot.plugin_name);
-    let name_chars = slot.params.iter().map(|p| p.name.chars().count()).max().unwrap_or(0);
-    let option_chars = descriptions.iter().filter_map(|p| p.options)
-        .flat_map(|options| options.iter()).map(|s| s.chars().count()).max().unwrap_or(0);
+    let name_chars = slot
+        .params
+        .iter()
+        .map(|p| p.name.chars().count())
+        .chain(descriptions.iter().map(|d| d.name.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let option_chars = descriptions
+        .iter()
+        .filter_map(|p| p.options)
+        .flat_map(|options| options.iter())
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0);
     // Include selector borders and inner padding in addition to glyph advances.
     ((name_chars.max(option_chars) as i32 * (4 * font_scale + 1)) + 24).max(80)
 }
 
 const DEVICE_HEADER_HEIGHT: i32 = 40;
+const ADD_DEVICE_WIDTH: i32 = 132;
+const DEVICE_END_PADDING: i32 = ADD_DEVICE_WIDTH + 16;
 
 /// Width of the display column beside a device's knobs. Wide enough that a
 /// frequency or transfer curve reads as a graph rather than a thumbnail; a log
@@ -38,12 +51,163 @@ fn device_grid(height: i32, font: i32) -> (usize, i32, i32) {
     (rows as usize, first_center, row_height)
 }
 
-fn device_header(canvas: &mut Canvas<Window>, theme: &Theme, name: &str, x: i32, y: i32, width: i32) {
-    canvas.set_draw_color(Theme::c(theme.bg_light));
-    let _ = canvas.fill_rect(Rect::new(x + 1, y + 1, (width - 2) as u32, (DEVICE_HEADER_HEIGHT - 1) as u32));
-    let category = if crate::modules::is_midi_effect(name) { "MIDI FX" }
-        else if crate::modules::is_instrument(name) { "INSTRUMENT" } else { "AUDIO FX" };
-    draw_pixel_label_scaled(canvas, theme, category, x + 8, y + 27, width - 16, Theme::c(theme.text_secondary), 1);
+fn device_header(
+    canvas: &mut Canvas<Window>,
+    input: &mut InputState,
+    state: &mut AppState,
+    name: &str,
+    owner: Option<u32>,
+    slot_id: u32,
+    x: i32,
+    y: i32,
+    width: i32,
+) {
+    let id = WidgetId::DeviceHeader(owner, slot_id);
+    let hover = input.mouse_in_rect(x, y, width - 70, DEVICE_HEADER_HEIGHT);
+    if hover && input.mouse_pressed && !input.consumed {
+        state.selected_rack_device = Some((owner, slot_id));
+        input.consume();
+    }
+    if hover {
+        input.hot_widget = id;
+        input.hover_hint_widget = id;
+        input.hover_hint_text = Some(
+            if owner.is_some() {
+                "Select device; right-drag header to reorder within its stage"
+            } else {
+                "Select master device"
+            }
+            .into(),
+        );
+    }
+    let selected = state.selected_rack_device == Some((owner, slot_id));
+    canvas.set_draw_color(Theme::c(if hover {
+        state.theme.button_hover
+    } else {
+        state.theme.bg_light
+    }));
+    let _ = canvas.fill_rect(Rect::new(
+        x + 1,
+        y + 1,
+        (width - 2) as u32,
+        (DEVICE_HEADER_HEIGHT - 1) as u32,
+    ));
+    // A narrow accent rail and full-card outline identify selection without
+    // flooding every device with the theme's accent color.
+    canvas.set_draw_color(Theme::c(if selected {
+        state.theme.accent
+    } else {
+        state.theme.panel_border
+    }));
+    let _ = canvas.draw_rect(Rect::new(x, y, width as u32, DEVICE_HEADER_HEIGHT as u32));
+    let _ = canvas.fill_rect(Rect::new(
+        x + 1,
+        y + 1,
+        3,
+        (DEVICE_HEADER_HEIGHT - 2) as u32,
+    ));
+    let category = if crate::modules::is_midi_effect(name) {
+        "MIDI FX"
+    } else if crate::modules::is_instrument(name) {
+        "INSTRUMENT"
+    } else {
+        "AUDIO FX"
+    };
+    draw_pixel_label_scaled(
+        canvas,
+        &state.theme,
+        category,
+        x + 8,
+        y + 27,
+        width - 16,
+        Theme::c(state.theme.text_secondary),
+        1,
+    );
+}
+
+/// Flat device surface shared by track and master racks. Parameter bays use the
+/// same measured grid as the controls, so larger fonts retain their spacing.
+#[allow(clippy::too_many_arguments)]
+fn device_surface(
+    canvas: &mut Canvas<Window>,
+    theme: &Theme,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    columns: usize,
+    cell_width: i32,
+    parameter_count: usize,
+    first_center: i32,
+    row_height: i32,
+    selected: bool,
+    enabled: bool,
+) {
+    canvas.set_draw_color(Theme::c(if enabled {
+        theme.panel_bg
+    } else {
+        theme.bg_medium
+    }));
+    let _ = canvas.fill_rect(Rect::new(x, y, width as u32, height as u32));
+    // 16px knob radius plus 6px breathing room above each control.
+    const BAY_TOP_PADDING: i32 = 22;
+    for row in 0..parameter_count.div_ceil(columns) {
+        let bay_y = y + first_center + row as i32 * row_height - BAY_TOP_PADDING;
+        let bay_h = (row_height - 8).min(y + height - 8 - bay_y);
+        if bay_h < 20 {
+            continue;
+        }
+        for col in 0..columns {
+            if row * columns + col >= parameter_count {
+                break;
+            }
+            let bay_x = x + col as i32 * cell_width + 6;
+            canvas.set_draw_color(Theme::c(theme.bg_medium));
+            let _ = canvas.fill_rect(Rect::new(
+                bay_x,
+                bay_y,
+                (cell_width - 8).max(1) as u32,
+                bay_h as u32,
+            ));
+        }
+    }
+    // Separate the live display from the controls with a quiet divider.
+    let display_x = x + columns as i32 * cell_width + 20;
+    if display_x < x + width - 10 {
+        canvas.set_draw_color(Theme::c(theme.panel_border));
+        let _ = canvas.draw_line(
+            (display_x, y + DEVICE_HEADER_HEIGHT + 8),
+            (display_x, y + height - 8),
+        );
+    }
+    canvas.set_draw_color(Theme::c(if selected {
+        theme.accent
+    } else {
+        theme.panel_border
+    }));
+    let _ = canvas.draw_rect(Rect::new(x, y, width as u32, height as u32));
+}
+
+fn rack_reorder_index(
+    slots: &[crate::app::models::RackSlot],
+    source: usize,
+    requested: usize,
+) -> Option<usize> {
+    if source >= slots.len() || requested > slots.len() {
+        return None;
+    }
+    let mut order: Vec<_> = slots.iter().map(|slot| slot.stage()).collect();
+    let removed = order.remove(source);
+    let destination = if requested > source {
+        requested - 1
+    } else {
+        requested
+    };
+    order.insert(destination, removed);
+    order
+        .windows(2)
+        .all(|pair| pair[0] <= pair[1])
+        .then_some(destination)
 }
 
 pub(crate) fn meter_color(db: f64) -> sdl2::pixels::Color {
@@ -465,6 +629,7 @@ pub(super) fn draw_bottom_mixer(
             &mut vol_pos,
         );
         if vol_changed {
+            state.begin_project_parameter_gesture("Adjust Mixer Level");
             let new_vol = vol_pos_to_gain(vol_pos);
             let old_vol = state.project.tracks[i].volume;
             let delta = new_vol - old_vol;
@@ -481,20 +646,6 @@ pub(super) fn draw_bottom_mixer(
                             (state.project.tracks[j].volume + delta).clamp(0.0, 2.0);
                     }
                 }
-            }
-        }
-        if input.mouse_released && input.drag_widget == mixer_vol_id {
-            let old_gain = vol_pos_to_gain(input.drag_start_value as f32);
-            let new_gain = state.project.tracks[i].volume;
-            if (old_gain - new_gain).abs() > 1e-4 {
-                state.commands.execute(
-                    Box::new(crate::app::commands::SetTrackVolume {
-                        track_id,
-                        old_value: old_gain,
-                        new_value: new_gain,
-                    }),
-                    &mut state.project,
-                );
             }
         }
 
@@ -654,22 +805,47 @@ pub(super) fn draw_bottom_mixer(
                 let caption_y = origin_y + cell.y;
                 let ky = caption_y + 5 * state.font_scale + 14;
                 // Only fully visible knobs receive pointer input; scrolling exposes the rest.
-                if caption_y < below_vu || ky + 13 > content_bottom { continue; }
+                if caption_y < below_vu || ky + 13 > content_bottom {
+                    continue;
+                }
                 let caption_width = cell.caption.len() as i32 * (4 * state.font_scale + 1);
-                draw_pixel_label(canvas, &state.theme, cell.caption, kx - caption_width / 2,
-                    caption_y, caption_width + 1, Theme::c(state.theme.text_secondary));
-                let cur_val = state.project.tracks[i].cstrip2_params.iter()
-                    .find(|(id, _)| id == desc.id).map(|(_, v)| *v).unwrap_or(desc.default);
+                draw_pixel_label(
+                    canvas,
+                    &state.theme,
+                    cell.caption,
+                    kx - caption_width / 2,
+                    caption_y,
+                    caption_width + 1,
+                    Theme::c(state.theme.text_secondary),
+                );
+                let cur_val = state.project.tracks[i]
+                    .cstrip2_params
+                    .iter()
+                    .find(|(id, _)| id == desc.id)
+                    .map(|(_, v)| *v)
+                    .unwrap_or(desc.default);
                 let mut val = cur_val;
-                if knob(canvas, input, &state.theme, &KnobParams {
-                    id: WidgetId::ChannelParam(track_id, pi), x: kx, y: ky, radius: 12,
-                    min: desc.min, max: desc.max, sensitivity: 0.005, label: None,
-                    bipolar: matches!(desc.id, "output" | "treble" | "mid" | "bass"),
-                    default_value: Some(desc.default), hint: Some(desc.name.into()), snap_points: vec![],
-                }, &mut val) {
-                    if state.cstrip2_knob_snapshot.is_none() {
-                        state.cstrip2_knob_snapshot = Some(state.project.clone());
-                    }
+                if knob(
+                    canvas,
+                    input,
+                    &state.theme,
+                    &KnobParams {
+                        id: WidgetId::ChannelParam(track_id, pi),
+                        x: kx,
+                        y: ky,
+                        radius: 12,
+                        min: desc.min,
+                        max: desc.max,
+                        sensitivity: 0.005,
+                        label: None,
+                        bipolar: matches!(desc.id, "output" | "treble" | "mid" | "bass"),
+                        default_value: Some(desc.default),
+                        hint: Some(desc.name.into()),
+                        snap_points: vec![],
+                    },
+                    &mut val,
+                ) {
+                    state.begin_project_parameter_gesture("Adjust Channel Strip");
                     let delta = val - cur_val;
                     let edit_selected = state.selected_tracks.contains(&track_id);
                     for (j, track) in state.project.tracks.iter_mut().enumerate() {
@@ -686,11 +862,6 @@ pub(super) fn draw_bottom_mixer(
                 }
             }
             canvas.set_clip_rect(old_clip);
-        }
-        if input.mouse_released {
-            if let Some(snapshot) = state.cstrip2_knob_snapshot.take() {
-                state.commands.push_undo_snapshot(snapshot, "Adjust CStrip2");
-            }
         }
 
         // ── Bottom bar: Pan + Mute/Solo ──
@@ -723,6 +894,7 @@ pub(super) fn draw_bottom_mixer(
                 &mut pan_val,
             );
             if pan_changed {
+                state.begin_project_parameter_gesture("Adjust Mixer Pan");
                 let old_pan = state.project.tracks[i].pan;
                 let delta = pan_val - old_pan;
                 state.project.tracks[i].pan = pan_val;
@@ -738,19 +910,6 @@ pub(super) fn draw_bottom_mixer(
                                 (state.project.tracks[j].pan + delta).clamp(-1.0, 1.0);
                         }
                     }
-                }
-            }
-            if input.mouse_released && input.drag_widget == mixer_pan_id {
-                let old_pan = input.drag_start_value as f32;
-                if (old_pan - pan_val).abs() > 1e-4 {
-                    state.commands.execute(
-                        Box::new(crate::app::commands::SetTrackPan {
-                            track_id,
-                            old_value: old_pan,
-                            new_value: pan_val,
-                        }),
-                        &mut state.project,
-                    );
                 }
             }
         }
@@ -1616,6 +1775,7 @@ pub(super) fn draw_instrument_rack(
         state.focused_panel = FocusedPanel::Arrangement;
     }
 
+    state.rack_reorder_target = None;
     canvas.set_draw_color(Theme::c(state.theme.bg_dark));
     let _ = canvas.fill_rect(Rect::new(0, top, w as u32, h as u32));
 
@@ -1671,7 +1831,7 @@ pub(super) fn draw_instrument_rack(
                              // rather than squishing when the panel is short
     let natural_h = (h - 40 - scrollbar_h).max(60);
     let slot_h = natural_h.max(96); // Short panels use more columns, not hidden knob rows.
-    let slot_gap = 8i32;
+    let slot_gap = 16i32;
     let scroll_offset = state.rack_scroll_x as i32;
     let mut sx = 10i32 - scroll_offset;
 
@@ -1732,22 +1892,25 @@ pub(super) fn draw_instrument_rack(
 
         // Slot background
         let slot_enabled = state.project.tracks[ti].rack[slot_idx].enabled;
-        let bg = if slot_enabled {
-            Theme::c(state.theme.panel_bg)
-        } else {
-            sdl2::pixels::Color::RGBA(
-                state.theme.panel_bg[0].saturating_sub(20),
-                state.theme.panel_bg[1].saturating_sub(20),
-                state.theme.panel_bg[2].saturating_sub(20),
-                200,
-            )
-        };
-        canvas.set_draw_color(bg);
-        let _ = canvas.fill_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
-        canvas.set_draw_color(Theme::c(state.theme.panel_border));
-        let _ = canvas.draw_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
+        device_surface(canvas, &state.theme, sx, sy, slot_w, slot_h, cols, knob_cell_w,
+            param_count, first_center, row_height,
+            state.selected_rack_device == Some((Some(state.project.tracks[ti].id),
+                state.project.tracks[ti].rack[slot_idx].slot_id)), slot_enabled);
 
-        device_header(canvas, &state.theme, plugin_name_ref, sx, sy, slot_w);
+        let header_name = plugin_name_ref.clone();
+        let device_owner = Some(state.project.tracks[ti].id);
+        let device_slot = state.project.tracks[ti].rack[slot_idx].slot_id;
+        device_header(
+            canvas,
+            input,
+            state,
+            &header_name,
+            device_owner,
+            device_slot,
+            sx,
+            sy,
+            slot_w,
+        );
 
         // Slot header (plugin name)
         let plugin_name = state.project.tracks[ti].rack[slot_idx].plugin_name.clone();
@@ -1766,7 +1929,10 @@ pub(super) fn draw_instrument_rack(
         );
 
         // Enable/disable toggle
-        let toggle_id = input.next_id();
+        let toggle_id = WidgetId::DeviceToggle(
+            Some(state.project.tracks[ti].id),
+            state.project.tracks[ti].rack[slot_idx].slot_id,
+        );
         let toggle_clicked = button(
             canvas,
             input,
@@ -1799,7 +1965,10 @@ pub(super) fn draw_instrument_rack(
         }
 
         // Delete button
-        let del_id = input.next_id();
+        let del_id = WidgetId::DeviceRemove(
+            Some(state.project.tracks[ti].id),
+            state.project.tracks[ti].rack[slot_idx].slot_id,
+        );
         let del_clicked = button(
             canvas,
             input,
@@ -1833,9 +2002,13 @@ pub(super) fn draw_instrument_rack(
         }
 
         // ── Drag-to-reorder: right-click drag on header to reorder ──
-        let header_hover = input.mouse_in_rect(sx, sy, slot_w - 54, 20);
+        let header_hover = input.mouse_in_rect(sx, sy, slot_w - 70, DEVICE_HEADER_HEIGHT);
         if header_hover && input.right_mouse_pressed {
             state.rack_reorder_drag = Some(slot_idx);
+            state.selected_rack_device = Some((
+                Some(state.project.tracks[ti].id),
+                state.project.tracks[ti].rack[slot_idx].slot_id,
+            ));
         }
         // Show drop target indicator when reordering
         if state.rack_reorder_drag.is_some() {
@@ -1848,14 +2021,29 @@ pub(super) fn draw_instrument_rack(
                 } else {
                     slot_idx + 1
                 };
-                state.rack_reorder_target = Some(target);
+                let valid = state
+                    .rack_reorder_drag
+                    .and_then(|source| {
+                        rack_reorder_index(&state.project.tracks[ti].rack, source, target)
+                    })
+                    .is_some();
+                state.rack_reorder_target = valid.then_some(target);
+                if !valid {
+                    input.hover_hint_text = Some(
+                        "Keep MIDI effects before the instrument and audio effects after it".into(),
+                    );
+                }
                 // Draw insertion indicator
                 let ind_x = if insert_before {
                     sx - 2
                 } else {
                     sx + slot_w + 2
                 };
-                canvas.set_draw_color(Theme::c(state.theme.accent));
+                canvas.set_draw_color(Theme::c(if valid {
+                    state.theme.accent
+                } else {
+                    state.theme.text_dim
+                }));
                 let _ = canvas.fill_rect(Rect::new(ind_x, sy, 3, slot_h as u32));
             }
         }
@@ -1942,7 +2130,12 @@ pub(super) fn draw_instrument_rack(
             let p_min = param.min;
             let p_max = param.max;
             let p_default = param.default;
-            let p_name = param.name.clone();
+            let p_name = crate::modules::get_param_descs(&plugin_name)
+                .iter()
+                .find(|d| d.id == param.id)
+                .map(|d| d.name)
+                .unwrap_or(&param.name)
+                .to_string();
             let p_id = param.id.clone();
             let is_bipolar = p_min < 0.0;
 
@@ -2000,9 +2193,9 @@ pub(super) fn draw_instrument_rack(
                     &state.theme,
                     &p_name,
                     sel_x,
-                    sel_y - 5 * state.font_scale - 3,
+                    ky + 16 + 6 + 5 * state.font_scale,
                     sel_w,
-                    Theme::c(state.theme.text_dim),
+                    Theme::c(state.theme.text_secondary),
                 );
                 // Draw current value
                 draw_pixel_label(
@@ -2018,34 +2211,22 @@ pub(super) fn draw_instrument_rack(
                 // Scroll wheel cycles through options
                 if hover && input.scroll_y != 0 && !input.scroll_consumed {
                     let n = opts.len();
-                    let old_val = val;
                     let new_idx = if input.scroll_y > 0 {
                         idx.saturating_sub(1)
                     } else {
                         (idx + 1).min(n - 1)
                     };
                     val = new_idx as f32;
-                    state.project.tracks[ti].rack[slot_idx].params[pi].value = val;
+                    state.set_device_parameter(Some(ti), slot_idx, pi, val);
                     state.dirty = true;
                     input.scroll_consumed = true;
-                    if (old_val - val).abs() > 1e-4 {
-                        let track_id = state.project.tracks[ti].id;
-                        state.commands.execute(
-                            Box::new(crate::app::commands::SetRackParam {
-                                track_id,
-                                slot_idx,
-                                param_idx: pi,
-                                old_value: old_val,
-                                new_value: val,
-                            }),
-                            &mut state.project,
-                        );
-                    }
                 }
 
                 // Start drag on press
                 if hover && input.mouse_pressed && !input.consumed {
                     input.drag_widget = knob_id;
+                    input.active_widget = knob_id;
+                    input.drag_start_value = val as f64;
                     input.consume();
                 }
 
@@ -2055,26 +2236,12 @@ pub(super) fn draw_instrument_rack(
                     let sensitivity = if input.shift() { 0.05 } else { 0.15 };
                     let delta = dy * sensitivity;
                     if delta.abs() > 0.001 {
-                        let old_val = state.project.tracks[ti].rack[slot_idx].params[pi].value;
-                        let new_val = (old_val + delta).clamp(p_min, p_max);
-                        let old_idx = old_val.round() as usize;
-                        let new_idx = new_val.round() as usize;
-                        state.project.tracks[ti].rack[slot_idx].params[pi].value = new_val;
+                        let new_val = (input.drag_start_value as f32
+                            - (input.mouse_y - input.drag_start_y) as f32 * sensitivity)
+                            .round()
+                            .clamp(p_min, p_max);
+                        state.set_device_parameter(Some(ti), slot_idx, pi, new_val);
                         state.dirty = true;
-
-                        if old_idx != new_idx {
-                            let track_id = state.project.tracks[ti].id;
-                            state.commands.execute(
-                                Box::new(crate::app::commands::SetRackParam {
-                                    track_id,
-                                    slot_idx,
-                                    param_idx: pi,
-                                    old_value: old_val,
-                                    new_value: new_val,
-                                }),
-                                &mut state.project,
-                            );
-                        }
                     }
                 }
 
@@ -2082,19 +2249,20 @@ pub(super) fn draw_instrument_rack(
                 if dragging && !input.mouse_down {
                     // Snap to nearest integer on release
                     let v = state.project.tracks[ti].rack[slot_idx].params[pi].value;
-                    state.project.tracks[ti].rack[slot_idx].params[pi].value = v.round();
+                    state.set_device_parameter(Some(ti), slot_idx, pi, v.round());
                     input.drag_widget = WidgetId::None;
                 }
 
                 // Click (no drag motion) to cycle: left click = forward, right click = backward
                 let left_cycle = hover
                     && input.mouse_released
-                    && input.drag_widget == WidgetId::None
+                    && input.active_widget == knob_id
+                    && (input.mouse_y - input.drag_start_y).abs() <= 3
+                    && (input.mouse_x - input.drag_start_x).abs() <= 3
                     && !input.consumed;
                 let right_cycle = hover && input.right_mouse_released && !input.consumed;
 
                 if left_cycle || right_cycle {
-                    let old_val = val;
                     let go_back = right_cycle || input.shift();
                     let new_idx = if go_back {
                         if idx == 0 {
@@ -2106,23 +2274,9 @@ pub(super) fn draw_instrument_rack(
                         (idx + 1) % opts.len()
                     };
                     val = new_idx as f32;
-                    state.project.tracks[ti].rack[slot_idx].params[pi].value = val;
+                    state.set_device_parameter(Some(ti), slot_idx, pi, val);
                     state.dirty = true;
                     input.consume();
-
-                    if (old_val - val).abs() > 1e-4 {
-                        let track_id = state.project.tracks[ti].id;
-                        state.commands.execute(
-                            Box::new(crate::app::commands::SetRackParam {
-                                track_id,
-                                slot_idx,
-                                param_idx: pi,
-                                old_value: old_val,
-                                new_value: val,
-                            }),
-                            &mut state.project,
-                        );
-                    }
                 }
             } else {
                 // ── Render as knob (default for continuous params) ──
@@ -2159,25 +2313,8 @@ pub(super) fn draw_instrument_rack(
                     );
 
                     if changed {
-                        state.project.tracks[ti].rack[slot_idx].params[pi].value = val;
+                        state.set_device_parameter(Some(ti), slot_idx, pi, val);
                         state.dirty = true;
-                    }
-                    // Commit rack param change on mouse release
-                    if input.mouse_released && input.drag_widget == knob_id {
-                        let old_val = input.drag_start_value as f32;
-                        if (old_val - val).abs() > 1e-4 {
-                            let track_id = state.project.tracks[ti].id;
-                            state.commands.execute(
-                                Box::new(crate::app::commands::SetRackParam {
-                                    track_id,
-                                    slot_idx,
-                                    param_idx: pi,
-                                    old_value: old_val,
-                                    new_value: val,
-                                }),
-                                &mut state.project,
-                            );
-                        }
                     }
                 }
             }
@@ -2227,19 +2364,25 @@ pub(super) fn draw_instrument_rack(
                     // Add a default automation clip spanning 16 beats
                     auto_track.clips.push(crate::app::models::Clip::Automation(
                         crate::app::models::AutomationClip {
-                            points: vec![
-                                crate::app::models::AutomationPoint {
-                                    time: 0.0,
-                                    value: norm_val,
+                            content_offset: 0.0,
+                            instance_id: crate::app::shared_content::new_id(),
+                            content: crate::app::shared_content::SharedContent::new(
+                                crate::app::models::AutomationContent {
+                                    points: vec![
+                                        crate::app::models::AutomationPoint {
+                                            time: 0.0,
+                                            value: norm_val,
+                                        },
+                                        crate::app::models::AutomationPoint {
+                                            time: 16.0,
+                                            value: norm_val,
+                                        },
+                                    ],
+                                    target_param: target_key.clone(),
                                 },
-                                crate::app::models::AutomationPoint {
-                                    time: 16.0,
-                                    value: norm_val,
-                                },
-                            ],
+                            ),
                             start_time: 0.0,
                             length: 16.0,
-                            target_param: target_key.clone(),
                             name: auto_name.clone(),
                             color: [220, 180, 80, 200],
                         },
@@ -2521,6 +2664,8 @@ pub(super) fn draw_instrument_rack(
                     && input.mouse_released
                     && !sc_dragging
                     && input.drag_widget == WidgetId::None
+                    && (input.mouse_y - input.drag_start_y).abs() <= 3
+                    && (input.mouse_x - input.drag_start_x).abs() <= 3
                     && !input.consumed;
                 let sc_right_click = sc_hover && input.right_mouse_released && !input.consumed;
 
@@ -2603,9 +2748,9 @@ pub(super) fn draw_instrument_rack(
             id: __auto_id_27,
             x: add_btn_x,
             y: add_btn_y,
-            width: 24,
-            height: 24,
-            label: "+".into(),
+            width: ADD_DEVICE_WIDTH,
+            height: 28,
+            label: "+ DEVICE".into(),
             toggled: false,
             icon: ButtonIcon::None,
             hint: Some("Open modules panel to drag modules here".into()),
@@ -2916,81 +3061,38 @@ pub(super) fn draw_instrument_rack(
 
     canvas.set_clip_rect(None);
 
-    // ── Module reorder: handle drag-and-drop between slots ──
-    if input.mouse_released {
-        if let Some(src) = state.rack_reorder_drag.take() {
-            if let Some(dst) = state.rack_reorder_target.take() {
-                if src != dst && src < state.project.tracks[ti].rack.len() {
-                    // Validate signal flow order after reorder
-                    let module_name = state.project.tracks[ti].rack[src].plugin_name.clone();
-                    let is_midi_track =
-                        state.project.tracks[ti].track_type == crate::app::models::TrackType::Midi;
-                    let insert_at = if dst > src {
-                        (dst - 1).min(state.project.tracks[ti].rack.len())
-                    } else {
-                        dst.min(state.project.tracks[ti].rack.len())
-                    };
-
-                    if is_midi_track {
-                        // Simulate the move: check if the resulting order is valid
-                        let mut simulated = state.project.tracks[ti]
-                            .rack
-                            .iter()
-                            .map(|s| s.plugin_name.clone())
-                            .collect::<Vec<_>>();
-                        let removed = simulated.remove(src);
-                        let sim_insert = if dst > src {
-                            (dst - 1).min(simulated.len())
-                        } else {
-                            dst.min(simulated.len())
-                        };
-                        simulated.insert(sim_insert, removed);
-
-                        // Check order: MIDI effects, then instruments, then audio FX
-                        let mut phase = 0u8; // 0=midi_fx, 1=instrument, 2=audio_fx
-                        let mut valid = true;
-                        let mut reason = String::new();
-                        for name in &simulated {
-                            let cat = if crate::modules::is_midi_effect(name) {
-                                0u8
-                            } else if crate::modules::is_instrument(name) {
-                                1u8
-                            } else {
-                                2u8
-                            };
-                            if cat < phase {
-                                valid = false;
-                                reason = format!("Cannot move {} — would break signal flow (MIDI FX → Generators → Audio FX)", module_name);
-                                break;
-                            }
-                            phase = cat;
-                        }
-
-                        if valid {
-                            let slot = state.project.tracks[ti].rack.remove(src);
-                            state.project.tracks[ti].rack.insert(sim_insert, slot);
-                            state.dirty = true;
-                            state.push_status("Module reordered".to_string());
-                        } else {
-                            state.push_status(reason);
-                        }
-                    } else {
-                        // Non-MIDI tracks: just reorder
-                        let slot = state.project.tracks[ti].rack.remove(src);
-                        state.project.tracks[ti].rack.insert(insert_at, slot);
-                        state.dirty = true;
-                        state.push_status("Module reordered".to_string());
-                    }
+    // Right-drag commits on the matching button release, once, with undo.
+    if input.right_mouse_released {
+        if let Some(source) = state.rack_reorder_drag.take() {
+            let destination = state.rack_reorder_target.take().and_then(|target| {
+                rack_reorder_index(&state.project.tracks[ti].rack, source, target)
+            });
+            if let Some(destination) = destination {
+                if source != destination {
+                    let before = state.project.clone();
+                    let slot = state.project.tracks[ti].rack.remove(source);
+                    state.project.tracks[ti].rack.insert(destination, slot);
+                    state.commands.push_undo_snapshot(before, "Reorder Devices");
+                    state.dirty = true;
+                    state.push_status("Device reordered");
                 }
+            } else {
+                state.push_status("Reorder cancelled: drop within the device's signal-flow stage");
             }
         }
+    }
+    if input
+        .keys_pressed
+        .contains(&sdl2::keyboard::Keycode::Escape)
+        || (!input.right_mouse_down && !input.right_mouse_released)
+    {
         state.rack_reorder_drag = None;
         state.rack_reorder_target = None;
     }
 
     // ── Chunky horizontal scrollbar at bottom of rack ──
     // Add extra padding so the "+" button at the end of the last slot is always scrollable-to
-    let total_content_w = sx + scroll_offset + 80; // +80px so the "+" button is reachable when rack is full
+    let total_content_w = sx + scroll_offset + DEVICE_END_PADDING; // Include the add-device action in horizontal scrolling
     let sb_y = top + h - scrollbar_h;
     if total_content_w > w {
         let visible_ratio = (w as f32 / total_content_w as f32).clamp(0.02, 1.0);
@@ -3200,7 +3302,7 @@ pub(super) fn draw_master_rack(
     let scrollbar_h = 18i32;
     let natural_h = (h - 40 - scrollbar_h).max(60);
     let slot_h = natural_h.max(96); // Short panels use more columns, not hidden knob rows.
-    let slot_gap = 8i32;
+    let slot_gap = 16i32;
     let scroll_offset = state.rack_scroll_x as i32;
     let mut sx = 10i32 - scroll_offset;
     canvas.set_clip_rect(Rect::new(0, top + 20, rack_w as u32, (slot_h + 24) as u32));
@@ -3244,22 +3346,23 @@ pub(super) fn draw_master_rack(
         let slot_w = (knob_cols_w + vis_col_w).max(160);
 
         let slot_enabled = state.project.master_rack[slot_idx].enabled;
-        let bg = if slot_enabled {
-            Theme::c(state.theme.panel_bg)
-        } else {
-            sdl2::pixels::Color::RGBA(
-                state.theme.panel_bg[0].saturating_sub(20),
-                state.theme.panel_bg[1].saturating_sub(20),
-                state.theme.panel_bg[2].saturating_sub(20),
-                200,
-            )
-        };
-        canvas.set_draw_color(bg);
-        let _ = canvas.fill_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
-        canvas.set_draw_color(Theme::c(state.theme.panel_border));
-        let _ = canvas.draw_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
+        device_surface(canvas, &state.theme, sx, sy, slot_w, slot_h, cols, knob_cell_w,
+            param_count, first_center, row_height,
+            state.selected_rack_device == Some((None,state.project.master_rack[slot_idx].slot_id)),
+            slot_enabled);
 
-        device_header(canvas, &state.theme, &plugin_name, sx, sy, slot_w);
+        let device_slot = state.project.master_rack[slot_idx].slot_id;
+        device_header(
+            canvas,
+            input,
+            state,
+            &plugin_name,
+            None,
+            device_slot,
+            sx,
+            sy,
+            slot_w,
+        );
 
         // Slot header
         draw_pixel_label(
@@ -3277,7 +3380,7 @@ pub(super) fn draw_master_rack(
         );
 
         // Enable/disable toggle
-        let toggle_id = input.next_id();
+        let toggle_id = WidgetId::DeviceToggle(None, state.project.master_rack[slot_idx].slot_id);
         let toggle_clicked = button(
             canvas,
             input,
@@ -3306,7 +3409,7 @@ pub(super) fn draw_master_rack(
         }
 
         // Delete button
-        let del_id = input.next_id();
+        let del_id = WidgetId::DeviceRemove(None, state.project.master_rack[slot_idx].slot_id);
         let del_clicked = button(
             canvas,
             input,
@@ -3392,7 +3495,12 @@ pub(super) fn draw_master_rack(
             let p_min = param.min;
             let p_max = param.max;
             let p_default = param.default;
-            let p_name = param.name.clone();
+            let p_name = crate::modules::get_param_descs(&plugin_name)
+                .iter()
+                .find(|d| d.id == param.id)
+                .map(|d| d.name)
+                .unwrap_or(&param.name)
+                .to_string();
             let p_id = param.id.clone();
             let is_bipolar = p_min < 0.0;
 
@@ -3427,9 +3535,9 @@ pub(super) fn draw_master_rack(
                     &state.theme,
                     &p_name,
                     sel_x,
-                    sel_y - 5 * state.font_scale - 3,
+                    ky + 16 + 6 + 5 * state.font_scale,
                     sel_w,
-                    Theme::c(state.theme.text_dim),
+                    Theme::c(state.theme.text_secondary),
                 );
                 draw_pixel_label(
                     canvas,
@@ -3442,6 +3550,8 @@ pub(super) fn draw_master_rack(
                 );
                 if hover && input.mouse_pressed && !input.consumed {
                     input.drag_widget = knob_id;
+                    input.active_widget = knob_id;
+                    input.drag_start_value = val as f64;
                     input.consume();
                 }
                 if dragging && input.mouse_down {
@@ -3449,37 +3559,27 @@ pub(super) fn draw_master_rack(
                     let sensitivity = if input.shift() { 0.05 } else { 0.15 };
                     let delta = dy * sensitivity;
                     if delta.abs() > 0.001 {
-                        let old_val = state.project.master_rack[slot_idx].params[pi].value;
-                        let new_val = (old_val + delta).clamp(p_min, p_max);
-                        let old_idx = old_val.round() as usize;
-                        let new_idx = new_val.round() as usize;
-                        state.project.master_rack[slot_idx].params[pi].value = new_val;
+                        let new_val = (input.drag_start_value as f32
+                            - (input.mouse_y - input.drag_start_y) as f32 * sensitivity)
+                            .round()
+                            .clamp(p_min, p_max);
+                        state.set_device_parameter(None, slot_idx, pi, new_val);
                         state.dirty = true;
-                        if old_idx != new_idx {
-                            state.commands.execute(
-                                Box::new(crate::app::commands::SetMasterRackParam {
-                                    slot_idx,
-                                    param_idx: pi,
-                                    old_value: old_val,
-                                    new_value: new_val,
-                                }),
-                                &mut state.project,
-                            );
-                        }
                     }
                 }
                 if dragging && !input.mouse_down {
                     let v = state.project.master_rack[slot_idx].params[pi].value;
-                    state.project.master_rack[slot_idx].params[pi].value = v.round();
+                    state.set_device_parameter(None, slot_idx, pi, v.round());
                     input.drag_widget = WidgetId::None;
                 }
                 if hover
                     && input.mouse_released
-                    && input.drag_widget == WidgetId::None
+                    && input.active_widget == knob_id
+                    && (input.mouse_y - input.drag_start_y).abs() <= 3
+                    && (input.mouse_x - input.drag_start_x).abs() <= 3
                     && !input.consumed
                 {
                     let opts_len = opts.len();
-                    let old_val = val;
                     let new_idx = if input.shift() {
                         if idx == 0 {
                             opts_len - 1
@@ -3490,20 +3590,9 @@ pub(super) fn draw_master_rack(
                         (idx + 1) % opts_len
                     };
                     val = new_idx as f32;
-                    state.project.master_rack[slot_idx].params[pi].value = val;
+                    state.set_device_parameter(None, slot_idx, pi, val);
                     state.dirty = true;
                     input.consume();
-                    if (old_val - val).abs() > 1e-4 {
-                        state.commands.execute(
-                            Box::new(crate::app::commands::SetMasterRackParam {
-                                slot_idx,
-                                param_idx: pi,
-                                old_value: old_val,
-                                new_value: val,
-                            }),
-                            &mut state.project,
-                        );
-                    }
                 }
             } else {
                 let changed = crate::widgets::knob(
@@ -3527,23 +3616,8 @@ pub(super) fn draw_master_rack(
                     &mut val,
                 );
                 if changed {
-                    state.project.master_rack[slot_idx].params[pi].value = val;
+                    state.set_device_parameter(None, slot_idx, pi, val);
                     state.dirty = true;
-                }
-                // Commit master rack param change on mouse release
-                if input.mouse_released && input.drag_widget == knob_id {
-                    let old_val = input.drag_start_value as f32;
-                    if (old_val - val).abs() > 1e-4 {
-                        state.commands.execute(
-                            Box::new(crate::app::commands::SetMasterRackParam {
-                                slot_idx,
-                                param_idx: pi,
-                                old_value: old_val,
-                                new_value: val,
-                            }),
-                            &mut state.project,
-                        );
-                    }
                 }
             }
         }
@@ -3616,9 +3690,9 @@ pub(super) fn draw_master_rack(
             id: add_btn_id,
             x: add_btn_x,
             y: top + 24 + slot_h / 2 - 12,
-            width: 24,
-            height: 24,
-            label: "+".into(),
+            width: ADD_DEVICE_WIDTH,
+            height: 28,
+            label: "+ DEVICE".into(),
             toggled: false,
             icon: ButtonIcon::None,
             hint: Some("Add effect to master output chain".into()),
@@ -3700,7 +3774,7 @@ pub(super) fn draw_master_rack(
     state.module_drag_replace_idx = None;
 
     // ── Scrollbar ──
-    let total_content_w = sx + scroll_offset;
+    let total_content_w = sx + scroll_offset + DEVICE_END_PADDING;
     let sb_y = top + h - scrollbar_h;
     if total_content_w > rack_w {
         let visible_ratio = (rack_w as f32 / total_content_w as f32).clamp(0.02, 1.0);
@@ -4309,5 +4383,19 @@ mod device_layout_tests {
                 assert!(first + (rows as i32 - 1) * spacing + 16 + 6 + 10 * font <= height);
             }
         }
+    }
+    #[test]
+    fn rack_reorder_targets_preserve_midi_instrument_audio_stages() {
+        use crate::app::models::RackSlot;
+        let slots = vec![
+            RackSlot::transpose(1),
+            RackSlot::arpeggiator(2),
+            RackSlot::subtractive_synth(3),
+            RackSlot::gain(4),
+        ];
+        assert_eq!(rack_reorder_index(&slots, 0, 2), Some(1));
+        assert_eq!(rack_reorder_index(&slots, 0, 3), None);
+        assert_eq!(rack_reorder_index(&slots, 2, 0), None);
+        assert_eq!(rack_reorder_index(&slots, 10, 0), None);
     }
 }

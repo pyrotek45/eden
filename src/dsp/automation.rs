@@ -11,7 +11,7 @@ use crate::engine::AudioTrack;
 pub fn evaluate_automation_at(project: &Project, pos_beats: f64) -> Vec<(String, f32)> {
     let mut results = Vec::new();
     for track in &project.tracks {
-        if track.track_type != TrackType::Automation {
+        if track.track_type != TrackType::Automation || !track.automation_enabled {
             continue;
         }
         for clip in &track.clips {
@@ -20,8 +20,8 @@ pub fn evaluate_automation_at(project: &Project, pos_beats: f64) -> Vec<(String,
                 if pos_beats < ac.start_time || pos_beats >= clip_end || ac.length <= 0.0 {
                     continue;
                 }
-                let local = pos_beats - ac.start_time;
-                let t = (local / ac.length).clamp(0.0, 1.0);
+                let local = pos_beats - ac.start_time + ac.content_offset;
+                let t = local; // Automation editor, playback and export all use source beats.
                 let pts = &ac.points;
                 if pts.is_empty() {
                     continue;
@@ -127,4 +127,25 @@ pub fn song_length_beats(project: &Project) -> f64 {
         .map(|c| c.start_time() + c.length())
         .fold(0.0_f64, f64::max)
         .max(1.0)
+}
+
+#[cfg(test)]
+mod source_time_tests {
+    use super::*;
+    #[test]
+    fn trimmed_automation_uses_source_beats_without_rescaling_curve() {
+        let mut project = Project::default();
+        let mut track = Track::new(1, "Auto", TrackType::Automation);
+        let clip=serde_json::from_value(serde_json::json!({"Automation":{"points":[{"time":0.0,"value":0.0},{"time":4.0,"value":1.0}],"start_time":2.0,"content_offset":1.0,"length":2.0,"target_param":"2:1:gain","name":"Curve","color":[0,0,0,0]}})).unwrap();
+        track.clips.push(clip);
+        project.tracks.push(track);
+        assert_eq!(
+            evaluate_automation_at(&project, 2.0),
+            vec![("2:1:gain".into(), 0.25)]
+        );
+        assert_eq!(
+            evaluate_automation_at(&project, 3.0),
+            vec![("2:1:gain".into(), 0.5)]
+        );
+    }
 }

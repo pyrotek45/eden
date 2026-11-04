@@ -9,7 +9,7 @@ use crate::app::state::*;
 use crate::theme::Theme;
 use crate::widgets::*;
 
-/// Decode `path` for a destructive editing operation. A failure is reported in the
+/// Decode `path` for an immutable derived-asset editing operation. A failure is reported in the
 /// status toast so the button that triggered it never fails silently.
 fn load_for_edit(state: &mut AppState, path: &std::path::Path) -> Option<(Vec<f32>, usize, u32)> {
     match crate::engine::load_audio_interleaved(path) {
@@ -32,6 +32,9 @@ fn source_unavailable_reason(source_file: &str) -> Option<String> {
     }
     let path = std::path::Path::new(source_file);
     if path.is_file() {
+        if hound::WavReader::open(path).is_ok_and(|reader| reader.duration() == 0) {
+            return Some("Audio file has no sample frames".into());
+        }
         None
     } else {
         let name = path
@@ -169,13 +172,15 @@ pub(super) fn draw_audio_editor(
         .waveform_cache
         .get(&source_file)
         .map(|(_, dur)| *dur)
+        .or_else(|| {
+            hound::WavReader::open(&source_file)
+                .ok()
+                .map(|reader| reader.duration() as f64 / reader.spec().sample_rate as f64)
+        })
         .unwrap_or(0.0);
 
-    let total_secs = if file_dur_secs > 0.0 {
-        file_dur_secs
-    } else {
-        (clip_offset_secs + 10.0).max(1.0)
-    };
+    // A tiny axis extent avoids division by zero; never invent a ten-second file.
+    let total_secs = file_dur_secs.max(0.001);
 
     let bpm_early = state.project.tempo_map.bpm_at(0.0);
 
@@ -200,28 +205,28 @@ pub(super) fn draw_audio_editor(
     let clip_win_start_secs = clip_offset_secs.min(total_secs);
     let clip_win_end_secs = (clip_offset_secs + clip_len_secs).min(total_secs);
 
-    let is_clone = if !source_file.is_empty() {
-        let sf = &source_file;
-        let mut count = 0usize;
-        for track in &state.project.tracks {
-            for clip in &track.clips {
-                if let crate::app::models::Clip::Audio(ac) = clip {
-                    if ac.source_file == *sf {
-                        count += 1;
-                        if count > 1 {
-                            break;
-                        }
-                    }
-                }
-            }
-            if count > 1 {
-                break;
-            }
-        }
-        count > 1
-    } else {
-        false
-    };
+    let content_id = state
+        .selected_clip
+        .and_then(|(tid, ci)| {
+            state
+                .project
+                .tracks
+                .iter()
+                .find(|t| t.id == tid)
+                .and_then(|t| t.clips.get(ci))
+        })
+        .map(|c| c.content_id());
+    let is_clone = content_id.is_some_and(|id| {
+        state
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .chain(state.project.shelf_clips.iter().map(|(_, c)| c))
+            .filter(|c| c.content_id() == id)
+            .count()
+            > 1
+    });
     // ── Layout constants ─────────────────────────────────────────────
     use AudioControl::*;
     let toolbar = audio_toolbar_layout(w, get_font_scale(), is_clone);
@@ -438,58 +443,13 @@ pub(super) fn draw_audio_editor(
                 toggled: false,
                 icon: ButtonIcon::None,
                 hint: Some(
-                    "Make a unique copy of this clip's audio so edits don't affect clones".into(),
+                    "Detach this clip's content; keep the immutable source audio shared".into(),
                 ),
                 ..Default::default()
             },
         );
         if unique_clicked {
-            // Snapshot for undo before mutating
-            let snapshot = state.project.clone();
-            // Copy source file to a new unique file
-            let src_path = std::path::Path::new(&source_file);
-            let dir = src_path.parent().unwrap_or(std::path::Path::new("."));
-            let stem = src_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("audio");
-            let ext = src_path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("wav");
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-            let new_name = format!("{}_unique_{}.{}", stem, ts, ext);
-            let new_path = dir.join(&new_name);
-            match std::fs::copy(&source_file, &new_path) {
-                Ok(_) => {
-                    let new_path_str = new_path.to_string_lossy().to_string();
-                    // Update this clip's source_file to the new copy
-                    if let Some((track_id, clip_idx)) = state.selected_clip {
-                        if let Some(track) =
-                            state.project.tracks.iter_mut().find(|t| t.id == track_id)
-                        {
-                            if let Some(crate::app::models::Clip::Audio(ac)) =
-                                track.clips.get_mut(clip_idx)
-                            {
-                                ac.source_file = new_path_str.clone();
-                            }
-                        }
-                    }
-                    // Invalidate caches for the new file so it loads fresh
-                    state.waveform_cache.remove(&new_path_str);
-                    state.dirty = true;
-                    state
-                        .commands
-                        .push_undo_snapshot(snapshot, "Make Clip Unique");
-                    state.push_status("Clip made unique — edits are now independent");
-                }
-                Err(e) => {
-                    state.push_status(format!("Make unique failed: {}", e));
-                }
-            }
+            state.make_selected_clip_unique();
         }
     }
 
@@ -529,28 +489,6 @@ pub(super) fn draw_audio_editor(
 
     // Helper: create an undo backup of the source file before destructive operations.
     // Returns Ok(backup_path) or Err(message).
-    let make_undo_backup = |src: &str| -> Result<String, String> {
-        let src_path = std::path::Path::new(src);
-        let dir = src_path.parent().unwrap_or(std::path::Path::new("."));
-        let stem = src_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("audio");
-        let ext = src_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("wav");
-        // Use a timestamp-based backup name to avoid collisions
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let backup_name = format!(".{}_undo_{}.{}", stem, ts, ext);
-        let backup_path = dir.join(backup_name);
-        std::fs::copy(src, &backup_path)
-            .map(|_| backup_path.to_string_lossy().to_string())
-            .map_err(|e| format!("Backup failed: {}", e))
-    };
 
     let tool_hints: [&str; 6] = [
         "Select entire waveform (Q)",
@@ -561,13 +499,23 @@ pub(super) fn draw_audio_editor(
         "Paste — insert clipboard audio at playhead position (Y)",
     ];
     let source_problem = source_unavailable_reason(&source_file);
-    // NORM, TRIM, CUT and PASTE rewrite the source file; SEL and FIT only change the view/clip window.
+    // Source tools render new assets; SEL and FIT change only view/instance metadata.
     const SOURCE_TOOLS: [usize; 4] = [1, 2, 4, 5];
     // TRIM and CUT act on the current selection.
     const SELECTION_TOOLS: [usize; 2] = [2, 4];
     for (i, &label) in tool_labels.iter().enumerate() {
         let rect = control([Select, Normalize, Trim, Fit, Cut, Paste][i]);
-        let tool_blocked = if SOURCE_TOOLS.contains(&i) {
+        let tool_blocked = if i == 5 && std::path::Path::new(&source_file).is_file() {
+            if state
+                .audio_clipboard
+                .as_ref()
+                .is_none_or(|samples| samples.is_empty())
+            {
+                Some("Nothing in audio clipboard".into())
+            } else {
+                None
+            }
+        } else if SOURCE_TOOLS.contains(&i) {
             source_problem.clone()
         } else {
             None
@@ -616,7 +564,7 @@ pub(super) fn draw_audio_editor(
                     state.audio_editor_selection = Some((0.0, total_secs));
                 }
                 1 => {
-                    // Normalize — destructive: scales samples in selected region to peak at 0dB
+                    // Normalize — source-preserving: scales samples in selected region to peak at 0dB
                     if let Some((_track_id, _clip_idx)) = state.selected_clip {
                         let (sel_s, sel_e) = state
                             .audio_editor_selection
@@ -624,8 +572,7 @@ pub(super) fn draw_audio_editor(
                             .unwrap_or((0.0, total_secs));
                         if (sel_e - sel_s) > 0.001 {
                             let path = std::path::Path::new(&source_file);
-                            if let Some((raw, channels, sr)) = load_for_edit(state, path)
-                            {
+                            if let Some((raw, channels, sr)) = load_for_edit(state, path) {
                                 let total_frames = raw.len() / channels.max(1);
                                 let start_frame = ((sel_s * sr as f64) as usize).min(total_frames);
                                 let end_frame = ((sel_e * sr as f64) as usize).min(total_frames);
@@ -636,53 +583,41 @@ pub(super) fn draw_audio_editor(
                                         region.iter().cloned().map(f32::abs).fold(0.0f32, f32::max);
                                     if peak > 0.001 {
                                         // Create undo backup
-                                        match make_undo_backup(&source_file) {
-                                            Ok(backup) => {
-                                                state.audio_redo_stack.clear();
-                                                state.audio_undo_stack.push((
-                                                    source_file.clone(),
-                                                    backup,
-                                                    "Normalize".to_string(),
-                                                    None,
-                                                ));
-                                                // Scale the selected region
-                                                let gain = 1.0 / peak;
-                                                let mut modified = raw.clone();
-                                                for s in &mut modified
-                                                    [start_frame * channels..end_frame * channels]
-                                                {
-                                                    *s *= gain;
-                                                }
-                                                let save_result = if channels >= 2 {
-                                                    crate::engine::save_wav_stereo(
-                                                        path, &modified, sr,
-                                                    )
-                                                } else {
-                                                    crate::engine::save_wav_mono(
-                                                        path, &modified, sr,
-                                                    )
-                                                };
-                                                match save_result {
-                                                    Ok(()) => {
-                                                        state.waveform_cache.remove(&source_file);
-                                                        state
-                                                            .waveform_stereo_cache
-                                                            .remove(&source_file);
-                                                        state
-                                                            .waveform_raw_cache
-                                                            .remove(&source_file);
-                                                        state
-                                                            .audio_sample_invalidate
-                                                            .push(source_file.clone());
-                                                        state.push_status(format!("Normalized selection (peak {:.1}dB → 0dB)", 20.0 * peak.log10()));
-                                                    }
-                                                    Err(e) => state.push_status(format!(
-                                                        "Normalize failed: {}",
-                                                        e
-                                                    )),
-                                                }
+                                        {
+                                            // Scale the selected region
+                                            let gain = 1.0 / peak;
+                                            let mut modified = raw.clone();
+                                            for s in &mut modified
+                                                [start_frame * channels..end_frame * channels]
+                                            {
+                                                *s *= gain;
                                             }
-                                            Err(e) => state.push_status(e),
+                                            let save_result = state.commit_audio_render(
+                                                &modified,
+                                                channels,
+                                                sr,
+                                                "Normalize",
+                                            );
+                                            match save_result {
+                                                Ok(()) => {
+                                                    state.waveform_cache.remove(&source_file);
+                                                    state
+                                                        .waveform_stereo_cache
+                                                        .remove(&source_file);
+                                                    state.waveform_raw_cache.remove(&source_file);
+                                                    state
+                                                        .audio_sample_invalidate
+                                                        .push(source_file.clone());
+                                                    state.push_status(format!(
+                                                        "Normalized selection (peak {:.1}dB → 0dB)",
+                                                        20.0 * peak.log10()
+                                                    ));
+                                                }
+                                                Err(e) => state.push_status(format!(
+                                                    "Normalize failed: {}",
+                                                    e
+                                                )),
+                                            }
                                         }
                                     } else {
                                         state.push_status(
@@ -695,14 +630,13 @@ pub(super) fn draw_audio_editor(
                     }
                 }
                 2 => {
-                    // TRIM — destructive: removes audio OUTSIDE selection from file
+                    // TRIM — source-preserving: removes audio OUTSIDE selection from file
                     if let Some((sel_s, sel_e)) = state.audio_editor_selection {
                         let s = sel_s.min(sel_e);
                         let e = sel_s.max(sel_e);
                         if (e - s) > 0.01 {
                             let path = std::path::Path::new(&source_file);
-                            if let Some((raw, channels, sr)) = load_for_edit(state, path)
-                            {
+                            if let Some((raw, channels, sr)) = load_for_edit(state, path) {
                                 let ch = channels.max(1);
                                 let total_frames = raw.len() / ch;
                                 let start_frame_raw = ((s * sr as f64) as usize).min(total_frames);
@@ -719,69 +653,40 @@ pub(super) fn draw_audio_editor(
                                     (start_frame_raw, end_frame_raw)
                                 };
                                 if end_frame > start_frame {
-                                    match make_undo_backup(&source_file) {
-                                        Ok(backup) => {
-                                            state.audio_redo_stack.clear();
-                                            state.audio_undo_stack.push((
-                                                source_file.clone(),
-                                                backup,
-                                                "Trim".to_string(),
-                                                Some(state.project.clone()),
-                                            ));
-                                            let trimmed: Vec<f32> =
-                                                raw[start_frame * ch..end_frame * ch].to_vec();
-                                            let save_result = if ch >= 2 {
-                                                crate::engine::save_wav_stereo(path, &trimmed, sr)
-                                            } else {
-                                                crate::engine::save_wav_mono(path, &trimmed, sr)
-                                            };
-                                            match save_result {
-                                                Ok(()) => {
-                                                    state.waveform_cache.remove(&source_file);
-                                                    state
-                                                        .waveform_stereo_cache
-                                                        .remove(&source_file);
-                                                    state.waveform_raw_cache.remove(&source_file);
-                                                    state
-                                                        .audio_sample_invalidate
-                                                        .push(source_file.clone());
-                                                    if let Some((track_id, clip_idx)) =
-                                                        state.selected_clip
-                                                    {
-                                                        if let Some(t) = state
-                                                            .project
-                                                            .tracks
-                                                            .iter_mut()
-                                                            .find(|t| t.id == track_id)
-                                                        {
-                                                            if let Some(
-                                                                crate::app::models::Clip::Audio(ac),
-                                                            ) = t.clips.get_mut(clip_idx)
-                                                            {
-                                                                let old_offset = ac.offset;
-                                                                ac.offset =
-                                                                    (old_offset - s).max(0.0);
-                                                                let new_dur = e - s;
-                                                                let max_len_beats =
-                                                                    new_dur * bpm / 60.0;
-                                                                if ac.length > max_len_beats {
-                                                                    ac.length = max_len_beats;
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    state.audio_editor_selection = None;
-                                                    state.audio_editor_scroll = 0.0;
-                                                    state.audio_editor_zoom = 1.0;
-                                                    state.audio_editor_playhead = 0.0;
-                                                    state.push_status("Audio trimmed to selection (file modified)");
-                                                }
-                                                Err(e) => {
-                                                    state.push_status(format!("Trim failed: {}", e))
-                                                }
+                                    {
+                                        let trimmed: Vec<f32> =
+                                            raw[start_frame * ch..end_frame * ch].to_vec();
+                                        let save_result =
+                                            state.commit_audio_render(&trimmed, ch, sr, "Trim");
+                                        match save_result {
+                                            Ok(()) => {
+                                                state.waveform_cache.remove(&source_file);
+                                                state.waveform_stereo_cache.remove(&source_file);
+                                                state.waveform_raw_cache.remove(&source_file);
+                                                state
+                                                    .audio_sample_invalidate
+                                                    .push(source_file.clone());
+                                                let start = start_frame as f64 / sr as f64;
+                                                let end = end_frame as f64 / sr as f64;
+                                                state.edit_linked_audio_windows(|clip| {
+                                                    clip.offset = (clip.offset - start)
+                                                        .clamp(0.0, end - start);
+                                                    clip.length = clip.length.min(
+                                                        ((end - start - clip.offset).max(0.0))
+                                                            * bpm
+                                                            / 60.0,
+                                                    );
+                                                });
+                                                state.audio_editor_selection = None;
+                                                state.audio_editor_scroll = 0.0;
+                                                state.audio_editor_zoom = 1.0;
+                                                state.audio_editor_playhead = 0.0;
+                                                state.push_status("Audio trimmed to selection (new asset; source unchanged)");
+                                            }
+                                            Err(e) => {
+                                                state.push_status(format!("Trim failed: {}", e))
                                             }
                                         }
-                                        Err(e) => state.push_status(e),
                                     }
                                 }
                             }
@@ -823,14 +728,13 @@ pub(super) fn draw_audio_editor(
                     }
                 }
                 4 => {
-                    // CUT — destructive: removes selected audio from file, stores in clipboard
+                    // CUT — source-preserving: removes selected audio from file, stores in clipboard
                     if let Some((sel_s, sel_e)) = state.audio_editor_selection {
                         let s = sel_s.min(sel_e);
                         let e = sel_s.max(sel_e);
                         if (e - s) > 0.001 {
                             let path = std::path::Path::new(&source_file);
-                            if let Some((raw, channels, sr)) = load_for_edit(state, path)
-                            {
+                            if let Some((raw, channels, sr)) = load_for_edit(state, path) {
                                 let ch = channels.max(1);
                                 let total_frames = raw.len() / ch;
                                 let start_frame_raw = ((s * sr as f64) as usize).min(total_frames);
@@ -847,83 +751,56 @@ pub(super) fn draw_audio_editor(
                                     (start_frame_raw, end_frame_raw)
                                 };
                                 if end_frame > start_frame {
-                                    match make_undo_backup(&source_file) {
-                                        Ok(backup) => {
-                                            state.audio_redo_stack.clear();
-                                            state.audio_undo_stack.push((
-                                                source_file.clone(),
-                                                backup,
-                                                "Cut".to_string(),
-                                                Some(state.project.clone()),
-                                            ));
-                                            // Copy cut region to clipboard (mono mix)
-                                            let cut_region: Vec<f32> = if ch >= 2 {
-                                                raw[start_frame * ch..end_frame * ch]
-                                                    .chunks(ch)
-                                                    .map(|frame| {
-                                                        frame.iter().sum::<f32>() / ch as f32
-                                                    })
-                                                    .collect()
-                                            } else {
-                                                raw[start_frame..end_frame].to_vec()
-                                            };
-                                            state.audio_clipboard = Some(cut_region);
-                                            state.audio_clipboard_sr = sr;
+                                    {
+                                        state.audio_clipboard =
+                                            Some(raw[start_frame * ch..end_frame * ch].to_vec());
+                                        state.audio_clipboard_sr = sr;
+                                        state.audio_clipboard_channels = ch;
 
-                                            let mut remaining = Vec::with_capacity(
-                                                raw.len() - (end_frame - start_frame) * ch,
-                                            );
-                                            remaining.extend_from_slice(&raw[..start_frame * ch]);
-                                            remaining.extend_from_slice(&raw[end_frame * ch..]);
+                                        let mut remaining = Vec::with_capacity(
+                                            raw.len() - (end_frame - start_frame) * ch,
+                                        );
+                                        remaining.extend_from_slice(&raw[..start_frame * ch]);
+                                        remaining.extend_from_slice(&raw[end_frame * ch..]);
 
-                                            let save_result = if ch >= 2 {
-                                                crate::engine::save_wav_stereo(path, &remaining, sr)
-                                            } else {
-                                                crate::engine::save_wav_mono(path, &remaining, sr)
-                                            };
-                                            match save_result {
-                                                Ok(()) => {
-                                                    state.waveform_cache.remove(&source_file);
-                                                    state
-                                                        .waveform_stereo_cache
-                                                        .remove(&source_file);
-                                                    state.waveform_raw_cache.remove(&source_file);
-                                                    state
-                                                        .audio_sample_invalidate
-                                                        .push(source_file.clone());
-                                                    let cut_dur = e - s;
-                                                    if let Some((track_id, clip_idx)) =
-                                                        state.selected_clip
-                                                    {
-                                                        if let Some(t) = state
-                                                            .project
-                                                            .tracks
-                                                            .iter_mut()
-                                                            .find(|t| t.id == track_id)
-                                                        {
-                                                            if let Some(
-                                                                crate::app::models::Clip::Audio(ac),
-                                                            ) = t.clips.get_mut(clip_idx)
-                                                            {
-                                                                if ac.offset >= e {
-                                                                    ac.offset -= cut_dur;
-                                                                } else if ac.offset > s {
-                                                                    ac.offset = s;
-                                                                }
-                                                            }
-                                                        }
+                                        let save_result =
+                                            state.commit_audio_render(&remaining, ch, sr, "Cut");
+                                        match save_result {
+                                            Ok(()) => {
+                                                state.waveform_cache.remove(&source_file);
+                                                state.waveform_stereo_cache.remove(&source_file);
+                                                state.waveform_raw_cache.remove(&source_file);
+                                                state
+                                                    .audio_sample_invalidate
+                                                    .push(source_file.clone());
+                                                let start = start_frame as f64 / sr as f64;
+                                                let end = end_frame as f64 / sr as f64;
+                                                let map = |time: f64| {
+                                                    if time <= start {
+                                                        time
+                                                    } else if time >= end {
+                                                        time - (end - start)
+                                                    } else {
+                                                        start
                                                     }
-                                                    state.audio_editor_selection = None;
-                                                    state.audio_editor_playhead = s;
-                                                    state.push_status(
-                                                        "Audio cut to clipboard (file modified)",
+                                                };
+                                                state.edit_linked_audio_windows(|clip| {
+                                                    let stop =
+                                                        map(clip.offset + clip.length * 60.0 / bpm);
+                                                    clip.offset = map(clip.offset);
+                                                    clip.length =
+                                                        (stop - clip.offset).max(0.0) * bpm / 60.0;
+                                                });
+                                                state.audio_editor_selection = None;
+                                                state.audio_editor_playhead = s;
+                                                state.push_status(
+                                                        "Audio cut to clipboard (new asset; source unchanged)",
                                                     );
-                                                }
-                                                Err(err) => state
-                                                    .push_status(format!("Cut failed: {}", err)),
+                                            }
+                                            Err(err) => {
+                                                state.push_status(format!("Cut failed: {}", err))
                                             }
                                         }
-                                        Err(e) => state.push_status(e),
                                     }
                                 }
                             }
@@ -935,100 +812,70 @@ pub(super) fn draw_audio_editor(
                     if let Some(ref clip_data) = state.audio_clipboard.clone() {
                         let paste_sec = state.audio_editor_playhead;
                         let path = std::path::Path::new(&source_file);
-                        if let Some((raw, channels, sr)) = load_for_edit(state, path)
-                        {
-                            match make_undo_backup(&source_file) {
-                                Ok(backup) => {
-                                    state.audio_redo_stack.clear();
-                                    state.audio_undo_stack.push((
-                                        source_file.clone(),
-                                        backup,
-                                        "Paste".to_string(),
-                                        Some(state.project.clone()),
-                                    ));
-                                    let ch = channels.max(1);
-                                    let total_frames = raw.len() / ch;
-                                    let insert_frame_raw =
-                                        ((paste_sec * sr as f64) as usize).min(total_frames);
-                                    // Snap insertion point to zero crossing only when snap is off
-                                    let insert_frame = if !state.audio_editor_snap_enabled {
-                                        let mono: Vec<f32> =
-                                            raw.iter().step_by(ch).copied().collect();
-                                        let zc_search = (sr as usize / 100).max(64);
-                                        nearest_zero_crossing(&mono, insert_frame_raw, zc_search)
-                                    } else {
-                                        insert_frame_raw
-                                    };
-                                    let clip_sr = state.audio_clipboard_sr;
+                        if let Some((raw, channels, sr)) = load_for_edit(state, path) {
+                            {
+                                let ch = channels.max(1);
+                                let total_frames = raw.len() / ch;
+                                let insert_frame_raw =
+                                    ((paste_sec * sr as f64) as usize).min(total_frames);
+                                // Snap insertion point to zero crossing only when snap is off
+                                let insert_frame = if !state.audio_editor_snap_enabled {
+                                    let mono: Vec<f32> = raw.iter().step_by(ch).copied().collect();
+                                    let zc_search = (sr as usize / 100).max(64);
+                                    nearest_zero_crossing(&mono, insert_frame_raw, zc_search)
+                                } else {
+                                    insert_frame_raw
+                                };
+                                let interleaved_paste = crate::app::audio_content::clipboard_frames(
+                                    &clip_data,
+                                    state.audio_clipboard_channels,
+                                    ch,
+                                    state.audio_clipboard_sr,
+                                    sr,
+                                );
 
-                                    let resampled: Vec<f32> = if clip_sr != sr {
-                                        let ratio = sr as f64 / clip_sr as f64;
-                                        let new_len = (clip_data.len() as f64 * ratio) as usize;
-                                        (0..new_len)
-                                            .map(|i| {
-                                                let src_idx = ((i as f64 / ratio) as usize)
-                                                    .min(clip_data.len().saturating_sub(1));
-                                                clip_data[src_idx]
-                                            })
-                                            .collect()
-                                    } else {
-                                        clip_data.clone()
-                                    };
+                                let mut result =
+                                    Vec::with_capacity(raw.len() + interleaved_paste.len());
+                                result.extend_from_slice(&raw[..insert_frame * ch]);
+                                result.extend_from_slice(&interleaved_paste);
+                                result.extend_from_slice(&raw[insert_frame * ch..]);
 
-                                    let interleaved_paste: Vec<f32> = if ch >= 2 {
-                                        resampled.iter().flat_map(|&s| vec![s; ch]).collect()
-                                    } else {
-                                        resampled
-                                    };
-
-                                    let mut result =
-                                        Vec::with_capacity(raw.len() + interleaved_paste.len());
-                                    result.extend_from_slice(&raw[..insert_frame * ch]);
-                                    result.extend_from_slice(&interleaved_paste);
-                                    result.extend_from_slice(&raw[insert_frame * ch..]);
-
-                                    let save_result = if ch >= 2 {
-                                        crate::engine::save_wav_stereo(path, &result, sr)
-                                    } else {
-                                        crate::engine::save_wav_mono(path, &result, sr)
-                                    };
-                                    match save_result {
-                                        Ok(()) => {
-                                            state.waveform_cache.remove(&source_file);
-                                            state.waveform_stereo_cache.remove(&source_file);
-                                            state.waveform_raw_cache.remove(&source_file);
-                                            state.audio_sample_invalidate.push(source_file.clone());
-                                            let paste_dur = interleaved_paste.len() as f64
-                                                / (sr as f64 * ch as f64);
-                                            if let Some((track_id, clip_idx)) = state.selected_clip
-                                            {
-                                                if let Some(t) = state
-                                                    .project
-                                                    .tracks
-                                                    .iter_mut()
-                                                    .find(|t| t.id == track_id)
-                                                {
-                                                    if let Some(crate::app::models::Clip::Audio(
-                                                        ac,
-                                                    )) = t.clips.get_mut(clip_idx)
-                                                    {
-                                                        if ac.offset >= paste_sec {
-                                                            ac.offset += paste_dur;
-                                                        }
-                                                    }
-                                                }
+                                let save_result =
+                                    state.commit_audio_render(&result, ch, sr, "Paste");
+                                match save_result {
+                                    Ok(()) => {
+                                        state.waveform_cache.remove(&source_file);
+                                        state.waveform_stereo_cache.remove(&source_file);
+                                        state.waveform_raw_cache.remove(&source_file);
+                                        state.audio_sample_invalidate.push(source_file.clone());
+                                        let paste_dur = interleaved_paste.len() as f64
+                                            / (sr as f64 * ch as f64);
+                                        let insert = insert_frame as f64 / sr as f64;
+                                        state.edit_linked_audio_windows(|clip| {
+                                            if clip.length <= 0.0 {
+                                                clip.offset = 0.0;
+                                                clip.length = paste_dur * bpm / 60.0;
+                                                return;
                                             }
-                                            state.audio_editor_playhead = paste_sec + paste_dur;
-                                            state.push_status(
-                                                "Audio pasted from clipboard (file modified)",
+                                            let stop = clip.offset + clip.length * 60.0 / bpm;
+                                            let new_stop = if stop > insert {
+                                                stop + paste_dur
+                                            } else {
+                                                stop
+                                            };
+                                            if clip.offset >= insert {
+                                                clip.offset += paste_dur;
+                                            }
+                                            clip.length =
+                                                (new_stop - clip.offset).max(0.0) * bpm / 60.0;
+                                        });
+                                        state.audio_editor_playhead = paste_sec + paste_dur;
+                                        state.push_status(
+                                                "Audio pasted from clipboard (new asset; source unchanged)",
                                             );
-                                        }
-                                        Err(err) => {
-                                            state.push_status(format!("Paste failed: {}", err))
-                                        }
                                     }
+                                    Err(err) => state.push_status(format!("Paste failed: {}", err)),
                                 }
-                                Err(e) => state.push_status(e),
                             }
                         }
                     } else {
@@ -1118,30 +965,13 @@ pub(super) fn draw_audio_editor(
             &mut gain_val,
         );
         if gain_changed {
+            state.begin_audio_parameter_gesture();
             if let Some((track_id, clip_idx)) = state.selected_clip {
                 if let Some(t) = state.project.tracks.iter_mut().find(|t| t.id == track_id) {
                     if let Some(crate::app::models::Clip::Audio(ac)) = t.clips.get_mut(clip_idx) {
                         ac.gain = gain_val;
                         state.dirty = true;
                     }
-                }
-            }
-        }
-        // Commit clip gain change on release
-        if input.mouse_released && input.drag_widget == WidgetId::Auto(7070) {
-            if let Some((track_id, clip_idx)) = state.selected_clip {
-                let old_gain = input.drag_start_value as f32;
-                let new_gain = gain_val;
-                if (old_gain - new_gain).abs() > 1e-4 {
-                    state.commands.execute(
-                        Box::new(crate::app::commands::SetClipGain {
-                            track_id,
-                            clip_idx,
-                            old_gain,
-                            new_gain,
-                        }),
-                        &mut state.project,
-                    );
                 }
             }
         }
@@ -1185,6 +1015,7 @@ pub(super) fn draw_audio_editor(
             &mut fade_val,
         );
         if fade_changed {
+            state.begin_audio_parameter_gesture();
             state.audio_editor_fade_in = fade_val as f64;
             // Write back to the clip model
             if let Some((track_id, clip_idx)) = state.selected_clip {
@@ -1236,6 +1067,7 @@ pub(super) fn draw_audio_editor(
             &mut fade_val,
         );
         if fade_changed {
+            state.begin_audio_parameter_gesture();
             state.audio_editor_fade_out = fade_val as f64;
             // Write back to the clip model
             if let Some((track_id, clip_idx)) = state.selected_clip {
@@ -1369,119 +1201,87 @@ pub(super) fn draw_audio_editor(
                     let start_frame = ((sel_s * sr as f64) as usize).min(total_frames);
                     let end_frame = ((sel_e * sr as f64) as usize).min(total_frames);
                     if end_frame > start_frame {
-                        let make_undo_backup_fx = |src: &str| -> Result<String, String> {
-                            let sp = std::path::Path::new(src);
-                            let dir = sp.parent().unwrap_or(std::path::Path::new("."));
-                            let stem = sp.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
-                            let ext = sp.extension().and_then(|s| s.to_str()).unwrap_or("wav");
-                            let ts = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis())
-                                .unwrap_or(0);
-                            let backup_name = format!(".{}_undo_{}.{}", stem, ts, ext);
-                            let backup_path = dir.join(backup_name);
-                            std::fs::copy(src, &backup_path)
-                                .map(|_| backup_path.to_string_lossy().to_string())
-                                .map_err(|e| format!("Backup failed: {}", e))
-                        };
                         let fx_idx = state.audio_editor_effect_idx;
                         let fx_name = audio_fx_labels.get(fx_idx).unwrap_or(&"Unknown");
-                        match make_undo_backup_fx(&source_file) {
-                            Ok(backup) => {
-                                state.audio_redo_stack.clear();
-                                state.audio_undo_stack.push((
-                                    source_file.clone(),
-                                    backup,
-                                    format!("Apply {}", fx_name),
-                                    None,
-                                ));
-                                let mut modified = raw.clone();
-                                let region =
-                                    &mut modified[start_frame * channels..end_frame * channels];
-                                match fx_idx {
-                                    0 => {
-                                        // Reverse
-                                        if channels >= 2 {
-                                            let frame_count = region.len() / channels;
-                                            for i in 0..frame_count / 2 {
-                                                let j = frame_count - 1 - i;
-                                                for ch in 0..channels {
-                                                    region
-                                                        .swap(i * channels + ch, j * channels + ch);
-                                                }
-                                            }
-                                        } else {
-                                            region.reverse();
-                                        }
-                                    }
-                                    1 => {
-                                        // Fade In
+                        {
+                            let mut modified = raw.clone();
+                            let region =
+                                &mut modified[start_frame * channels..end_frame * channels];
+                            match fx_idx {
+                                0 => {
+                                    // Reverse
+                                    if channels >= 2 {
                                         let frame_count = region.len() / channels;
-                                        for i in 0..frame_count {
-                                            let gain = i as f32 / frame_count as f32;
+                                        for i in 0..frame_count / 2 {
+                                            let j = frame_count - 1 - i;
                                             for ch in 0..channels {
-                                                region[i * channels + ch] *= gain;
+                                                region.swap(i * channels + ch, j * channels + ch);
                                             }
                                         }
+                                    } else {
+                                        region.reverse();
                                     }
-                                    2 => {
-                                        // Fade Out
-                                        let frame_count = region.len() / channels;
-                                        for i in 0..frame_count {
-                                            let gain = 1.0 - (i as f32 / frame_count as f32);
-                                            for ch in 0..channels {
-                                                region[i * channels + ch] *= gain;
-                                            }
-                                        }
-                                    }
-                                    3 => {
-                                        // Silence
-                                        for s in region.iter_mut() {
-                                            *s = 0.0;
-                                        }
-                                    }
-                                    4 => {
-                                        // Gain +6dB (~2x)
-                                        let gain = 2.0f32;
-                                        for s in region.iter_mut() {
-                                            *s = (*s * gain).clamp(-1.0, 1.0);
-                                        }
-                                    }
-                                    5 => {
-                                        // Gain -6dB (~0.5x)
-                                        let gain = 0.5f32;
-                                        for s in region.iter_mut() {
-                                            *s *= gain;
-                                        }
-                                    }
-                                    6 => {
-                                        // Invert (phase flip)
-                                        for s in region.iter_mut() {
-                                            *s = -*s;
-                                        }
-                                    }
-                                    _ => {}
                                 }
-                                let save_result = if channels >= 2 {
-                                    crate::engine::save_wav_stereo(path, &modified, sr)
-                                } else {
-                                    crate::engine::save_wav_mono(path, &modified, sr)
-                                };
-                                match save_result {
-                                    Ok(()) => {
-                                        state.waveform_cache.remove(&source_file);
-                                        state.waveform_stereo_cache.remove(&source_file);
-                                        state.waveform_raw_cache.remove(&source_file);
-                                        state.audio_sample_invalidate.push(source_file.clone());
-                                        state.push_status(format!(
-                                            "{} applied to selection",
-                                            fx_name
-                                        ));
+                                1 => {
+                                    // Fade In
+                                    let frame_count = region.len() / channels;
+                                    for i in 0..frame_count {
+                                        let gain = i as f32 / frame_count as f32;
+                                        for ch in 0..channels {
+                                            region[i * channels + ch] *= gain;
+                                        }
                                     }
-                                    Err(e) => state.push_status(format!("Apply failed: {}", e)),
                                 }
+                                2 => {
+                                    // Fade Out
+                                    let frame_count = region.len() / channels;
+                                    for i in 0..frame_count {
+                                        let gain = 1.0 - (i as f32 / frame_count as f32);
+                                        for ch in 0..channels {
+                                            region[i * channels + ch] *= gain;
+                                        }
+                                    }
+                                }
+                                3 => {
+                                    // Silence
+                                    for s in region.iter_mut() {
+                                        *s = 0.0;
+                                    }
+                                }
+                                4 => {
+                                    // Gain +6dB (~2x)
+                                    let gain = 2.0f32;
+                                    for s in region.iter_mut() {
+                                        *s = (*s * gain).clamp(-1.0, 1.0);
+                                    }
+                                }
+                                5 => {
+                                    // Gain -6dB (~0.5x)
+                                    let gain = 0.5f32;
+                                    for s in region.iter_mut() {
+                                        *s *= gain;
+                                    }
+                                }
+                                6 => {
+                                    // Invert (phase flip)
+                                    for s in region.iter_mut() {
+                                        *s = -*s;
+                                    }
+                                }
+                                _ => {}
                             }
-                            Err(e) => state.push_status(e),
+                            let save_result =
+                                state.commit_audio_render(&modified, channels, sr, fx_name);
+                            match save_result {
+                                Ok(()) => {
+                                    state.waveform_cache.remove(&source_file);
+                                    state.waveform_stereo_cache.remove(&source_file);
+                                    state.waveform_raw_cache.remove(&source_file);
+                                    state.audio_sample_invalidate.push(source_file.clone());
+                                    state.push_status(format!("{} applied to selection", fx_name));
+                                }
+                                Err(e) => state.push_status(format!("Apply failed: {}", e)),
+                            }
                         }
                     }
                 }
@@ -1491,12 +1291,25 @@ pub(super) fn draw_audio_editor(
         }
     }
 
-    // Context gets its own row; it never competes with clickable controls.
+    // Context/readout bands keep a compact font and reserve room for units.
+    let workspace_font = get_font_scale();
+    set_font_scale(workspace_font.min(2));
     let info_max_w = toolbar.info.width() as i32;
-    let info_str = format!(
-        "{}   file:{:.1}s  window:{:.2}s",
-        clip_name, total_secs, clip_len_secs,
-    );
+    let suffix = format!("  file:{:.1}s  window:{:.2}s", file_dur_secs, clip_len_secs);
+    let available = (info_max_w / (4 * get_font_scale() + 1)).max(0) as usize;
+    let name_space = available.saturating_sub(suffix.chars().count());
+    let name = if clip_name.chars().count() > name_space {
+        format!(
+            "{}...",
+            clip_name
+                .chars()
+                .take(name_space.saturating_sub(3))
+                .collect::<String>()
+        )
+    } else {
+        clip_name.clone()
+    };
+    let info_str = format!("{name}{suffix}");
     draw_pixel_label(
         canvas,
         &state.theme,
@@ -1509,6 +1322,8 @@ pub(super) fn draw_audio_editor(
 
     // ── Loop ruler bar ───────────────────────────────────────────────
     let loop_ruler_top = top + toolbar_h;
+    // Axis/position readouts live in compact fixed-height bands, independently
+    // of the larger workspace/control font selected by the user.
     {
         canvas.set_draw_color(sdl2::pixels::Color::RGBA(28, 30, 38, 255));
         let _ = canvas.fill_rect(Rect::new(
@@ -1843,7 +1658,10 @@ pub(super) fn draw_audio_editor(
         wave_w as u32,
         wave_h as u32,
     )));
-    let raw_data = state.waveform_raw_cache.get(&source_file);
+    let raw_data = state
+        .waveform_raw_cache
+        .get(&source_file)
+        .filter(|(left, _, _)| !left.is_empty());
     let stereo_data = state.waveform_stereo_cache.get(&source_file);
     if let Some((ref left_raw, ref right_raw, raw_sr)) = raw_data {
         // High-resolution rendering from raw samples
@@ -2399,6 +2217,8 @@ pub(super) fn draw_audio_editor(
         // Preview finished
         state.audio_editor_playing = false;
     }
+
+    set_font_scale(workspace_font);
 
     // ── Dropdown popup overlays (draw on top of everything) ──────────
     {

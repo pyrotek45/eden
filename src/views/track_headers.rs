@@ -175,7 +175,7 @@ pub fn draw_track_headers(
                 }
             }
         } else {
-            let name_col = sdl2::pixels::Color::RGBA(210, 210, 210, 255);
+            let name_col = Theme::c(state.theme.text_primary);
             draw_pixel_label(
                 canvas,
                 &state.theme,

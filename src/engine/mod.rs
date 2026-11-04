@@ -14,3 +14,6 @@ pub use render::{render_to_wav, render_to_wav_with_progress, RenderSettings};
 // render_to_buffer is only used by tests
 #[cfg(test)]
 pub use render::render_to_buffer;
+
+mod media_asset;
+pub use media_asset::{load_audio_asset, AudioAsset};

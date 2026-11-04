@@ -858,7 +858,9 @@ pub(super) fn draw_piano_roll_impl(
         if (0..128).contains(&pitch) {
             // Find the track index for the selected clip's track
             if let Some(ti) = state.project.tracks.iter().position(|t| t.id == track_id) {
-                state.preview_notes.push((ti, pitch as u8, 100));
+                state
+                    .preview_notes
+                    .push((ti, pitch as u8, crate::modules::KEYBOARD_NOTE_VELOCITY));
                 // Remember which pitch we started so note-off is correct
                 // even if the mouse moves vertically before release.
                 state.piano_roll_preview_pitch = Some(pitch as u8);

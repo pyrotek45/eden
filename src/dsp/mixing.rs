@@ -32,52 +32,62 @@ pub fn mix_audio_clips(
         let src_pos = audio_pos_secs * aclip.sample_rate as f64;
         let src_idx = src_pos as usize;
 
-        if src_idx < aclip.samples.len() {
-            let s0 = aclip.samples[src_idx] as f64;
-            let s1 = if src_idx + 1 < aclip.samples.len() {
-                aclip.samples[src_idx + 1] as f64
-            } else {
-                s0
-            };
-            let frac = src_pos - src_pos.floor();
-            let raw = s0 + (s1 - s0) * frac;
-            let mut s = raw * aclip.gain as f64;
+        let channels = aclip.channels.max(1);
+        let frame_count = aclip.samples.len() / channels;
+        if src_idx < frame_count {
+            let render_channel = |channel: usize| {
+                let s0 = aclip.samples[src_idx * channels + channel] as f64;
+                let s1 = if src_idx + 1 < frame_count {
+                    aclip.samples[(src_idx + 1) * channels + channel] as f64
+                } else {
+                    s0
+                };
+                let frac = src_pos - src_pos.floor();
+                let raw = s0 + (s1 - s0) * frac;
+                let mut s = raw * aclip.gain as f64;
 
-            // Equal-power micro-fade at clip boundaries
-            let fade_len = CLIP_FADE_SAMPLES;
-            let clip_sample = (clip_pos_secs * sample_rate) as usize;
-            let clip_len_samples = (aclip.length_beats / beats_per_sec * sample_rate) as usize;
-            // Fade in at clip start
-            if clip_sample < fade_len {
-                let t = clip_sample as f64 / fade_len as f64;
-                s *= (t * std::f64::consts::FRAC_PI_2).sin();
-            }
-            // Fade out at clip end
-            let remaining = clip_len_samples.saturating_sub(clip_sample);
-            if remaining < fade_len && fade_len > 0 {
-                let t = remaining as f64 / fade_len as f64;
-                s *= (t * std::f64::consts::FRAC_PI_2).sin();
-            }
-            // User-controlled fade-in
-            if aclip.fade_in > 0.0 {
-                let fade_in_samples = (aclip.fade_in * sample_rate) as usize;
-                if fade_in_samples > 0 && clip_sample < fade_in_samples {
-                    s *= clip_sample as f64 / fade_in_samples as f64;
+                // Equal-power micro-fade at clip boundaries
+                let fade_len = CLIP_FADE_SAMPLES;
+                let clip_sample = (clip_pos_secs * sample_rate) as usize;
+                let clip_len_samples = (aclip.length_beats / beats_per_sec * sample_rate) as usize;
+                // Fade in at clip start
+                if clip_sample < fade_len {
+                    let t = clip_sample as f64 / fade_len as f64;
+                    s *= (t * std::f64::consts::FRAC_PI_2).sin();
                 }
-            }
-            // User-controlled fade-out
-            if aclip.fade_out > 0.0 {
-                let fade_out_samples = (aclip.fade_out * sample_rate) as usize;
-                if fade_out_samples > 0 && clip_len_samples > fade_out_samples {
-                    let fade_out_start = clip_len_samples - fade_out_samples;
-                    if clip_sample >= fade_out_start {
-                        s *= (clip_len_samples - clip_sample) as f64 / fade_out_samples as f64;
+                // Fade out at clip end
+                let remaining = clip_len_samples.saturating_sub(clip_sample);
+                if remaining < fade_len && fade_len > 0 {
+                    let t = remaining as f64 / fade_len as f64;
+                    s *= (t * std::f64::consts::FRAC_PI_2).sin();
+                }
+                // User-controlled fade-in
+                if aclip.fade_in > 0.0 {
+                    let fade_in_samples = (aclip.fade_in * sample_rate) as usize;
+                    if fade_in_samples > 0 && clip_sample < fade_in_samples {
+                        s *= clip_sample as f64 / fade_in_samples as f64;
                     }
                 }
-            }
+                // User-controlled fade-out
+                if aclip.fade_out > 0.0 {
+                    let fade_out_samples = (aclip.fade_out * sample_rate) as usize;
+                    if fade_out_samples > 0 && clip_len_samples > fade_out_samples {
+                        let fade_out_start = clip_len_samples - fade_out_samples;
+                        if clip_sample >= fade_out_start {
+                            s *= (clip_len_samples - clip_sample) as f64 / fade_out_samples as f64;
+                        }
+                    }
+                }
 
-            sum_l += s;
-            sum_r += s;
+                s
+            };
+            let left = render_channel(0);
+            sum_l += left;
+            sum_r += if channels == 1 {
+                left
+            } else {
+                render_channel(1)
+            };
         }
     }
     (sum_l, sum_r)

@@ -6,7 +6,21 @@ use sdl2::video::Window;
 
 use crate::app::input::InputState;
 use crate::theme::Theme;
-use crate::widgets::draw_pixel_label;
+use crate::widgets::{draw_pixel_label_scaled, get_font_scale};
+
+fn previous_boundary(text: &str, cursor: usize) -> usize {
+    text.char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i < cursor)
+        .last()
+        .unwrap_or(0)
+}
+fn next_boundary(text: &str, cursor: usize) -> usize {
+    text.char_indices()
+        .map(|(i, _)| i)
+        .find(|i| *i > cursor)
+        .unwrap_or(text.len())
+}
 
 pub struct TextFieldParams {
     pub id: u32,
@@ -55,11 +69,15 @@ pub fn text_field(
 
     if is_active {
         use sdl2::keyboard::Keycode;
+        *cursor = (*cursor).min(buffer.len());
+        while !buffer.is_char_boundary(*cursor) {
+            *cursor -= 1;
+        }
 
         for ch in &input.text_input_chars {
             if !ch.is_control() && *cursor <= buffer.len() {
                 buffer.insert(*cursor, *ch);
-                *cursor += 1;
+                *cursor += ch.len_utf8();
             }
         }
 
@@ -75,7 +93,7 @@ pub fn text_field(
                 }
                 Keycode::Backspace => {
                     if *cursor > 0 {
-                        *cursor -= 1;
+                        *cursor = previous_boundary(buffer, *cursor);
                         buffer.remove(*cursor);
                     }
                 }
@@ -86,12 +104,12 @@ pub fn text_field(
                 }
                 Keycode::Left => {
                     if *cursor > 0 {
-                        *cursor -= 1;
+                        *cursor = previous_boundary(buffer, *cursor);
                     }
                 }
                 Keycode::Right => {
                     if *cursor < buffer.len() {
-                        *cursor += 1;
+                        *cursor = next_boundary(buffer, *cursor);
                     }
                 }
                 Keycode::Home => {
@@ -110,13 +128,11 @@ pub fn text_field(
 
     // ── Draw ──
 
-    let bg = if is_active {
-        sdl2::pixels::Color::RGBA(40, 42, 50, 255)
-    } else if hover {
-        sdl2::pixels::Color::RGBA(55, 58, 68, 255)
+    let bg = Theme::c(if is_active || hover {
+        theme.bg_light
     } else {
-        sdl2::pixels::Color::RGBA(45, 48, 56, 255)
-    };
+        theme.bg_medium
+    });
     canvas.set_draw_color(bg);
     let _ = canvas.fill_rect(Rect::new(x, y, w as u32, h as u32));
 
@@ -124,60 +140,59 @@ pub fn text_field(
         let a = theme.accent;
         sdl2::pixels::Color::RGBA(a[0], a[1], a[2], 220)
     } else {
-        sdl2::pixels::Color::RGBA(70, 75, 85, 200)
+        Theme::c(theme.panel_border)
     };
     canvas.set_draw_color(border);
     let _ = canvas.draw_rect(Rect::new(x, y, w as u32, h as u32));
 
-    let display_text = if is_active { buffer.as_str() } else { value };
+    let scale = get_font_scale().min(((h - 4) / 5).max(1));
+    let char_w = 4 * scale + scale / 2;
     let text_x = x + 4;
-    let text_y = y + (h - 10) / 2;
-    let text_w = w - 8;
-
-    if display_text.is_empty() && !is_active {
-        if let Some(ref hint) = params.hint {
-            draw_pixel_label(
+    let text_y = y + (h - 5 * scale) / 2;
+    let text_w = (w - 8).max(0);
+    let display_text = if is_active { buffer.as_str() } else { value };
+    let caret_chars = if is_active {
+        buffer[..*cursor].chars().count()
+    } else {
+        0
+    };
+    let visible_chars = (text_w / char_w).max(1) as usize;
+    let scroll_chars = caret_chars.saturating_sub(visible_chars.saturating_sub(1));
+    let scroll_byte = display_text
+        .char_indices()
+        .nth(scroll_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(display_text.len());
+    let shown = &display_text[scroll_byte..];
+    if shown.is_empty() && !is_active {
+        if let Some(hint) = &params.hint {
+            draw_pixel_label_scaled(
                 canvas,
                 theme,
                 hint,
                 text_x,
                 text_y,
                 text_w,
-                sdl2::pixels::Color::RGBA(100, 105, 120, 150),
+                Theme::c(theme.text_secondary),
+                scale,
             );
         }
     } else {
-        let col = if is_active {
-            Theme::c(theme.text_primary)
-        } else {
-            sdl2::pixels::Color::RGBA(190, 195, 210, 230)
-        };
-        draw_pixel_label(canvas, theme, display_text, text_x, text_y, text_w, col);
+        draw_pixel_label_scaled(
+            canvas,
+            theme,
+            shown,
+            text_x,
+            text_y,
+            text_w,
+            Theme::c(theme.text_primary),
+            scale,
+        );
     }
-
     if is_active {
-        let char_w = 9i32;
-        let visible_chars = (text_w / char_w).max(1) as usize;
-        let scroll_start = if *cursor > visible_chars {
-            *cursor - visible_chars
-        } else {
-            0
-        };
-        if scroll_start > 0 {
-            canvas.set_draw_color(if is_active {
-                sdl2::pixels::Color::RGBA(40, 42, 50, 255)
-            } else {
-                sdl2::pixels::Color::RGBA(45, 48, 56, 255)
-            });
-            let _ = canvas.fill_rect(Rect::new(text_x, text_y, text_w as u32, 10));
-            let scrolled = &buffer[scroll_start.min(buffer.len())..];
-            let col = Theme::c(theme.text_primary);
-            draw_pixel_label(canvas, theme, scrolled, text_x, text_y, text_w, col);
-        }
-        let cursor_x = text_x + ((*cursor - scroll_start) as i32) * char_w;
-        let cursor_x = cursor_x.min(text_x + text_w - 1);
-        let a = theme.accent;
-        canvas.set_draw_color(sdl2::pixels::Color::RGBA(a[0], a[1], a[2], 255));
+        let cursor_x =
+            (text_x + (caret_chars - scroll_chars) as i32 * char_w).min(text_x + text_w - 1);
+        canvas.set_draw_color(Theme::c(theme.accent));
         let _ = canvas.draw_line(
             sdl2::rect::Point::new(cursor_x, y + 2),
             sdl2::rect::Point::new(cursor_x, y + h - 2),
@@ -193,4 +208,23 @@ pub fn text_field(
     }
 
     (committed, result_value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cursor_moves_and_backspaces_whole_utf8_characters() {
+        let mut text = String::from("aé🎹");
+        let mut cursor = text.len();
+        cursor = previous_boundary(&text, cursor);
+        assert_eq!(cursor, 3);
+        text.remove(cursor);
+        assert_eq!(text, "aé");
+        cursor = previous_boundary(&text, cursor);
+        assert_eq!(cursor, 1);
+        assert_eq!(next_boundary(&text, cursor), 3);
+        text.remove(cursor);
+        assert_eq!(text, "a");
+    }
 }

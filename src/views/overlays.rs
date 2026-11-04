@@ -385,7 +385,7 @@ pub(super) fn draw_overlays(
             state.selected_tracks.remove(&id);
             state.selected_clips.retain(|&(tid, _)| tid != id);
             if state.selected_clip.map(|(tid, _)| tid) == Some(id) {
-                state.selected_clip = None;
+                state.select_clip(None);
             }
             state.dirty = true;
             state.track_confirm_delete = None;
@@ -505,7 +505,7 @@ pub(super) fn draw_overlays(
                     state.selected_track = None;
                 }
                 if state.selected_clip.map(|(t, _)| t) == Some(tid) {
-                    state.selected_clip = None;
+                    state.select_clip(None);
                 }
             }
             state.dirty = true;
@@ -2133,11 +2133,14 @@ fn draw_midi_export_popup(
 }
 
 fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {
+    // Options has compact form rows; cap their text independently of workspace text.
+    let workspace_font = crate::widgets::get_font_scale();
+    crate::widgets::set_font_scale(workspace_font.min(2));
     let w = state.window_width as i32;
     let popup_w = 340i32;
     let popup_h = 560i32;
     let popup_x = w / 2 - popup_w / 2;
-    let popup_y = 60i32;
+    let popup_y = ((state.window_height as i32 - popup_h) / 2).max(4);
 
     // Dimmed backdrop (semi-transparent overlay over everything)
     canvas.set_draw_color(sdl2::pixels::Color::RGBA(0, 0, 0, 140));
@@ -2667,6 +2670,7 @@ fn draw_options_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state
     if !in_popup && !in_dropdown_list && input.mouse_pressed {
         state.options_open = false;
     }
+    crate::widgets::set_font_scale(workspace_font);
 }
 
 fn draw_render_popup(canvas: &mut Canvas<Window>, input: &mut InputState, state: &mut AppState) {

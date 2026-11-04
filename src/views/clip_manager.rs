@@ -28,7 +28,7 @@ pub(super) fn draw_clip_manager(
     let _ = canvas.fill_rect(Rect::new(0, top, w as u32, h as u32));
 
     // Header
-    let header_h = 24i32;
+    let header_h = 56i32;
     canvas.set_draw_color(Theme::c(state.theme.bg_dark));
     let _ = canvas.fill_rect(Rect::new(0, top, w as u32, header_h as u32));
     draw_pixel_label(
@@ -46,9 +46,63 @@ pub(super) fn draw_clip_manager(
         sdl2::rect::Point::new(w, top + header_h - 1),
     );
 
+    let selected_content = state
+        .selected_clip
+        .and_then(|(tid, ci)| {
+            state
+                .project
+                .tracks
+                .iter()
+                .find(|t| t.id == tid)
+                .and_then(|t| t.clips.get(ci))
+        })
+        .map(|c| c.content_id());
+    let links = selected_content
+        .map(|id| {
+            state
+                .project
+                .tracks
+                .iter()
+                .flat_map(|t| &t.clips)
+                .chain(state.project.shelf_clips.iter().map(|(_, c)| c))
+                .filter(|c| c.content_id() == id)
+                .count()
+        })
+        .unwrap_or(0);
+    for (index, label) in ["LINK COPY", "UNIQUE"].iter().enumerate() {
+        let width = (w - content_x - 8) / 2;
+        if button(
+            canvas,
+            input,
+            &state.theme,
+            &ButtonParams {
+                id: WidgetId::ClipContentAction(index as u8),
+                x: content_x + index as i32 * (width + 2),
+                y: top + 28,
+                width,
+                height: 22,
+                label: (*label).into(),
+                enabled: selected_content.is_some() && (index == 0 || links > 1),
+                hint: Some(if index == 0 {
+                    "Duplicate linked content (Ctrl+Shift+D)".into()
+                } else {
+                    format!("Detach selected clip from {links} linked instances (Ctrl+Shift+U)")
+                }),
+                ..Default::default()
+            },
+        ) {
+            if index == 0 {
+                state.duplicate_linked_clips();
+            } else {
+                state.make_selected_clip_unique();
+            }
+        }
+    }
+
     let list_top = top + header_h;
     let list_h = h - header_h;
-    let item_h = 56i32;
+    let text_height = 5 * get_font_scale();
+    let item_h = (12 + 3 * (text_height + 4)).max(56);
     let remove_btn_w = 16i32;
     let preview_w = 56i32;
     let padding = 4i32;
@@ -84,12 +138,24 @@ pub(super) fn draw_clip_manager(
             .iter()
             .find(|t| t.id == *track_id)
             .map(|t| {
-                t.clips.iter().any(|c| {
-                    c.name() == clip.name()
-                        && std::mem::discriminant(c) == std::mem::discriminant(clip)
-                })
+                t.clips
+                    .iter()
+                    .any(|c| c.instance_id() == clip.instance_id())
             })
             .unwrap_or(false);
+        let link_count = state
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .chain(state.project.shelf_clips.iter().map(|(_, c)| c))
+            .filter(|c| c.content_id() == clip.content_id())
+            .count();
+        let name = if link_count > 1 {
+            format!("[L{link_count}] {name}")
+        } else {
+            name
+        };
         let display_name = if name.is_empty() {
             format!("Clip #{}", lib_idx + 1)
         } else {
@@ -134,10 +200,9 @@ pub(super) fn draw_clip_manager(
                 .iter()
                 .find(|t| t.id == track_id)
                 .and_then(|t| {
-                    t.clips.iter().position(|c| {
-                        c.name() == lib_clip.1.name()
-                            && std::mem::discriminant(c) == std::mem::discriminant(&lib_clip.1)
-                    })
+                    t.clips
+                        .iter()
+                        .position(|c| c.instance_id() == lib_clip.1.instance_id())
                 })
         } else {
             None
@@ -150,16 +215,25 @@ pub(super) fn draw_clip_manager(
         let hover = input.mouse_in_rect(sb_w, iy, w - sb_w, item_h);
 
         // Item background
-        let item_bg = if is_selected {
-            let a = state.theme.accent;
-            sdl2::pixels::Color::RGBA(a[0] / 3, a[1] / 3, a[2] / 3, 255)
-        } else if hover {
-            sdl2::pixels::Color::RGBA(50, 50, 55, 255)
-        } else if !in_arrangement {
-            sdl2::pixels::Color::RGBA(26, 26, 28, 255)
+        let item_bg = Theme::c(if is_selected || hover {
+            state.theme.bg_light
         } else {
-            sdl2::pixels::Color::RGBA(35, 35, 38, 255)
-        };
+            state.theme.bg_medium
+        });
+        if hover {
+            input.hover_hint_widget =
+                WidgetId::ClipBrowserItem(state.clip_library[lib_idx].1.instance_id());
+            input.hover_hint_text = Some(format!(
+                "{} | {:.2} beats | {}",
+                clip_name,
+                clip_len,
+                if in_arrangement {
+                    "In arranger"
+                } else {
+                    "Stored on shelf"
+                }
+            ));
+        }
         canvas.set_draw_color(item_bg);
         let draw_iy = iy.max(list_top);
         let draw_h = ((iy + item_h).min(list_top + list_h) - draw_iy).max(0);
@@ -227,7 +301,9 @@ pub(super) fn draw_clip_manager(
                         color[0], color[1], color[2], 200,
                     ));
                     for note in &mc.notes {
-                        let nx = prev_x + (note.start / len_safe * preview_w as f64) as i32;
+                        let nx = prev_x
+                            + ((note.start - mc.content_offset) / len_safe * preview_w as f64)
+                                as i32;
                         let nw = ((note.length / len_safe * preview_w as f64) as i32).max(1);
                         let pitch_t = note.pitch as f32 / 127.0;
                         let ny = prev_y + prev_h - (pitch_t * prev_h as f32) as i32 - 1;
@@ -281,26 +357,21 @@ pub(super) fn draw_clip_manager(
                         ));
                     }
                 } else {
-                    // Fallback placeholder waveform
-                    let segs = (preview_w / 2).max(1);
-                    let amp_h = (prev_h / 2 - 1).max(1);
-                    let cy = prev_y + prev_h / 2;
-                    canvas.set_draw_color(sdl2::pixels::Color::RGBA(
-                        color[0], color[1], color[2], 120,
-                    ));
-                    for i in 0..segs {
-                        let t = i as f64 / segs as f64;
-                        let amp = ((t * std::f64::consts::TAU * 3.0).sin() * 0.6
-                            + (t * std::f64::consts::TAU * 7.3).sin() * 0.4)
-                            .abs();
-                        let bh = (amp * amp_h as f64) as i32 + 1;
-                        let _ = canvas.fill_rect(Rect::new(
-                            prev_x + i * 2,
-                            cy - bh,
-                            1,
-                            (bh * 2) as u32,
-                        ));
-                    }
+                    // Missing/pending data must not look like a real waveform.
+                    draw_pixel_label_scaled(
+                        canvas,
+                        &state.theme,
+                        if std::path::Path::new(&src).is_file() {
+                            "..."
+                        } else {
+                            "NO FILE"
+                        },
+                        prev_x + 2,
+                        prev_y + prev_h / 2 - 2,
+                        preview_w - 4,
+                        Theme::c(state.theme.text_secondary),
+                        1,
+                    );
                 }
             }
             2 => {
@@ -310,9 +381,11 @@ pub(super) fn draw_clip_manager(
                     for i in 1..ac.points.len() {
                         let p0 = &ac.points[i - 1];
                         let p1 = &ac.points[i];
-                        let x0 = prev_x + (p0.time / len_safe * preview_w as f64) as i32;
+                        let x0 = prev_x
+                            + ((p0.time - ac.content_offset) / len_safe * preview_w as f64) as i32;
                         let y0 = prev_y + prev_h - (p0.value * prev_h as f32) as i32;
-                        let x1 = prev_x + (p1.time / len_safe * preview_w as f64) as i32;
+                        let x1 = prev_x
+                            + ((p1.time - ac.content_offset) / len_safe * preview_w as f64) as i32;
                         let y1 = prev_y + prev_h - (p1.value * prev_h as f32) as i32;
                         let _ = canvas.draw_line(
                             sdl2::rect::Point::new(x0, y0.clamp(prev_y, prev_y + prev_h)),
@@ -328,17 +401,30 @@ pub(super) fn draw_clip_manager(
 
         // Clip name
         let text_w = rmx - text_x - 2;
+        let capacity = (text_w.max(0) / (4 * get_font_scale() + 1)) as usize;
+        let visible_name = if clip_name.chars().count() > capacity {
+            format!(
+                "{}...",
+                clip_name
+                    .chars()
+                    .take(capacity.saturating_sub(3))
+                    .collect::<String>()
+            )
+        } else {
+            clip_name.clone()
+        };
+
         draw_pixel_label(
             canvas,
             &state.theme,
-            clip_name,
+            &visible_name,
             text_x,
             iy + padding,
             text_w.max(0),
             if in_arrangement {
                 Theme::c(state.theme.text_primary)
             } else {
-                sdl2::pixels::Color::RGBA(90, 90, 100, 180)
+                Theme::c(state.theme.text_secondary)
             },
         );
 
@@ -347,9 +433,9 @@ pub(super) fn draw_clip_manager(
             (0, true) => "MIDI",
             (1, true) => "AUDIO",
             (2, true) => "AUTO",
-            (0, false) => "MIDI · not in arranger",
-            (1, false) => "AUDIO · not in arranger",
-            (2, false) => "AUTO · not in arranger",
+            (0, false) => "MIDI:S",
+            (1, false) => "AUDIO:S",
+            (2, false) => "AUTO:S",
             _ => "",
         };
         draw_pixel_label(
@@ -357,19 +443,18 @@ pub(super) fn draw_clip_manager(
             &state.theme,
             type_label,
             text_x,
-            iy + padding + 14,
+            iy + padding + text_height + 4,
             text_w.max(0),
             sdl2::pixels::Color::RGBA(color[0], color[1], color[2], 180),
         );
 
-        let bars = clip_len / 4.0;
-        let len_label = format!("{:.1}b", bars);
+        let len_label = format!("{:.2}b", clip_len);
         draw_pixel_label(
             canvas,
             &state.theme,
             &len_label,
             text_x,
-            iy + padding + 26,
+            iy + padding + 2 * (text_height + 4),
             text_w.max(0),
             Theme::c(state.theme.text_dim),
         );
@@ -389,7 +474,7 @@ pub(super) fn draw_clip_manager(
         if click_area {
             if let Some(ci) = arrangement_clip_idx {
                 // Select in arranger
-                state.selected_clip = Some((track_id, ci));
+                state.select_clip(Some((track_id, ci)));
                 state.selected_clips.clear();
                 state.selected_clips.insert((track_id, ci));
                 state.selected_track = Some(track_id);
@@ -423,7 +508,7 @@ pub(super) fn draw_clip_manager(
             } else {
                 // Not in arrangement — double-click to restore, single-click starts a "place" drag
                 if input.click_type == Some(crate::app::input::ClickType::Double) {
-                    let clip_to_add = state.clip_library[lib_idx].1.clone();
+                    let clip_to_add = state.clip_library[lib_idx].1.linked_clone();
                     if state.project.tracks.iter().any(|t| t.id == track_id) {
                         state.commands.execute(
                             Box::new(crate::app::commands::AddClips {
@@ -437,7 +522,7 @@ pub(super) fn draw_clip_manager(
                     }
                 } else {
                     // Start a library drag — show ghost in arrangement, drop places the clip
-                    let clip_clone = state.clip_library[lib_idx].1.clone();
+                    let clip_clone = state.clip_library[lib_idx].1.linked_clone();
                     state.library_drag_clip = Some((lib_idx, clip_clone));
                 }
             }
@@ -463,22 +548,28 @@ pub(super) fn draw_clip_manager(
             let mut to_delete: Vec<(u32, usize, crate::app::models::Clip)> = Vec::new();
             if let Some(track) = state.project.tracks.iter().find(|t| t.id == rem_tid) {
                 for (ci, c) in track.clips.iter().enumerate() {
-                    if c.name() == rem_clip.name()
-                        && std::mem::discriminant(c) == std::mem::discriminant(rem_clip)
-                    {
+                    if c.instance_id() == rem_clip.instance_id() {
                         to_delete.push((rem_tid, ci, c.clone()));
                     }
                 }
             }
-            if !to_delete.is_empty() {
-                state.commands.execute(
-                    Box::new(crate::app::commands::DeleteClips { clips: to_delete }),
-                    &mut state.project,
-                );
+            let snapshot = state.project.clone();
+            for (tid, ci, _) in to_delete.into_iter().rev() {
+                if let Some(track) = state.project.tracks.iter_mut().find(|t| t.id == tid) {
+                    track.clips.remove(ci);
+                }
             }
-            state.clip_library.remove(li);
+            state
+                .project
+                .shelf_clips
+                .retain(|(_, c)| c.instance_id() != rem_clip.instance_id());
+            state
+                .commands
+                .push_undo_snapshot(snapshot, "Remove Clip from Project");
+            state.dirty = true;
+            state.sync_clip_library();
             // Clear selected_clip if it pointed to a now-gone clip
-            state.selected_clip = None;
+            state.select_clip(None);
             state.push_status("Clip removed from project (Ctrl+Z to undo)");
             state.dirty = true;
         }

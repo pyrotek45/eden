@@ -200,8 +200,16 @@ fn main() {
     state.sync_clip_library();
 
     // Cache of loaded audio clip samples: path → (Arc<mono_samples>, sample_rate)
-    let mut audio_sample_cache: std::collections::HashMap<String, (std::sync::Arc<Vec<f32>>, u32)> =
+    let mut audio_sample_cache: std::collections::HashMap<String, engine::AudioAsset> =
         std::collections::HashMap::new();
+
+    // Keep retired large buffers UI-owned until the callback lets go.
+    let mut midi_note_cache: std::collections::HashMap<
+        (u64, u64, u64),
+        std::sync::Arc<Vec<engine::AudioNote>>,
+    > = std::collections::HashMap::new();
+    let mut retired_samples: Vec<std::sync::Arc<Vec<f32>>> = Vec::new();
+    let mut retired_notes: Vec<std::sync::Arc<Vec<engine::AudioNote>>> = Vec::new();
 
     let mut last_tick = timer.ticks();
 
@@ -213,6 +221,7 @@ fn main() {
         input.begin_frame();
 
         // Snapshot config-relevant state at frame start for change detection
+        state.project.reconcile_clip_content();
         let cfg_snapshot = app::config::UserConfig::from_state(&state);
 
         // Always poll current modifier state so Ctrl/Shift/Alt are
@@ -236,10 +245,15 @@ fn main() {
                     ..
                 } => {
                     state.cancel_clip_drag();
+                    state.cancel_parameter_gestures();
                     input.drag_widget = crate::app::input::WidgetId::None;
                     input.active_widget = crate::app::input::WidgetId::None;
                     input.dragging = false;
                     input.mouse_down = false;
+                    input.right_mouse_down = false;
+                    input.middle_mouse_down = false;
+                    state.rack_reorder_drag = None;
+                    state.rack_reorder_target = None;
                 }
                 Event::Window { .. } => {}
                 Event::MouseMotion { x, y, .. } => {
@@ -305,7 +319,7 @@ fn main() {
                                     state.audio_editor_selection = None;
                                     state.push_status("Selection cleared");
                                 } else {
-                                    state.selected_clip = None;
+                                    state.select_clip(None);
                                     state.selected_clips.clear();
                                     // Restore preview mutations before discarding a gesture.
                                     state.cancel_clip_drag();
@@ -611,7 +625,7 @@ fn main() {
                                             }),
                                             &mut state.project,
                                         );
-                                        state.selected_clip = None;
+                                        state.select_clip(None);
                                         state.selected_clips.clear();
                                         state.dirty = true;
                                         state.push_status("Joined clips");
@@ -713,7 +727,7 @@ fn main() {
                                                 }),
                                                 &mut state.project,
                                             );
-                                            state.selected_clip = None;
+                                            state.select_clip(None);
                                             state.selected_clips.clear();
                                             state.dirty = true;
                                         }
@@ -836,6 +850,12 @@ fn main() {
                                         state.dirty = true;
                                     }
                                 }
+                            }
+                            Keycode::D if input.ctrl() && input.shift() => {
+                                state.duplicate_linked_clips();
+                            }
+                            Keycode::U if input.ctrl() && input.shift() => {
+                                state.make_selected_clip_unique();
                             }
                             Keycode::D if input.ctrl() => {
                                 use crate::app::state::FocusedPanel;
@@ -973,7 +993,11 @@ fn main() {
                                         if let Some(ti) =
                                             state.project.tracks.iter().position(|t| t.id == tid)
                                         {
-                                            state.preview_notes.push((ti, pitch, 100));
+                                            state.preview_notes.push((
+                                                ti,
+                                                pitch,
+                                                modules::KEYBOARD_NOTE_VELOCITY,
+                                            ));
                                         }
                                     }
                                 }
@@ -1085,18 +1109,19 @@ fn main() {
                             match crate::engine::render_to_wav(&preview_proj, &tmp_str, &settings) {
                                 Ok(()) => {
                                     // Load the rendered WAV for preview playback
-                                    match crate::engine::load_wav(&tmp_path) {
-                                        Ok((samples, sr)) => {
+                                    match crate::engine::load_audio_asset(&tmp_path) {
+                                        Ok(asset) => {
                                             println!(
                                                 "[preview] MIDI rendered {} samples at {}Hz",
-                                                samples.len(),
-                                                sr
+                                                asset.samples.len() / asset.channels,
+                                                asset.sample_rate
                                             );
                                             if let Some(ref shared) = audio_shared {
                                                 if let Ok(mut audio) = shared.try_lock() {
-                                                    audio.preview_samples =
-                                                        std::sync::Arc::new(samples);
-                                                    audio.preview_sample_rate = sr;
+                                                    asset.pin_for_retirement(&mut retired_samples);
+                                                    audio.preview_samples = asset.samples.clone();
+                                                    audio.preview_channels = asset.channels;
+                                                    audio.preview_sample_rate = asset.sample_rate;
                                                     audio.preview_pos = 0;
                                                     audio.preview_playing = true;
                                                 }
@@ -1127,10 +1152,9 @@ fn main() {
                     // Use the audio sample cache so we don't re-read from disk
                     let path_str = path.to_string_lossy().to_string();
                     if !audio_sample_cache.contains_key(&path_str) {
-                        match crate::engine::load_audio(path) {
-                            Ok((samples, sr)) => {
-                                audio_sample_cache
-                                    .insert(path_str.clone(), (std::sync::Arc::new(samples), sr));
+                        match crate::engine::load_audio_asset(path) {
+                            Ok(asset) => {
+                                audio_sample_cache.insert(path_str.clone(), asset);
                             }
                             Err(e) => {
                                 eprintln!("[preview] Failed to load {:?}: {}", path, e);
@@ -1138,11 +1162,12 @@ fn main() {
                             }
                         }
                     }
-                    if let Some((samples, sr)) = audio_sample_cache.get(&path_str) {
+                    if let Some(asset) = audio_sample_cache.get(&path_str) {
                         if let Some(ref shared) = audio_shared {
                             if let Ok(mut audio) = shared.try_lock() {
-                                audio.preview_samples = samples.clone();
-                                audio.preview_sample_rate = *sr;
+                                audio.preview_samples = asset.samples.clone();
+                                audio.preview_channels = asset.channels;
+                                audio.preview_sample_rate = asset.sample_rate;
                                 audio.preview_pos = state.sample_preview_start_sample;
                                 audio.preview_end_sample = state.sample_preview_end_sample;
                                 // Set loop state from audio editor
@@ -1151,7 +1176,8 @@ fn main() {
                                     && state.focused_panel
                                         == crate::app::state::FocusedPanel::AudioEditor;
                                 audio.preview_loop_start = if audio.preview_loop_enabled {
-                                    (state.audio_editor_loop_start * (*sr) as f64) as usize
+                                    (state.audio_editor_loop_start * asset.sample_rate as f64)
+                                        as usize
                                 } else {
                                     0
                                 };
@@ -1201,55 +1227,7 @@ fn main() {
 
             // Apply automation clips to rack params (modifies state, no lock needed)
             let cur_pos = state.project.transport.position;
-            let auto_values: Vec<(String, f32)> = state
-                .project
-                .tracks
-                .iter()
-                .filter(|t| {
-                    t.track_type == app::models::TrackType::Automation && t.automation_enabled
-                })
-                .flat_map(|t| {
-                    t.clips.iter().filter_map(|c| {
-                        if let app::models::Clip::Automation(ac) = c {
-                            let clip_end = ac.start_time + ac.length;
-                            if cur_pos < ac.start_time || cur_pos > clip_end {
-                                return None;
-                            }
-                            let clip_pos = cur_pos - ac.start_time;
-                            if ac.points.is_empty() {
-                                return None;
-                            }
-                            let value = if ac.points.len() == 1 {
-                                ac.points[0].value
-                            } else {
-                                let mut before = &ac.points[0];
-                                let mut after = &ac.points[ac.points.len() - 1];
-                                for i in 0..ac.points.len().saturating_sub(1) {
-                                    if ac.points[i].time <= clip_pos
-                                        && ac.points[i + 1].time >= clip_pos
-                                    {
-                                        before = &ac.points[i];
-                                        after = &ac.points[i + 1];
-                                        break;
-                                    }
-                                }
-                                let dt = after.time - before.time;
-                                if dt <= 0.0 {
-                                    before.value
-                                } else {
-                                    let t = ((clip_pos - before.time) / dt).clamp(0.0, 1.0) as f32;
-                                    before.value + t * (after.value - before.value)
-                                }
-                            };
-                            Some((ac.target_param.clone(), value))
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .collect();
-
-            // Write automation values to rack params
+            let auto_values = dsp::evaluate_automation_at(&state.project, cur_pos);
             for (target_key, auto_val) in &auto_values {
                 let parts: Vec<&str> = target_key.split(':').collect();
                 if parts.len() != 3 {
@@ -1271,10 +1249,54 @@ fn main() {
                 }
             }
 
-            // Drain audio sample invalidation requests (modifies cache, no lock needed)
             for path in state.audio_sample_invalidate.drain(..) {
-                audio_sample_cache.remove(&path);
+                if let Some(asset) = audio_sample_cache.remove(&path) {
+                    asset.pin_for_retirement(&mut retired_samples);
+                }
             }
+            let mut paths = std::collections::HashSet::new();
+            let mut note_keys = std::collections::HashSet::new();
+            for track in &state.project.tracks {
+                for clip in &track.clips {
+                    match clip {
+                        app::models::Clip::Audio(c) => {
+                            paths.insert(c.source_file.clone());
+                        }
+                        app::models::Clip::Midi(c) => {
+                            note_keys.insert((
+                                c.content.content_id,
+                                c.content.revision,
+                                c.content_offset.to_bits(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(path) = &track.sampler_file {
+                    paths.insert(path.clone());
+                }
+            }
+            if let Some(path) = &state.sample_preview_path {
+                paths.insert(path.to_string_lossy().into_owned());
+            }
+            audio_sample_cache.retain(|path, asset| {
+                if paths.contains(path) {
+                    true
+                } else {
+                    asset.pin_for_retirement(&mut retired_samples);
+                    false
+                }
+            });
+            midi_note_cache.retain(|key, notes| {
+                if note_keys.contains(key) {
+                    true
+                } else {
+                    retired_notes.push(notes.clone());
+                    false
+                }
+            });
+            retired_samples.retain(|buffer| std::sync::Arc::strong_count(buffer) > 1);
+            retired_notes.retain(|buffer| std::sync::Arc::strong_count(buffer) > 1);
 
             // Build track data outside the lock
             let mut prepared_tracks: Vec<engine::AudioTrack> =
@@ -1347,25 +1369,22 @@ fn main() {
                         if !sample_path.is_empty() {
                             if !audio_sample_cache.contains_key(sample_path) {
                                 let path = std::path::Path::new(sample_path);
-                                match engine::load_audio(path) {
-                                    Ok((samples, sr)) => {
-                                        audio_sample_cache.insert(
-                                            sample_path.clone(),
-                                            (std::sync::Arc::new(samples), sr),
-                                        );
+                                match engine::load_audio_asset(path) {
+                                    Ok(asset) => {
+                                        audio_sample_cache.insert(sample_path.clone(), asset);
                                     }
                                     Err(_) => {
                                         audio_sample_cache.insert(
                                             sample_path.clone(),
-                                            (std::sync::Arc::new(Vec::new()), 44100),
+                                            engine::AudioAsset::empty(),
                                         );
                                     }
                                 }
                             }
-                            if let Some((samples, sr)) = audio_sample_cache.get(sample_path) {
+                            if let Some(asset) = audio_sample_cache.get(sample_path) {
                                 modules::ModuleExtra {
-                                    sample_data: Some(samples.clone()),
-                                    sample_sr: *sr,
+                                    sample_data: Some(asset.mono_samples()),
+                                    sample_sr: asset.sample_rate,
                                 }
                             } else {
                                 modules::ModuleExtra::default()
@@ -1383,16 +1402,27 @@ fn main() {
                 if track.track_type == app::models::TrackType::Midi {
                     for clip in &track.clips {
                         if let app::models::Clip::Midi(mc) = clip {
-                            let notes = mc
-                                .notes
-                                .iter()
-                                .map(|n| engine::AudioNote {
-                                    pitch: n.pitch,
-                                    velocity: n.velocity,
-                                    start_beats: n.start,
-                                    length_beats: n.length,
+                            let key = (
+                                mc.content.content_id,
+                                mc.content.revision,
+                                mc.content_offset.to_bits(),
+                            );
+                            let notes = midi_note_cache
+                                .entry(key)
+                                .or_insert_with(|| {
+                                    std::sync::Arc::new(
+                                        mc.notes
+                                            .iter()
+                                            .map(|n| engine::AudioNote {
+                                                pitch: n.pitch,
+                                                velocity: n.velocity,
+                                                start_beats: n.start - mc.content_offset,
+                                                length_beats: n.length,
+                                            })
+                                            .collect(),
+                                    )
                                 })
-                                .collect();
+                                .clone();
                             midi_clips.push(engine::AudioMidiClip {
                                 start_beats: mc.start_time,
                                 length_beats: mc.length,
@@ -1408,30 +1438,28 @@ fn main() {
                         }
                         if !audio_sample_cache.contains_key(&ac.source_file) {
                             let path = std::path::Path::new(&ac.source_file);
-                            match engine::load_audio(path) {
-                                Ok((samples, sr)) => {
-                                    audio_sample_cache.insert(
-                                        ac.source_file.clone(),
-                                        (std::sync::Arc::new(samples), sr),
-                                    );
+                            match engine::load_audio_asset(path) {
+                                Ok(asset) => {
+                                    audio_sample_cache.insert(ac.source_file.clone(), asset);
                                 }
                                 Err(_) => {
                                     audio_sample_cache.insert(
                                         ac.source_file.clone(),
-                                        (std::sync::Arc::new(Vec::new()), 44100),
+                                        engine::AudioAsset::empty(),
                                     );
                                 }
                             }
                         }
-                        if let Some((samples, sr)) = audio_sample_cache.get(&ac.source_file) {
-                            if !samples.is_empty() {
+                        if let Some(asset) = audio_sample_cache.get(&ac.source_file) {
+                            if !asset.samples.is_empty() {
                                 audio_clips_vec.push(engine::AudioSampleClip {
+                                    channels: asset.channels,
                                     start_beats: ac.start_time,
                                     length_beats: ac.length,
                                     gain: ac.gain,
                                     offset_secs: ac.offset,
-                                    samples: samples.clone(),
-                                    sample_rate: *sr,
+                                    samples: asset.samples.clone(),
+                                    sample_rate: asset.sample_rate,
                                     fade_in: ac.fade_in,
                                     fade_out: ac.fade_out,
                                 });
@@ -1759,7 +1787,14 @@ fn main() {
         // apply_scale() converts raw physical coords → logical coords ONCE per frame.
         let sc = state.ui_scale;
         // Keep the smallest supported logical layout usable at every UI scale.
-        let minimum = ((520.0 * sc).ceil() as u32, (600.0 * sc).ceil() as u32);
+        // Larger text needs room for the wrapped toolbar and a usable split view.
+        const EXTRA_HEIGHT_PER_LARGE_FONT_STEP: f32 = 50.0;
+        let minimum_logical_height =
+            600.0 + EXTRA_HEIGHT_PER_LARGE_FONT_STEP * (state.font_scale - 2).max(0) as f32;
+        let minimum = (
+            (520.0 * sc).ceil() as u32,
+            (minimum_logical_height * sc).ceil() as u32,
+        );
         if canvas.window().minimum_size() != minimum {
             let _ = canvas.window_mut().set_minimum_size(minimum.0, minimum.1);
         }
@@ -1782,6 +1817,9 @@ fn main() {
                 views::draw_arrangement(&mut canvas, &mut input, &mut state)
             }
         }
+
+        state.finish_parameter_gestures(&input);
+        state.sync_clip_library();
 
         // Clear module drag if mouse was released (and it wasn't consumed by a drop handler)
         if input.mouse_released && state.module_drag.is_some() {

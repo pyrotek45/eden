@@ -50,16 +50,31 @@ plus geometry checks and mouse-driven parameter/bypass edit, save and undo.
 Master statistics retain a compact text size inside the fixed-width meter panel.
 No audio processing or project format changes are included.
 
-Remaining: the Options popup itself overlaps labels at XL font (open Options,
-choose XL and Apply). It needs a measured, scrolling layout; acceptance is every
-label/control readable and reachable at supported font/window sizes. Rack MIDI
-arpeggiator routing, shared-content ownership and the split audio/project undo
-histories remain separate functional work. Official SSL, Ableton and Bitwig sites
-were blocked by this environment's network policy; this pass uses the requested
-visual direction and Eden's approved design, without claiming a researched copy
-of those products.
+The Options popup now uses compact form text independent of the workspace font,
+and centers within the minimum window. Audio ruler/footer readouts also retain a
+compact text size. Light-theme arranger titles use theme text colors. MIDI choice
+captions align with knob captions, preventing overlap between mixed control rows.
+See [clip-content.md](clip-content.md) for the implemented functional follow-up.
 
-The existing arranger track titles also have insufficient contrast in the Light
-theme (select Light and inspect MIDI/Audio track headers). They need theme text
-colors, with readable selected/unselected states; this mixer/rack pass fixes the
-mixer titles only.
+Normal split view preserves an arranger/browser viewport at small sizes; an
+explicitly maximized detail panel can still cover it. Large workspace fonts raise
+the minimum logical window height so controls and a usable split view fit. The
+clip browser scales its row heights, uses theme backgrounds, and truncates long
+names with a full-name tooltip instead of overlapping its type/beat readouts.
+
+## Rack visual refinement
+
+Track and master device chains now share a flat card surface: neutral headers,
+a narrow theme-accent selection rail, a full-card selected outline, aligned
+parameter bays and a divider beside device graphs. Only occupied parameter cells
+receive a bay. Wider gaps keep left-to-right signal arrows separate from controls.
+Knobs use a neutral flat face, an outer theme-colored value arc and a contrasting
+position marker; decorative shadows, center dots and glow rings were removed.
+Selector captions use the readable secondary text color rather than disabled text.
+
+The end-of-chain action is labeled `+ DEVICE` and opens the existing module
+browser. Both rack scroll ranges include its full width. Device parameters,
+header hit regions, bypass/delete actions, drag ordering, undo and DSP are unchanged.
+The visual direction takes cues from compact Ableton/Bitwig device chains while
+retaining Eden's bitmap typography and custom themes; no third-party UI assets
+or implementation were copied.

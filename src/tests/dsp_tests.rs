@@ -693,6 +693,7 @@ fn test_pan_preserves_stereo_separation() {
 
 fn make_automation_project(
     target: &str,
+    // Fixtures specify fractions of the clip; persisted point times are beats.
     points: Vec<(f64, f32)>,
     start: f64,
     length: f64,
@@ -700,13 +701,22 @@ fn make_automation_project(
     let mut p = Project::default();
     let mut t = Track::new(99, "Auto", TrackType::Automation);
     t.clips.push(Clip::Automation(AutomationClip {
-        target_param: target.to_string(),
-        points: points
-            .into_iter()
-            .map(|(time, value)| AutomationPoint { time, value })
-            .collect(),
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(
+            crate::app::models::AutomationContent {
+                target_param: target.to_string(),
+                points: points
+                    .into_iter()
+                    .map(|(time, value)| AutomationPoint {
+                        time: time * length,
+                        value,
+                    })
+                    .collect(),
+            },
+        ),
         start_time: start,
-        length,
+        length: length,
         name: "A".into(),
         color: [0; 4],
     }));
@@ -813,7 +823,11 @@ fn test_song_length_beats_single_clip() {
     let mut p = Project::default();
     let mut t = Track::new(1, "T1", TrackType::Midi);
     t.clips.push(Clip::Midi(MidiClip {
-        notes: vec![],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![],
+        }),
         start_time: 2.0,
         length: 4.0,
         name: "C".into(),
@@ -833,8 +847,14 @@ fn test_song_length_beats_ignores_automation() {
     // Add automation clip at beat 100 — should be ignored
     let mut t = Track::new(99, "Auto", TrackType::Automation);
     t.clips.push(Clip::Automation(AutomationClip {
-        target_param: "1:1:vol".into(),
-        points: vec![],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(
+            crate::app::models::AutomationContent {
+                target_param: "1:1:vol".into(),
+                points: vec![],
+            },
+        ),
         start_time: 0.0,
         length: 100.0,
         name: "A".into(),
@@ -850,7 +870,11 @@ fn test_song_length_beats_multiple_clips() {
     let mut p = Project::default();
     let mut t1 = Track::new(1, "T1", TrackType::Midi);
     t1.clips.push(Clip::Midi(MidiClip {
-        notes: vec![],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![],
+        }),
         start_time: 0.0,
         length: 4.0,
         name: "C1".into(),
@@ -858,7 +882,11 @@ fn test_song_length_beats_multiple_clips() {
     }));
     let mut t2 = Track::new(2, "T2", TrackType::Midi);
     t2.clips.push(Clip::Midi(MidiClip {
-        notes: vec![],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![],
+        }),
         start_time: 4.0,
         length: 8.0,
         name: "C2".into(),
@@ -877,6 +905,7 @@ fn test_song_length_beats_multiple_clips() {
 #[test]
 fn test_mix_audio_clips_silence_outside_clip() {
     let track = make_audio_track(vec![crate::engine::AudioSampleClip {
+        channels: 1,
         start_beats: 4.0,
         length_beats: 4.0,
         offset_secs: 0.0,
@@ -903,6 +932,7 @@ fn test_mix_audio_clips_silence_outside_clip() {
 #[test]
 fn test_mix_audio_clips_produces_signal() {
     let track = make_audio_track(vec![crate::engine::AudioSampleClip {
+        channels: 1,
         start_beats: 0.0,
         length_beats: 4.0,
         offset_secs: 0.0,
@@ -930,6 +960,7 @@ fn test_mix_audio_clips_produces_signal() {
 fn test_mix_audio_clips_gain() {
     let make_track = |gain: f32| {
         make_audio_track(vec![crate::engine::AudioSampleClip {
+            channels: 1,
             start_beats: 0.0,
             length_beats: 4.0,
             offset_secs: 0.0,
@@ -955,6 +986,7 @@ fn test_mix_audio_clips_gain() {
 #[test]
 fn test_mix_audio_clips_user_fade_in() {
     let track = make_audio_track(vec![crate::engine::AudioSampleClip {
+        channels: 1,
         start_beats: 0.0,
         length_beats: 8.0,
         offset_secs: 0.0,
@@ -1088,4 +1120,22 @@ fn test_dc_hp_preserves_finite_after_extreme_input() {
         assert!(l.is_finite(), "DC HP should stay finite");
         assert!(r.is_finite(), "DC HP should stay finite");
     }
+}
+
+#[test]
+fn stereo_clip_interpolation_keeps_channels_separate() {
+    let track = make_audio_track(vec![crate::engine::AudioSampleClip {
+        channels: 2,
+        start_beats: 0.0,
+        length_beats: 4.0,
+        offset_secs: 0.0,
+        samples: Arc::new(vec![0.0, 1.0, 0.25, 0.75, 0.5, 0.5, 0.75, 0.25]),
+        sample_rate: 4,
+        gain: 1.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+    }]);
+    let (l, r) = dsp::mix_audio_clips(&track, 0.625, 1.0, 1000.0);
+    assert!((l - 0.625).abs() < 1e-12);
+    assert!((r - 0.375).abs() < 1e-12);
 }

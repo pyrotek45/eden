@@ -30,9 +30,11 @@ impl CommandManager {
 
     pub fn execute(&mut self, mut cmd: Box<dyn Command>, project: &mut Project) {
         // Snapshot the project BEFORE applying the command
+        project.reconcile_clip_content();
         let snapshot = project.clone();
         let desc = cmd.description().to_string();
         cmd.apply(project);
+        project.reconcile_clip_content();
         self.undo_stack.push((snapshot, desc));
         self.redo_stack.clear();
         if self.undo_stack.len() > self.max_history {
@@ -72,23 +74,6 @@ impl CommandManager {
 
     pub fn redo_description(&self) -> Option<&str> {
         self.redo_stack.last().map(|(_, d)| d.as_str())
-    }
-
-    /// Push a snapshot onto the undo stack WITHOUT calling apply().
-    /// Use when the action has already been applied manually (e.g. live BPM drag).
-    pub fn push_undo(&mut self, cmd: Box<dyn Command>) {
-        // For push_undo, the caller has already applied the change.
-        // We cannot snapshot the "before" state because it's already gone.
-        // Store a dummy snapshot — this is a best-effort path.
-        // Callers should prefer calling push_undo_snapshot() instead.
-        let desc = cmd.description().to_string();
-        // We have no pre-state, so we push a placeholder that won't undo correctly.
-        // This path is kept for API compatibility but callers should migrate.
-        self.undo_stack.push((Project::default(), desc));
-        self.redo_stack.clear();
-        if self.undo_stack.len() > self.max_history {
-            self.undo_stack.remove(0);
-        }
     }
 
     /// Push a pre-mutation snapshot onto the undo stack.
@@ -744,6 +729,7 @@ impl Command for DeleteClips {
             if let Some(track) = project.tracks.iter_mut().find(|t| t.id == tid) {
                 if ci < track.clips.len() {
                     let clip = track.clips.remove(ci);
+                    project.shelf_clips.push((tid, clip.clone()));
                     removed.push((tid, ci, clip));
                 }
             }
@@ -754,6 +740,11 @@ impl Command for DeleteClips {
     }
 
     fn undo(&mut self, project: &mut Project) {
+        let removed_ids: std::collections::HashSet<_> =
+            self.clips.iter().map(|(_, _, c)| c.instance_id()).collect();
+        project
+            .shelf_clips
+            .retain(|(_, c)| !removed_ids.contains(&c.instance_id()));
         // Re-insert in ascending index order so indices stay correct
         for (tid, ci, clip) in &self.clips {
             if let Some(track) = project.tracks.iter_mut().find(|t| t.id == *tid) {
@@ -874,6 +865,7 @@ impl Command for CompositeCommand {
     fn apply(&mut self, project: &mut Project) {
         for cmd in &mut self.cmds {
             cmd.apply(project);
+            project.reconcile_clip_content();
         }
     }
     fn undo(&mut self, project: &mut Project) {
@@ -1480,14 +1472,18 @@ impl Command for JoinClips {
                             all_notes.push(crate::app::models::MidiNote {
                                 pitch: note.pitch,
                                 velocity: note.velocity,
-                                start: note.start + mc.start_time - new_start,
+                                start: note.start - mc.content_offset + mc.start_time - new_start,
                                 length: note.length,
                             });
                         }
                     }
                 }
                 Clip::Midi(crate::app::models::MidiClip {
-                    notes: all_notes,
+                    content_offset: 0.0,
+                    instance_id: crate::app::shared_content::new_id(),
+                    content: crate::app::shared_content::SharedContent::new(
+                        crate::app::models::MidiContent { notes: all_notes },
+                    ),
                     start_time: new_start,
                     length: new_length,
                     name: "Joined".to_string(),
@@ -1605,42 +1601,57 @@ impl Command for JoinClips {
                             / (out_sr as f64 * out_channels.max(1) as f64);
                         let merged_len_beats = merged_dur_secs * bpm / 60.0;
                         Clip::Audio(crate::app::models::AudioClip {
-                            source_file: joined_path.to_string_lossy().to_string(),
+                            instance_id: crate::app::shared_content::new_id(),
+                            content: crate::app::shared_content::SharedContent::new(
+                                crate::app::models::AudioContent {
+                                    source_file: joined_path.to_string_lossy().to_string(),
+                                    gain: first_ac.gain,
+                                    fade_in: 0.0,
+                                    fade_out: 0.0,
+                                },
+                            ),
                             start_time: new_start,
                             offset: 0.0,
                             length: merged_len_beats,
-                            gain: first_ac.gain,
                             name: "Joined".to_string(),
                             color: first_ac.color,
-                            fade_in: 0.0,
-                            fade_out: 0.0,
                         })
                     } else {
                         // Fallback: just extend length like before
                         Clip::Audio(crate::app::models::AudioClip {
-                            source_file: first_ac.source_file,
+                            instance_id: crate::app::shared_content::new_id(),
+                            content: crate::app::shared_content::SharedContent::new(
+                                crate::app::models::AudioContent {
+                                    source_file: first_ac.source_file.clone(),
+                                    gain: first_ac.gain,
+                                    fade_in: 0.0,
+                                    fade_out: 0.0,
+                                },
+                            ),
                             start_time: new_start,
                             offset: first_ac.offset,
                             length: new_length,
-                            gain: first_ac.gain,
                             name: "Joined".to_string(),
                             color: first_ac.color,
-                            fade_in: 0.0,
-                            fade_out: 0.0,
                         })
                     }
                 } else {
                     // Fallback: just extend length
                     Clip::Audio(crate::app::models::AudioClip {
-                        source_file: first_ac.source_file,
+                        instance_id: crate::app::shared_content::new_id(),
+                        content: crate::app::shared_content::SharedContent::new(
+                            crate::app::models::AudioContent {
+                                source_file: first_ac.source_file.clone(),
+                                gain: first_ac.gain,
+                                fade_in: 0.0,
+                                fade_out: 0.0,
+                            },
+                        ),
                         start_time: new_start,
                         offset: first_ac.offset,
                         length: new_length,
-                        gain: first_ac.gain,
                         name: "Joined".to_string(),
                         color: first_ac.color,
-                        fade_in: 0.0,
-                        fade_out: 0.0,
                     })
                 }
             };

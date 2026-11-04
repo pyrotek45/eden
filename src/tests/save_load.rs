@@ -167,20 +167,24 @@ fn test_save_load_midi_clip_all_fields() {
     let mut p = Project::default();
     let mut t = Track::new(1, "T", TrackType::Midi);
     t.clips.push(Clip::Midi(MidiClip {
-        notes: vec![
-            MidiNote {
-                pitch: 0,
-                velocity: 0,
-                start: 0.0,
-                length: 0.001,
-            },
-            MidiNote {
-                pitch: 127,
-                velocity: 127,
-                start: 99.0,
-                length: 100.0,
-            },
-        ],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![
+                MidiNote {
+                    pitch: 0,
+                    velocity: 0,
+                    start: 0.0,
+                    length: 0.001,
+                },
+                MidiNote {
+                    pitch: 127,
+                    velocity: 127,
+                    start: 99.0,
+                    length: 100.0,
+                },
+            ],
+        }),
         start_time: 5.5,
         length: 200.0,
         name: "Extreme Clip".into(),
@@ -206,15 +210,18 @@ fn test_save_load_audio_clip_all_fields() {
     let mut p = Project::default();
     let mut t = Track::new(1, "T", TrackType::Audio);
     t.clips.push(Clip::Audio(AudioClip {
-        source_file: "/long/path/to/file.wav".into(),
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::AudioContent {
+            source_file: "/long/path/to/file.wav".into(),
+            gain: 0.1,
+            fade_in: 0.05,
+            fade_out: 1.0,
+        }),
         start_time: 10.0,
         offset: 2.5,
         length: 32.0,
-        gain: 0.1,
         name: "My Audio".into(),
         color: [128, 128, 128, 255],
-        fade_in: 0.05,
-        fade_out: 1.0,
     }));
     p.tracks.push(t);
     let json = serde_json::to_string(&p).unwrap();
@@ -235,19 +242,25 @@ fn test_save_load_automation_clip_all_fields() {
     let mut p = Project::default();
     let mut t = Track::new(1, "T", TrackType::Automation);
     t.clips.push(Clip::Automation(AutomationClip {
-        points: vec![
-            AutomationPoint {
-                time: 0.0,
-                value: -1.0,
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(
+            crate::app::models::AutomationContent {
+                points: vec![
+                    AutomationPoint {
+                        time: 0.0,
+                        value: -1.0,
+                    },
+                    AutomationPoint {
+                        time: 100.0,
+                        value: 1.0,
+                    },
+                ],
+                target_param: "1:1:cutoff".into(),
             },
-            AutomationPoint {
-                time: 100.0,
-                value: 1.0,
-            },
-        ],
+        ),
         start_time: 0.0,
         length: 100.0,
-        target_param: "1:1:cutoff".into(),
         name: "Sweep".into(),
         color: [255, 255, 255, 255],
     }));
@@ -553,12 +566,18 @@ fn test_save_load_multiple_clips_per_track() {
     let mut t = Track::new(1, "T", TrackType::Midi);
     for i in 0..5 {
         t.clips.push(Clip::Midi(MidiClip {
-            notes: vec![MidiNote {
-                pitch: 60 + i,
-                velocity: 100,
-                start: 0.0,
-                length: 1.0,
-            }],
+            content_offset: 0.0,
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::MidiContent {
+                    notes: vec![MidiNote {
+                        pitch: 60 + i,
+                        velocity: 100,
+                        start: 0.0,
+                        length: 1.0,
+                    }],
+                },
+            ),
             start_time: i as f64 * 2.0,
             length: 2.0,
             name: format!("Clip{}", i),
@@ -586,31 +605,41 @@ fn test_save_load_mixed_clip_types_on_one_track() {
     let mut p = Project::default();
     let mut t = Track::new(1, "T", TrackType::Midi);
     t.clips.push(Clip::Midi(MidiClip {
-        notes: vec![MidiNote {
-            pitch: 60,
-            velocity: 100,
-            start: 0.0,
-            length: 1.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 60,
+                velocity: 100,
+                start: 0.0,
+                length: 1.0,
+            }],
+        }),
         start_time: 0.0,
         length: 2.0,
         name: "M".into(),
         color: [0; 4],
     }));
     t.clips.push(Clip::Automation(AutomationClip {
-        points: vec![
-            AutomationPoint {
-                time: 0.0,
-                value: 0.0,
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(
+            crate::app::models::AutomationContent {
+                points: vec![
+                    AutomationPoint {
+                        time: 0.0,
+                        value: 0.0,
+                    },
+                    AutomationPoint {
+                        time: 4.0,
+                        value: 1.0,
+                    },
+                ],
+                target_param: "1:1:cutoff".into(),
             },
-            AutomationPoint {
-                time: 4.0,
-                value: 1.0,
-            },
-        ],
+        ),
         start_time: 0.0,
         length: 4.0,
-        target_param: "1:1:cutoff".into(),
         name: "A".into(),
         color: [255, 0, 0, 255],
     }));

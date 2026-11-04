@@ -401,7 +401,8 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             {
                 for note in &midi.notes {
                     // note positions are relative to the clip's start_time
-                    let raw_nx = cx + ((note.start / clip_len) * cw as f64) as i32;
+                    let raw_nx =
+                        cx + (((note.start - midi.content_offset) / clip_len) * cw as f64) as i32;
                     let raw_nw = ((note.length / clip_len) * cw as f64).max(2.0) as i32;
 
                     // Clamp to clip bounds
@@ -447,10 +448,10 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         let p0 = &auto.points[pi - 1];
                         let p1 = &auto.points[pi];
                         // Use absolute beat position (truncate, don't scale)
-                        let x0 = cx + (p0.time * zoom) as i32;
+                        let x0 = cx + ((p0.time - auto.content_offset) * zoom) as i32;
                         let y0 =
                             body_top + body_h - (p0.value.clamp(0.0, 1.0) * body_h as f32) as i32;
-                        let x1 = cx + (p1.time * zoom) as i32;
+                        let x1 = cx + ((p1.time - auto.content_offset) * zoom) as i32;
                         let y1 =
                             body_top + body_h - (p1.value.clamp(0.0, 1.0) * body_h as f32) as i32;
                         let _ = canvas.draw_line(
@@ -466,7 +467,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     }
                     // Draw points as small dots
                     for p in &auto.points {
-                        let px = cx + (p.time * zoom) as i32;
+                        let px = cx + ((p.time - auto.content_offset) * zoom) as i32;
                         let py =
                             body_top + body_h - (p.value.clamp(0.0, 1.0) * body_h as f32) as i32;
                         if px >= cx && px <= clip_right && py >= body_top && py <= body_top + body_h
@@ -585,7 +586,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                         state.selected_clips.clear();
                         state.selected_clips.insert((track_id, ci));
                     }
-                    state.selected_clip = Some((track_id, ci));
+                    state.select_clip(Some((track_id, ci)));
                     state.selected_track = Some(track_id);
                 }
                 match zone {
@@ -605,11 +606,11 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                                 state.selected_clips.remove(&(track_id, ci));
                                 // Clear selected_clip so is_selected becomes false
                                 if state.selected_clip == Some((track_id, ci)) {
-                                    state.selected_clip = None;
+                                    state.select_clip(None);
                                 }
                             } else {
                                 state.selected_clips.insert((track_id, ci));
-                                state.selected_clip = Some((track_id, ci));
+                                state.select_clip(Some((track_id, ci)));
                             }
                         } else {
                             // Select the clip if not already selected
@@ -617,7 +618,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                                 state.selected_clips.clear();
                                 state.selected_clips.insert((track_id, ci));
                             }
-                            state.selected_clip = Some((track_id, ci));
+                            state.select_clip(Some((track_id, ci)));
                             state.selected_track = Some(track_id);
                             state.selected_tracks.clear();
                             state.selected_tracks.insert(track_id);
@@ -783,10 +784,10 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     );
                     // Update selected_clip
                     if state.selected_clip == Some((track_id, ci)) {
-                        state.selected_clip = None;
+                        state.select_clip(None);
                     } else if let Some((sid, sci)) = state.selected_clip {
                         if sid == track_id && sci > ci {
-                            state.selected_clip = Some((sid, sci - 1));
+                            state.select_clip(Some((sid, sci - 1)));
                         }
                     }
                     // Rebuild selected_clips for this track: remove deleted, shift higher indices down
@@ -855,34 +856,49 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                 let new_clip = match track_type {
                     crate::app::models::TrackType::Midi => {
                         crate::app::models::Clip::Midi(crate::app::models::MidiClip {
+                            content_offset: 0.0,
+                            instance_id: crate::app::shared_content::new_id(),
+                            content: crate::app::shared_content::SharedContent::new(
+                                crate::app::models::MidiContent { notes: Vec::new() },
+                            ),
                             name: clip_name,
                             color: track_color,
                             start_time: start,
-                            length: 4.0, // 1 bar
-                            notes: Vec::new(),
+                            length: 4.0,
                         })
                     }
                     crate::app::models::TrackType::Audio => {
                         crate::app::models::Clip::Audio(crate::app::models::AudioClip {
+                            instance_id: crate::app::shared_content::new_id(),
+                            content: crate::app::shared_content::SharedContent::new(
+                                crate::app::models::AudioContent {
+                                    source_file: String::new(),
+                                    gain: 1.0,
+                                    fade_in: 0.0,
+                                    fade_out: 0.0,
+                                },
+                            ),
                             name: clip_name,
                             color: track_color,
                             start_time: start,
-                            length: 4.0, // 1 bar
-                            source_file: String::new(),
+                            length: 4.0,
                             offset: 0.0,
-                            gain: 1.0,
-                            fade_in: 0.0,
-                            fade_out: 0.0,
                         })
                     }
                     crate::app::models::TrackType::Automation => {
                         crate::app::models::Clip::Automation(crate::app::models::AutomationClip {
+                            content_offset: 0.0,
+                            instance_id: crate::app::shared_content::new_id(),
+                            content: crate::app::shared_content::SharedContent::new(
+                                crate::app::models::AutomationContent {
+                                    points: Vec::new(),
+                                    target_param: "volume".to_string(),
+                                },
+                            ),
                             name: clip_name,
                             color: track_color,
                             start_time: start,
-                            length: 4.0, // 1 bar
-                            points: Vec::new(),
-                            target_param: "volume".to_string(),
+                            length: 4.0,
                         })
                     }
                 };
@@ -902,7 +918,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                     .find(|t| t.id == track_id)
                     .map(|t| t.clips.len().saturating_sub(1))
                     .unwrap_or(0);
-                state.selected_clip = Some((track_id, new_ci));
+                state.select_clip(Some((track_id, new_ci)));
                 state.selected_clips.clear();
                 state.selected_clips.insert((track_id, new_ci));
                 state.bottom_panel_tab = BottomPanelTab::PianoRoll;
@@ -1133,7 +1149,7 @@ pub fn draw_track_lanes(canvas: &mut Canvas<Window>, input: &mut InputState, sta
         {
             state.selected_clips.clear();
             if !preserve_clip {
-                state.selected_clip = None;
+                state.select_clip(None);
             }
         }
     }

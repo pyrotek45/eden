@@ -10,12 +10,12 @@
 - Snap applies to the edited boundary's arrangement beat: start for moves/left trim, end for right trim. With snap enabled, the boundary snaps to the selected grid; with snap disabled, it moves freely. A pointer-down/release with no drag never quantizes an off-grid clip.
 - Group operations use one constrained delta. Beat-zero and audio source limits cannot squash spacing or independently shorten different members. A cross-track move/copy is accepted only if every destination exists and matches its source track type.
 - Preview derives from immutable pointer-down metadata. Release uses the final pointer position and commits one undo snapshot. Escape or window focus loss restores the original metadata without adding history or marking an unchanged project dirty.
-- Ctrl+D duplicates the entire selection by its total span and points the editor at the new copies. MIDI/automation retain their existing independent-copy behavior; audio continues sharing its source file. This patch does not introduce linked MIDI/automation.
+- Ctrl+D duplicates the entire selection by its total span and points the editor at the new copies. Normal duplicates are independent variations for every type while immutable audio assets remain reused. Explicit linked duplication is described in [clip-content.md](clip-content.md).
 - Switching clips clears stale note/point/sample selections, retaining editor zoom. Editors continue to read the project clip directly, rather than an independent editor copy.
 
 Implementation: `src/app/clip_edit.rs`. A gesture stores only start, length, audio offset and captured source bounds for selected clips, not cloned note/sample buffers or a full project per pointer frame. The existing history system still stores a full project once on commit; replacing that system is separate work.
 
-WAV source bounds can be read from the header at gesture start even before waveform generation. Other formats currently use available waveform metadata. Bounds are captured once, so a cache becoming ready cannot change the rules in the middle of a drag. Missing/unreadable source metadata remains a limitation, particularly for cold OGG clips.
+WAV source bounds come from headers and Ogg/Vorbis bounds from final granule metadata, even before waveform generation. Bounds are captured once, so a cache becoming ready cannot change the rules in the middle of a drag. Missing/unreadable or unsupported container metadata can still fall back to available waveform metadata.
 
 The old “TIME STRETCH” decoration was removed: the underlying operation was only a length change. True stretch remains deferred. No DSP/stretch algorithm changes are included.
 
@@ -29,40 +29,15 @@ Reviewed Ardour's official manual source (accessed 2026-10-19):
 
 These support the interaction structure, not a claim that Eden should copy Ardour's exact modifier map. Eden keeps the user's Shift-click selection and Ctrl-drag copy conventions. Ableton's manual was inaccessible under the cloud network policy; it was not used as verified evidence.
 
-## Ownership findings: still unresolved
+## Content ownership
 
-1. `MidiClip.notes` and `AutomationClip.points` are owned vectors. Cloning copies their content, so there is no persistent link for shared edits.
-2. `AudioClip.source_file` is a path. Multiple clips referencing it share file edits, but this conflates immutable source storage with editable clip content.
-3. The audio editor writes transformations into source files. UNIQUE copies beside the original source, which duplicates the entire asset, can fail in read-only folders, and is not a general shared/unique clip model. Undo uses separate file backups and a separate history path.
-4. `sync_clip_library` adds copies matched by track/name/type and does not refresh existing content. Same-named variations can collapse into one browser entry; edits can leave stale browser payloads. Browser entries are not authoritative shared content.
-5. Arrangement/editor selections use `(track_id, vector_index)`. Removing, sorting or moving clips can change identity. Clearing invalid indices helps, but does not solve indices that remain valid while referring to a different clip.
-6. Full project snapshots and playback-state clones copy MIDI/automation vectors. Decoded audio is cached in multiple forms with no explicit budget. A shared-content migration must cover publication, history and caches together.
-7. MIDI/automation left trim currently lacks an explicit content offset. A complete non-destructive trim model must preserve the song time of retained events and expose previously hidden content on expansion. The gesture repair alone does not establish that model.
-8. The full Edit page's audio/automation renderer uses full-window coordinates and can cover its clip sidebar. This needs the same offset/scissor contract used by the piano roll; acceptance: sidebar remains visible and clickable with all three clip types at small/default sizes.
+The ownership migration is implemented in [clip-content.md](clip-content.md),
+including stable identities, linked/unique content, source-preserving audio assets,
+shared history, source offsets, shelf persistence and memory behavior.
 
-## Target model: instances, content and assets
-
-Use three stable identities:
-
-| Identity | Owns | Sharing behavior |
-|---|---|---|
-| ClipId | Arrangement placement, visible boundaries and content offset | Moving/trimming one instance does not move/trim other instances |
-| ContentId | MIDI notes, automation points/target, or non-destructive audio edit description | Editing linked content updates every instance using that ContentId |
-| AssetId | Immutable original media, channel/sample-rate metadata | Many independent contents may reuse the same decoded/source storage |
-
-A linked duplicate gets a new ClipId and the same ContentId. **Make Unique** creates a new ContentId for that instance, copying the content description while retaining immutable AssetIds. Audio data is copied/rendered only when a transformation actually requires a derived asset, not to make a variation. Display a visible linked-count/status and expose explicit Linked Duplicate and Make Unique actions. Preserve normal duplicate semantics until a separately reviewed change specifies otherwise.
-
-The library, arranger, editor and engine must resolve the same ContentId and revision. Revision changes invalidate waveform/derived caches and publish prepared playback state atomically. Separate editor zoom/scroll/selection by view or content identity; never use the displayed name as identity. Linked data synchronization must include undo/redo, deletion, loading and offline export, not only visible editors.
-
-## Next migration, in reviewable steps
-
-1. Add stable identities and a versioned loader. Assign identities to legacy clips without inferring MIDI links from equal names/notes. Preserve legacy audio file sharing explicitly so loading cannot change sound.
-2. Store authoritative content in the project and make all editors/commands resolve it. Add source/content offsets for non-destructive trim. Remove browser-owned mutable copies and name/type matching after callers migrate.
-3. Implement explicit linked duplication and Make Unique for all three types. Tests: edit A updates linked B; unique C diverges; moving/trimming A only affects A; undo/redo and save/reopen preserve links and isolation.
-4. Move audio edits to immutable sources plus edit descriptions or versioned derived assets in project-managed storage. Unwritable imported samples must remain editable without modifying originals. Reconcile audio and project history in one transaction model.
-5. Bound decoded/derived caches by bytes, share prepared assets, and keep loading, allocation and reclamation away from the audio callback. Verify stereo, cache eviction, realtime/export consistency and compatibility fixtures.
-
-Acceptance includes switching between every editor while editing linked and unique clips; equal display names must never merge unrelated data. Measure heap use for repeated clips and audio buffers before/after. Preserve original files and provide project recovery throughout the migration.
+The obsolete full Edit/Mixer page renderers were removed. The live workflow uses
+Arrangement with bottom Mixer/Edit/Rack panels, so the old full-page audio renderer
+cannot cover its clip sidebar.
 
 ## Visual follow-up recorded during validation
 
