@@ -15,20 +15,21 @@ use std::sync::Arc;
 /// Pre-load audio files referenced by the project into a cache.
 pub fn preload_audio_cache(
     project: &Project,
-) -> std::collections::HashMap<String, (Arc<Vec<f32>>, u32)> {
-    let mut cache: std::collections::HashMap<String, (Arc<Vec<f32>>, u32)> =
+) -> std::collections::HashMap<String, crate::engine::AudioAsset> {
+    let mut cache: std::collections::HashMap<String, crate::engine::AudioAsset> =
         std::collections::HashMap::new();
     for track in &project.tracks {
         for clip in &track.clips {
             if let Clip::Audio(ac) = clip {
                 if !ac.source_file.is_empty() && !cache.contains_key(&ac.source_file) {
-                    match crate::engine::load_audio(std::path::Path::new(&ac.source_file)) {
-                        Ok((samples, sr)) => {
-                            cache.insert(ac.source_file.clone(), (Arc::new(samples), sr));
+                    match crate::engine::load_audio_asset(std::path::Path::new(&ac.source_file)) {
+                        Ok(asset) => {
+                            cache.insert(ac.source_file.clone(), asset);
                         }
                         Err(e) => {
                             eprintln!("[dsp] Failed to load {}: {}", ac.source_file, e);
-                            cache.insert(ac.source_file.clone(), (Arc::new(Vec::new()), 44100));
+                            cache
+                                .insert(ac.source_file.clone(), crate::engine::AudioAsset::empty());
                         }
                     }
                 }
@@ -37,12 +38,12 @@ pub fn preload_audio_cache(
         // Also preload sampler files
         if let Some(ref sample_path) = track.sampler_file {
             if !sample_path.is_empty() && !cache.contains_key(sample_path) {
-                match crate::engine::load_audio(std::path::Path::new(sample_path)) {
-                    Ok((samples, sr)) => {
-                        cache.insert(sample_path.clone(), (Arc::new(samples), sr));
+                match crate::engine::load_audio_asset(std::path::Path::new(sample_path)) {
+                    Ok(asset) => {
+                        cache.insert(sample_path.clone(), asset);
                     }
                     Err(_) => {
-                        cache.insert(sample_path.clone(), (Arc::new(Vec::new()), 44100));
+                        cache.insert(sample_path.clone(), crate::engine::AudioAsset::empty());
                     }
                 }
             }
@@ -57,9 +58,11 @@ pub fn preload_audio_cache(
 /// `audio_cache` should be pre-populated via `preload_audio_cache`.
 pub fn build_render_tracks(
     project: &Project,
-    audio_cache: &std::collections::HashMap<String, (Arc<Vec<f32>>, u32)>,
+    audio_cache: &std::collections::HashMap<String, crate::engine::AudioAsset>,
 ) -> Vec<AudioTrack> {
     let mut render_tracks: Vec<AudioTrack> = Vec::new();
+    let mut note_cache: std::collections::HashMap<(u64, u64, u64), Arc<Vec<AudioNote>>> =
+        std::collections::HashMap::new();
     for track in &project.tracks {
         let instrument_module: Option<String> = track
             .rack
@@ -85,16 +88,27 @@ pub fn build_render_tracks(
         if track.track_type == TrackType::Midi {
             for clip in &track.clips {
                 if let Clip::Midi(mc) = clip {
-                    let notes = mc
-                        .notes
-                        .iter()
-                        .map(|n| AudioNote {
-                            pitch: n.pitch,
-                            velocity: n.velocity,
-                            start_beats: n.start,
-                            length_beats: n.length,
+                    let key = (
+                        mc.content.content_id,
+                        mc.content.revision,
+                        mc.content_offset.to_bits(),
+                    );
+                    let notes = note_cache
+                        .entry(key)
+                        .or_insert_with(|| {
+                            Arc::new(
+                                mc.notes
+                                    .iter()
+                                    .map(|n| AudioNote {
+                                        pitch: n.pitch,
+                                        velocity: n.velocity,
+                                        start_beats: n.start - mc.content_offset,
+                                        length_beats: n.length,
+                                    })
+                                    .collect(),
+                            )
                         })
-                        .collect();
+                        .clone();
                     midi_clips.push(AudioMidiClip {
                         start_beats: mc.start_time,
                         length_beats: mc.length,
@@ -110,15 +124,16 @@ pub fn build_render_tracks(
                 if ac.source_file.is_empty() {
                     continue;
                 }
-                if let Some((samples, sr)) = audio_cache.get(&ac.source_file) {
-                    if !samples.is_empty() {
+                if let Some(asset) = audio_cache.get(&ac.source_file) {
+                    if !asset.samples.is_empty() {
                         audio_clips.push(AudioSampleClip {
+                            channels: asset.channels,
                             start_beats: ac.start_time,
                             length_beats: ac.length,
                             gain: ac.gain,
                             offset_secs: ac.offset,
-                            samples: samples.clone(),
-                            sample_rate: *sr,
+                            samples: asset.samples.clone(),
+                            sample_rate: asset.sample_rate,
                             fade_in: ac.fade_in,
                             fade_out: ac.fade_out,
                         });
@@ -169,10 +184,10 @@ pub fn build_render_tracks(
         let extra = if instrument_module.as_deref() == Some("Sampler") {
             if let Some(ref sample_path) = track.sampler_file {
                 if !sample_path.is_empty() {
-                    if let Some((samples, sr)) = audio_cache.get(sample_path) {
+                    if let Some(asset) = audio_cache.get(sample_path) {
                         ModuleExtra {
-                            sample_data: Some(samples.clone()),
-                            sample_sr: *sr,
+                            sample_data: Some(asset.mono_samples()),
+                            sample_sr: asset.sample_rate,
                         }
                     } else {
                         ModuleExtra::default()
@@ -230,7 +245,6 @@ pub struct RenderInstances {
     pub track_effects: Vec<Vec<Box<dyn EffectModule>>>,
     pub track_midi_effects: Vec<Vec<Box<dyn MidiEffect>>>,
     pub track_cstrip: Vec<Box<dyn EffectModule>>,
-    pub track_arp_state: Vec<(usize, f64)>,
     pub master_effects: Vec<Box<dyn EffectModule>>,
 }
 
@@ -266,7 +280,6 @@ pub fn create_render_instances(
     let track_cstrip: Vec<Box<dyn EffectModule>> = (0..num_tracks)
         .map(|_| create_effect("CStrip2", sample_rate).unwrap())
         .collect();
-    let track_arp_state: Vec<(usize, f64)> = vec![(0, -999.0); num_tracks];
     let master_effects: Vec<Box<dyn EffectModule>> = master_effect_slots
         .iter()
         .filter_map(|(name, _)| create_effect(name, sample_rate))
@@ -276,7 +289,6 @@ pub fn create_render_instances(
         track_effects,
         track_midi_effects,
         track_cstrip,
-        track_arp_state,
         master_effects,
     }
 }

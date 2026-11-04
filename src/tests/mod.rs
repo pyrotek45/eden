@@ -29,26 +29,30 @@ fn make_test_project() -> Project {
     t.solo = false;
     t.rack.push(RackSlot::subtractive_synth(100));
     t.clips.push(Clip::Midi(MidiClip {
-        notes: vec![
-            MidiNote {
-                pitch: 60,
-                velocity: 100,
-                start: 0.0,
-                length: 1.0,
-            },
-            MidiNote {
-                pitch: 64,
-                velocity: 90,
-                start: 1.0,
-                length: 1.0,
-            },
-            MidiNote {
-                pitch: 67,
-                velocity: 95,
-                start: 2.0,
-                length: 1.0,
-            },
-        ],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![
+                MidiNote {
+                    pitch: 60,
+                    velocity: 100,
+                    start: 0.0,
+                    length: 1.0,
+                },
+                MidiNote {
+                    pitch: 64,
+                    velocity: 90,
+                    start: 1.0,
+                    length: 1.0,
+                },
+                MidiNote {
+                    pitch: 67,
+                    velocity: 95,
+                    start: 2.0,
+                    length: 1.0,
+                },
+            ],
+        }),
         start_time: 0.0,
         length: 4.0,
         name: "Clip1".into(),
@@ -59,34 +63,43 @@ fn make_test_project() -> Project {
     // Add audio track
     let mut t2 = Track::new(2, "Audio1", TrackType::Audio);
     t2.clips.push(Clip::Audio(AudioClip {
-        source_file: "test.wav".into(),
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::AudioContent {
+            source_file: "test.wav".into(),
+            gain: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+        }),
         start_time: 0.0,
         offset: 0.0,
         length: 8.0,
-        gain: 1.0,
         name: "Audio1".into(),
         color: [220, 140, 60, 200],
-        fade_in: 0.0,
-        fade_out: 0.0,
     }));
     p.tracks.push(t2);
 
     // Add automation track
     let mut t3 = Track::new(3, "Auto1", TrackType::Automation);
     t3.clips.push(Clip::Automation(AutomationClip {
-        points: vec![
-            AutomationPoint {
-                time: 0.0,
-                value: 0.2,
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(
+            crate::app::models::AutomationContent {
+                points: vec![
+                    AutomationPoint {
+                        time: 0.0,
+                        value: 0.2,
+                    },
+                    AutomationPoint {
+                        time: 4.0,
+                        value: 0.8,
+                    },
+                ],
+                target_param: "filter_cutoff".into(),
             },
-            AutomationPoint {
-                time: 4.0,
-                value: 0.8,
-            },
-        ],
+        ),
         start_time: 0.0,
         length: 4.0,
-        target_param: "filter_cutoff".into(),
         name: "Auto1".into(),
         color: [220, 180, 80, 200],
     }));
@@ -289,7 +302,11 @@ fn test_add_clips_undo() {
     let mut project = make_test_project();
     let snapshot = project.clone();
     let new_clip = Clip::Midi(MidiClip {
-        notes: vec![],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![],
+        }),
         start_time: 8.0,
         length: 4.0,
         name: "New".into(),
@@ -466,7 +483,11 @@ fn test_create_clip_undo() {
     let mut project = make_test_project();
     let snapshot = project.clone();
     let new_clip = Clip::Midi(MidiClip {
-        notes: vec![],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![],
+        }),
         start_time: 4.0,
         length: 4.0,
         name: "New".into(),
@@ -1014,7 +1035,11 @@ fn test_track_new() {
 #[test]
 fn test_clip_accessors() {
     let clip = Clip::Midi(MidiClip {
-        notes: vec![],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![],
+        }),
         start_time: 2.0,
         length: 4.0,
         name: "Clip".into(),
@@ -1028,7 +1053,11 @@ fn test_clip_accessors() {
 #[test]
 fn test_clip_set_start_time() {
     let mut clip = Clip::Midi(MidiClip {
-        notes: vec![],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![],
+        }),
         start_time: 0.0,
         length: 4.0,
         name: "Clip".into(),
@@ -1041,15 +1070,18 @@ fn test_clip_set_start_time() {
 #[test]
 fn test_clip_set_length() {
     let mut clip = Clip::Audio(AudioClip {
-        source_file: "test.wav".into(),
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::AudioContent {
+            source_file: "test.wav".into(),
+            gain: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+        }),
         start_time: 0.0,
         offset: 0.0,
         length: 4.0,
-        gain: 1.0,
         name: "Audio".into(),
         color: [0; 4],
-        fade_in: 0.0,
-        fade_out: 0.0,
     });
     clip.set_length(8.0);
     assert!((clip.length() - 8.0).abs() < 1e-6);
@@ -1961,12 +1993,16 @@ fn make_render_project(effects: Vec<RackSlot>) -> Project {
         t.rack.push(fx);
     }
     t.clips.push(Clip::Midi(MidiClip {
-        notes: vec![MidiNote {
-            pitch: 60,
-            velocity: 100,
-            start: 0.0,
-            length: 1.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 60,
+                velocity: 100,
+                start: 0.0,
+                length: 1.0,
+            }],
+        }),
         start_time: 0.0,
         length: 2.0,
         name: "Test".into(),
@@ -3192,12 +3228,16 @@ fn make_render_project_with_synth_slot(synth: RackSlot, effects: Vec<RackSlot>) 
         t.rack.push(fx);
     }
     t.clips.push(Clip::Midi(MidiClip {
-        notes: vec![MidiNote {
-            pitch: 60,
-            velocity: 100,
-            start: 0.0,
-            length: 1.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 60,
+                velocity: 100,
+                start: 0.0,
+                length: 1.0,
+            }],
+        }),
         start_time: 0.0,
         length: 2.0,
         name: "Test".into(),
@@ -3421,7 +3461,11 @@ fn test_move_clips_cross_track_undo() {
         clips: vec![(
             1,
             Clip::Midi(MidiClip {
-                notes: vec![],
+                content_offset: 0.0,
+                instance_id: crate::app::shared_content::new_id(),
+                content: crate::app::shared_content::SharedContent::new(
+                    crate::app::models::MidiContent { notes: vec![] },
+                ),
                 start_time: 4.0,
                 length: 2.0,
                 name: "Clip2".into(),
@@ -4788,12 +4832,18 @@ fn test_render_multiple_clips_same_track() {
     // Add a second clip right after the first
     if let Some(track) = project.tracks.iter_mut().next() {
         track.clips.push(Clip::Midi(MidiClip {
-            notes: vec![MidiNote {
-                pitch: 72,
-                velocity: 100,
-                start: 0.0,
-                length: 1.0,
-            }],
+            content_offset: 0.0,
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::MidiContent {
+                    notes: vec![MidiNote {
+                        pitch: 72,
+                        velocity: 100,
+                        start: 0.0,
+                        length: 1.0,
+                    }],
+                },
+            ),
             start_time: 2.0,
             length: 2.0,
             name: "Clip2".into(),
@@ -6136,26 +6186,30 @@ fn test_midi_chord_voicing_open_differs_from_close() {
 fn test_midi_export_roundtrip() {
     // Create a clip, export it, import it back, and verify notes match
     let clip = MidiClip {
-        notes: vec![
-            MidiNote {
-                pitch: 60,
-                velocity: 100,
-                start: 0.0,
-                length: 1.0,
-            },
-            MidiNote {
-                pitch: 64,
-                velocity: 90,
-                start: 1.0,
-                length: 0.5,
-            },
-            MidiNote {
-                pitch: 67,
-                velocity: 80,
-                start: 2.0,
-                length: 2.0,
-            },
-        ],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![
+                MidiNote {
+                    pitch: 60,
+                    velocity: 100,
+                    start: 0.0,
+                    length: 1.0,
+                },
+                MidiNote {
+                    pitch: 64,
+                    velocity: 90,
+                    start: 1.0,
+                    length: 0.5,
+                },
+                MidiNote {
+                    pitch: 67,
+                    velocity: 80,
+                    start: 2.0,
+                    length: 2.0,
+                },
+            ],
+        }),
         start_time: 0.0,
         length: 4.0,
         name: "test".into(),
@@ -6244,7 +6298,11 @@ fn test_midi_export_roundtrip() {
 #[test]
 fn test_midi_export_empty_clip() {
     let clip = MidiClip {
-        notes: vec![],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![],
+        }),
         start_time: 0.0,
         length: 4.0,
         name: "empty".into(),
@@ -6260,12 +6318,16 @@ fn test_midi_export_empty_clip() {
 #[test]
 fn test_midi_export_various_bpm() {
     let clip = MidiClip {
-        notes: vec![MidiNote {
-            pitch: 60,
-            velocity: 100,
-            start: 0.0,
-            length: 1.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 60,
+                velocity: 100,
+                start: 0.0,
+                length: 1.0,
+            }],
+        }),
         start_time: 0.0,
         length: 2.0,
         name: "bpm_test".into(),
@@ -6530,12 +6592,16 @@ fn test_join_midi_clips_apply() {
     }
     // Add a second adjacent clip starting at beat 4
     track.clips.push(Clip::Midi(MidiClip {
-        notes: vec![MidiNote {
-            pitch: 72,
-            velocity: 100,
-            start: 0.0,
-            length: 1.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 72,
+                velocity: 100,
+                start: 0.0,
+                length: 1.0,
+            }],
+        }),
         start_time: 4.0,
         length: 4.0,
         name: "Clip2".into(),
@@ -6583,12 +6649,16 @@ fn test_join_midi_clips_snapshot_undo() {
         m.length = 4.0;
     }
     track.clips.push(Clip::Midi(MidiClip {
-        notes: vec![MidiNote {
-            pitch: 72,
-            velocity: 100,
-            start: 0.0,
-            length: 1.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 72,
+                velocity: 100,
+                start: 0.0,
+                length: 1.0,
+            }],
+        }),
         start_time: 4.0,
         length: 4.0,
         name: "Clip2".into(),
@@ -6639,15 +6709,18 @@ fn test_tempo_map_seconds_to_beats_roundtrip() {
 #[test]
 fn test_audio_clip_defaults() {
     let ac = AudioClip {
-        source_file: "test.wav".into(),
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::AudioContent {
+            source_file: "test.wav".into(),
+            gain: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+        }),
         start_time: 0.0,
         offset: 0.5,
         length: 4.0,
-        gain: 1.0,
         name: "Test".into(),
         color: [200, 100, 50, 200],
-        fade_in: 0.0,
-        fade_out: 0.0,
     };
     assert_eq!(ac.offset, 0.5);
     assert_eq!(ac.gain, 1.0);
@@ -6656,23 +6729,29 @@ fn test_audio_clip_defaults() {
 #[test]
 fn test_automation_clip_interpolation_points() {
     let ac = AutomationClip {
-        points: vec![
-            AutomationPoint {
-                time: 0.0,
-                value: 0.0,
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(
+            crate::app::models::AutomationContent {
+                points: vec![
+                    AutomationPoint {
+                        time: 0.0,
+                        value: 0.0,
+                    },
+                    AutomationPoint {
+                        time: 1.0,
+                        value: 0.5,
+                    },
+                    AutomationPoint {
+                        time: 2.0,
+                        value: 1.0,
+                    },
+                ],
+                target_param: "volume".into(),
             },
-            AutomationPoint {
-                time: 1.0,
-                value: 0.5,
-            },
-            AutomationPoint {
-                time: 2.0,
-                value: 1.0,
-            },
-        ],
+        ),
         start_time: 0.0,
         length: 2.0,
-        target_param: "volume".into(),
         name: "Vol".into(),
         color: [200, 200, 50, 200],
     };
@@ -7654,7 +7733,7 @@ fn test_app_state_clip_selection() {
     let mut state = make_app_state();
 
     // Select a clip
-    state.selected_clip = Some((1, 0));
+    state.select_clip(Some((1, 0)));
     assert_eq!(state.selected_clip, Some((1, 0)));
 
     // Multi-select clips
@@ -7768,15 +7847,18 @@ fn test_midi_note_invariants() {
 #[test]
 fn test_audio_clip_invariants() {
     let clip = AudioClip {
-        source_file: "test.wav".into(),
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::AudioContent {
+            source_file: "test.wav".into(),
+            gain: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+        }),
         start_time: 0.0,
         offset: 0.0,
         length: 4.0,
-        gain: 1.0,
         name: "Test".into(),
         color: [200, 100, 50, 200],
-        fade_in: 0.0,
-        fade_out: 0.0,
     };
     assert!(clip.length > 0.0);
     assert!(clip.gain >= 0.0);
@@ -8501,15 +8583,18 @@ fn make_audio_clip_project(sample_rate: u32, duration_secs: f64, freq: f64, bpm:
     t.mute = false;
     t.solo = false;
     t.clips.push(Clip::Audio(AudioClip {
-        source_file: "sine.wav".into(),
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::AudioContent {
+            source_file: "sine.wav".into(),
+            gain: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+        }),
         start_time: 0.0,
         offset: 0.0,
         length: length_beats,
-        gain: 1.0,
         name: "Sine".into(),
         color: [100, 160, 255, 200],
-        fade_in: 0.0,
-        fade_out: 0.0,
     }));
     p.tracks.push(t);
     p
@@ -8554,6 +8639,7 @@ fn render_audio_clip_project(
             for clip in &track.clips {
                 if let Clip::Audio(ac) = clip {
                     let audio_clip = AudioSampleClip {
+                        channels: 1,
                         start_beats: ac.start_time,
                         length_beats: ac.length,
                         gain: ac.gain,
@@ -9696,6 +9782,8 @@ fn test_limiter_output_at_ceiling() {
 /// Helper: build a "fully loaded" project with every field set to non-default.
 fn make_maxed_project() -> Project {
     let mut p = Project {
+        format_version: 2,
+        shelf_clips: Vec::new(),
         name: "MaxedProject".into(),
         sample_rate: 96000,
         tracks: Vec::new(),
@@ -9755,26 +9843,30 @@ fn make_maxed_project() -> Project {
         p.value = -12.0;
     }
     t1.clips.push(Clip::Midi(MidiClip {
-        notes: vec![
-            MidiNote {
-                pitch: 48,
-                velocity: 127,
-                start: 0.0,
-                length: 0.5,
-            },
-            MidiNote {
-                pitch: 60,
-                velocity: 1,
-                start: 0.5,
-                length: 4.0,
-            },
-            MidiNote {
-                pitch: 127,
-                velocity: 64,
-                start: 2.0,
-                length: 0.01,
-            },
-        ],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![
+                MidiNote {
+                    pitch: 48,
+                    velocity: 127,
+                    start: 0.0,
+                    length: 0.5,
+                },
+                MidiNote {
+                    pitch: 60,
+                    velocity: 1,
+                    start: 0.5,
+                    length: 4.0,
+                },
+                MidiNote {
+                    pitch: 127,
+                    velocity: 64,
+                    start: 2.0,
+                    length: 0.01,
+                },
+            ],
+        }),
         start_time: 1.0,
         length: 8.0,
         name: "MidiClip1".into(),
@@ -9787,42 +9879,51 @@ fn make_maxed_project() -> Project {
     t2.volume = 0.0;
     t2.pan = 1.0;
     t2.clips.push(Clip::Audio(AudioClip {
-        source_file: "/path/to/audio.wav".into(),
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::AudioContent {
+            source_file: "/path/to/audio.wav".into(),
+            gain: 0.5,
+            fade_in: 0.1,
+            fade_out: 0.5,
+        }),
         start_time: 2.5,
         offset: 1.3,
         length: 16.0,
-        gain: 0.5,
         name: "AudioClip1".into(),
         color: [0, 255, 0, 200],
-        fade_in: 0.1,
-        fade_out: 0.5,
     }));
     p.tracks.push(t2);
 
     // Automation track
     let mut t3 = Track::new(3, "FullAuto", TrackType::Automation);
     t3.clips.push(Clip::Automation(AutomationClip {
-        points: vec![
-            AutomationPoint {
-                time: 0.0,
-                value: 0.0,
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(
+            crate::app::models::AutomationContent {
+                points: vec![
+                    AutomationPoint {
+                        time: 0.0,
+                        value: 0.0,
+                    },
+                    AutomationPoint {
+                        time: 2.0,
+                        value: 1.0,
+                    },
+                    AutomationPoint {
+                        time: 4.0,
+                        value: 0.5,
+                    },
+                    AutomationPoint {
+                        time: 8.0,
+                        value: 0.0,
+                    },
+                ],
+                target_param: "1:100:gain".into(),
             },
-            AutomationPoint {
-                time: 2.0,
-                value: 1.0,
-            },
-            AutomationPoint {
-                time: 4.0,
-                value: 0.5,
-            },
-            AutomationPoint {
-                time: 8.0,
-                value: 0.0,
-            },
-        ],
+        ),
         start_time: 0.0,
         length: 8.0,
-        target_param: "1:100:gain".into(),
         name: "AutoClip1".into(),
         color: [255, 255, 0, 200],
     }));
@@ -10125,12 +10226,16 @@ fn test_render_solo_isolates_track() {
     t1.rack = vec![RackSlot::sine_osc(1)];
     t1.solo = true;
     t1.clips.push(Clip::Midi(MidiClip {
-        notes: vec![MidiNote {
-            pitch: 69,
-            velocity: 100,
-            start: 0.0,
-            length: 2.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 69,
+                velocity: 100,
+                start: 0.0,
+                length: 2.0,
+            }],
+        }),
         start_time: 0.0,
         length: 2.0,
         name: "C".into(),
@@ -10140,12 +10245,16 @@ fn test_render_solo_isolates_track() {
     let mut t2 = Track::new(2, "B", TrackType::Midi);
     t2.rack = vec![RackSlot::sine_osc(1)];
     t2.clips.push(Clip::Midi(MidiClip {
-        notes: vec![MidiNote {
-            pitch: 48,
-            velocity: 127,
-            start: 0.0,
-            length: 2.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 48,
+                velocity: 127,
+                start: 0.0,
+                length: 2.0,
+            }],
+        }),
         start_time: 0.0,
         length: 2.0,
         name: "C".into(),
@@ -10208,12 +10317,18 @@ fn test_render_limiter_prevents_clipping() {
         t.volume = 1.0;
         t.rack = vec![RackSlot::subtractive_synth(1)];
         t.clips.push(Clip::Midi(MidiClip {
-            notes: vec![MidiNote {
-                pitch: 60 + (i * 7) as u8,
-                velocity: 127,
-                start: 0.0,
-                length: 2.0,
-            }],
+            content_offset: 0.0,
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::MidiContent {
+                    notes: vec![MidiNote {
+                        pitch: 60 + (i * 7) as u8,
+                        velocity: 127,
+                        start: 0.0,
+                        length: 2.0,
+                    }],
+                },
+            ),
             start_time: 0.0,
             length: 2.0,
             name: "C".into(),
@@ -10333,19 +10448,25 @@ fn test_render_automation_track_no_audio() {
     p.master_rack.clear();
     let mut t = Track::new(1, "Auto", TrackType::Automation);
     t.clips.push(Clip::Automation(AutomationClip {
-        points: vec![
-            AutomationPoint {
-                time: 0.0,
-                value: 0.0,
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(
+            crate::app::models::AutomationContent {
+                points: vec![
+                    AutomationPoint {
+                        time: 0.0,
+                        value: 0.0,
+                    },
+                    AutomationPoint {
+                        time: 4.0,
+                        value: 1.0,
+                    },
+                ],
+                target_param: "1:1:cutoff".into(),
             },
-            AutomationPoint {
-                time: 4.0,
-                value: 1.0,
-            },
-        ],
+        ),
         start_time: 0.0,
         length: 4.0,
-        target_param: "1:1:cutoff".into(),
         name: "A".into(),
         color: [0; 4],
     }));
@@ -10430,12 +10551,16 @@ fn test_render_sqrt2_compensation() {
     t.pan = 0.0;
     t.volume = 1.0;
     t.clips.push(Clip::Midi(MidiClip {
-        notes: vec![MidiNote {
-            pitch: 69,
-            velocity: 100,
-            start: 0.0,
-            length: 2.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 69,
+                velocity: 100,
+                start: 0.0,
+                length: 2.0,
+            }],
+        }),
         start_time: 0.0,
         length: 2.0,
         name: "N".into(),

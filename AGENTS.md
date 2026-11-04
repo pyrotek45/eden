@@ -184,3 +184,22 @@ Read Eden's README.md, docs/tempo-and-clips.md and relevant feature notes before
 - Run cargo build --locked and cargo test --locked, plus affected functional checks. Check GitHub Actions when a PR is involved; distinguish local checks from CI verification.
 - Search for superseded symbols, obsolete paths, unexplained numbers and stale comments before declaring a migration complete.
 - Distinguish implemented, locally tested, CI-verified, published and merged. Identify remaining work and unavailable visual/listening checks. Do not claim a whole issue fixed when only part was addressed.
+
+## Clip content and MIDI editing contracts
+
+- Read docs/clip-content.md before modifying clips or media. Instance placement
+  is separate from copy-on-write shared content. Reconcile content revisions at
+  command/UI publication boundaries and before saving; never in the callback.
+- Clone project snapshots to preserve identities. Use linked_clone for a new
+  instance, and make_unique for independent content. Do not identify data by name.
+- The clip browser derives from project instances and persisted shelf_clips;
+  do not add a separate mutable browser payload or bypass project history.
+- Imported and historical audio assets are immutable. Use commit_audio_render
+  for new derived assets, and project history for undo. Do not restore/edit files
+  in place or reintroduce separate audio-file undo stacks.
+- Use the shared MIDI chain/scheduler for preview, playback and render. Timed
+  MIDI stages must pass surrounding effects, retain original note identity and
+  velocity, and respect gates. Keep expansion bounded and allocation-free.
+- Parameter gestures capture their before-image and prior dirty state once;
+  release commits once, Escape/focus loss cancels. Device and clip interaction
+  widgets use stable identities across layout and index changes.

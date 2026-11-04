@@ -113,13 +113,12 @@ pub fn render_to_buffer(
 
             // Voice triggering
             let midi_effects = &mut instances.track_midi_effects[ti];
-            let arp_state = &mut instances.track_arp_state[ti];
             dsp::trigger_and_release_voices(
                 track,
                 ti,
                 &mut track_voices[ti],
                 midi_effects,
-                arp_state,
+                &[],
                 pos_beats,
                 beats_per_sample,
                 bpm,
@@ -348,13 +347,12 @@ pub fn render_to_wav_with_progress(
             }
 
             let midi_effects = &mut instances.track_midi_effects[ti];
-            let arp_state = &mut instances.track_arp_state[ti];
             dsp::trigger_and_release_voices(
                 track,
                 ti,
                 &mut track_voices[ti],
                 midi_effects,
-                arp_state,
+                &[],
                 pos_beats,
                 beats_per_sample,
                 bpm,

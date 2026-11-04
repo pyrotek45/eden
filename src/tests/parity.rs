@@ -284,12 +284,16 @@ fn test_parity_sqrt2_pan_compensation() {
     t.volume = 1.0;
     t.pan = 0.0;
     t.clips.push(Clip::Midi(MidiClip {
-        notes: vec![MidiNote {
-            pitch: 69,
-            velocity: 100,
-            start: 0.0,
-            length: 2.0,
-        }],
+        content_offset: 0.0,
+        instance_id: crate::app::shared_content::new_id(),
+        content: crate::app::shared_content::SharedContent::new(crate::app::models::MidiContent {
+            notes: vec![MidiNote {
+                pitch: 69,
+                velocity: 100,
+                start: 0.0,
+                length: 2.0,
+            }],
+        }),
         start_time: 0.0,
         length: 2.0,
         name: "N".into(),
@@ -321,12 +325,18 @@ fn test_parity_no_slew_or_tanh_in_render() {
         t.volume = 1.0;
         t.rack = vec![RackSlot::subtractive_synth(1)];
         t.clips.push(Clip::Midi(MidiClip {
-            notes: vec![MidiNote {
-                pitch: 60 + (i * 5) as u8,
-                velocity: 127,
-                start: 0.0,
-                length: 2.0,
-            }],
+            content_offset: 0.0,
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::MidiContent {
+                    notes: vec![MidiNote {
+                        pitch: 60 + (i * 5) as u8,
+                        velocity: 127,
+                        start: 0.0,
+                        length: 2.0,
+                    }],
+                },
+            ),
             start_time: 0.0,
             length: 2.0,
             name: "C".into(),

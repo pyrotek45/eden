@@ -1,6 +1,7 @@
 // Eden DAW — Core data models
 // These are the project-level types that get serialized / deserialized.
 
+use super::shared_content::{new_id, reserve_ids_through, SharedContent};
 use serde::{Deserialize, Serialize};
 
 // ── Track types ──────────────────────────────────────────────────────
@@ -23,8 +24,19 @@ pub struct MidiNote {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MidiClip {
+pub struct MidiContent {
     pub notes: Vec<MidiNote>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MidiClip {
+    /// Beats into the editable source; trimming does not move source events.
+    #[serde(default)]
+    pub content_offset: f64,
+    #[serde(default)]
+    pub instance_id: u64,
+    #[serde(flatten)]
+    pub content: SharedContent<MidiContent>,
     pub start_time: f64, // beats on timeline
     pub length: f64,     // beats
     pub name: String,
@@ -34,20 +46,28 @@ pub struct MidiClip {
 // ── Audio ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AudioClip {
+pub struct AudioContent {
     pub source_file: String,
-    pub start_time: f64, // beats on timeline
-    pub offset: f64,     // where in source file to start (seconds)
-    pub length: f64,     // beats
     pub gain: f32,
-    pub name: String,
-    pub color: [u8; 4],
     /// Fade-in duration in seconds (applied from the start of the clip)
     #[serde(default)]
     pub fade_in: f64,
     /// Fade-out duration in seconds (applied at the end of the clip)
     #[serde(default)]
     pub fade_out: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioClip {
+    #[serde(default)]
+    pub instance_id: u64,
+    #[serde(flatten)]
+    pub content: SharedContent<AudioContent>,
+    pub start_time: f64, // beats on timeline
+    pub offset: f64,     // where in source file to start (seconds)
+    pub length: f64,     // beats
+    pub name: String,
+    pub color: [u8; 4],
 }
 
 // ── Automation ───────────────────────────────────────────────────────
@@ -59,11 +79,22 @@ pub struct AutomationPoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AutomationClip {
+pub struct AutomationContent {
     pub points: Vec<AutomationPoint>,
+    pub target_param: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationClip {
+    /// Beats into the editable source; trimming does not move source events.
+    #[serde(default)]
+    pub content_offset: f64,
+    #[serde(default)]
+    pub instance_id: u64,
+    #[serde(flatten)]
+    pub content: SharedContent<AutomationContent>,
     pub start_time: f64,
     pub length: f64,
-    pub target_param: String,
     pub name: String,
     pub color: [u8; 4],
 }
@@ -169,7 +200,25 @@ pub struct RackSlot {
     pub sidechain_track_id: Option<u32>,
 }
 
+/// Physical rack order follows the engine's existing category processing order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RackStage {
+    Midi,
+    Instrument,
+    Audio,
+}
+
 impl RackSlot {
+    pub fn stage(&self) -> RackStage {
+        if crate::modules::is_midi_effect(&self.plugin_name) {
+            RackStage::Midi
+        } else if crate::modules::is_instrument(&self.plugin_name) {
+            RackStage::Instrument
+        } else {
+            RackStage::Audio
+        }
+    }
+
     /// Create a rack slot from the module's ParamDesc array.
     /// Works for any module registered in modules/mod.rs — no need to
     /// write a hand-rolled constructor for each new effect.
@@ -850,6 +899,10 @@ impl Default for Transport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default = "legacy_project_version")]
+    pub format_version: u32,
+    #[serde(default)]
+    pub shelf_clips: Vec<(u32, Clip)>,
     pub name: String,
     pub sample_rate: u32,
     pub tracks: Vec<Track>,
@@ -863,6 +916,10 @@ pub struct Project {
     pub master_rack: Vec<RackSlot>,
 }
 
+fn legacy_project_version() -> u32 {
+    1
+}
+
 fn default_time_signature() -> (u8, u8) {
     (4, 4)
 }
@@ -870,6 +927,8 @@ fn default_time_signature() -> (u8, u8) {
 impl Default for Project {
     fn default() -> Self {
         Self {
+            format_version: 2,
+            shelf_clips: Vec::new(),
             name: "Untitled".into(),
             sample_rate: 44100,
             tracks: Vec::new(),
@@ -892,32 +951,38 @@ impl Project {
         // MIDI track with a clip
         let mut t1 = Track::new(1, "Synth Lead", TrackType::Midi);
         t1.clips.push(Clip::Midi(MidiClip {
-            notes: vec![
-                MidiNote {
-                    pitch: 60,
-                    velocity: 100,
-                    start: 0.0,
-                    length: 1.0,
+            content_offset: 0.0,
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::MidiContent {
+                    notes: vec![
+                        MidiNote {
+                            pitch: 60,
+                            velocity: 100,
+                            start: 0.0,
+                            length: 1.0,
+                        },
+                        MidiNote {
+                            pitch: 64,
+                            velocity: 90,
+                            start: 1.0,
+                            length: 1.0,
+                        },
+                        MidiNote {
+                            pitch: 67,
+                            velocity: 95,
+                            start: 2.0,
+                            length: 1.0,
+                        },
+                        MidiNote {
+                            pitch: 72,
+                            velocity: 100,
+                            start: 3.0,
+                            length: 2.0,
+                        },
+                    ],
                 },
-                MidiNote {
-                    pitch: 64,
-                    velocity: 90,
-                    start: 1.0,
-                    length: 1.0,
-                },
-                MidiNote {
-                    pitch: 67,
-                    velocity: 95,
-                    start: 2.0,
-                    length: 1.0,
-                },
-                MidiNote {
-                    pitch: 72,
-                    velocity: 100,
-                    start: 3.0,
-                    length: 2.0,
-                },
-            ],
+            ),
             start_time: 0.0,
             length: 8.0,
             name: "Intro".into(),
@@ -929,26 +994,32 @@ impl Project {
         let mut t2 = Track::new(2, "Bass", TrackType::Midi);
         t2.color = [80, 200, 120, 200];
         t2.clips.push(Clip::Midi(MidiClip {
-            notes: vec![
-                MidiNote {
-                    pitch: 36,
-                    velocity: 110,
-                    start: 0.0,
-                    length: 2.0,
+            content_offset: 0.0,
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::MidiContent {
+                    notes: vec![
+                        MidiNote {
+                            pitch: 36,
+                            velocity: 110,
+                            start: 0.0,
+                            length: 2.0,
+                        },
+                        MidiNote {
+                            pitch: 36,
+                            velocity: 110,
+                            start: 2.0,
+                            length: 2.0,
+                        },
+                        MidiNote {
+                            pitch: 31,
+                            velocity: 100,
+                            start: 4.0,
+                            length: 4.0,
+                        },
+                    ],
                 },
-                MidiNote {
-                    pitch: 36,
-                    velocity: 110,
-                    start: 2.0,
-                    length: 2.0,
-                },
-                MidiNote {
-                    pitch: 31,
-                    velocity: 100,
-                    start: 4.0,
-                    length: 4.0,
-                },
-            ],
+            ),
             start_time: 0.0,
             length: 8.0,
             name: "Bass Line".into(),
@@ -960,38 +1031,49 @@ impl Project {
         let mut t3 = Track::new(3, "Drums", TrackType::Audio);
         t3.color = [220, 140, 60, 200];
         t3.clips.push(Clip::Audio(AudioClip {
-            source_file: "drums.wav".into(),
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::AudioContent {
+                    source_file: "drums.wav".into(),
+                    gain: 1.0,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                },
+            ),
             start_time: 0.0,
             offset: 0.0,
             length: 16.0,
-            gain: 1.0,
             name: "Drum Loop".into(),
             color: [220, 140, 60, 200],
-            fade_in: 0.0,
-            fade_out: 0.0,
         }));
         p.tracks.push(t3);
 
         // Automation track
         let mut t4 = Track::new(4, "Filter Auto", TrackType::Automation);
         t4.clips.push(Clip::Automation(AutomationClip {
-            points: vec![
-                AutomationPoint {
-                    time: 0.0,
-                    value: 0.2,
+            content_offset: 0.0,
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::AutomationContent {
+                    points: vec![
+                        AutomationPoint {
+                            time: 0.0,
+                            value: 0.2,
+                        },
+                        AutomationPoint {
+                            time: 4.0,
+                            value: 0.8,
+                        },
+                        AutomationPoint {
+                            time: 8.0,
+                            value: 0.2,
+                        },
+                    ],
+                    target_param: "filter_cutoff".into(),
                 },
-                AutomationPoint {
-                    time: 4.0,
-                    value: 0.8,
-                },
-                AutomationPoint {
-                    time: 8.0,
-                    value: 0.2,
-                },
-            ],
+            ),
             start_time: 0.0,
             length: 8.0,
-            target_param: "filter_cutoff".into(),
             name: "Filter Sweep".into(),
             color: [220, 180, 80, 200],
         }));
@@ -1116,10 +1198,14 @@ pub fn import_midi_file(path: &str, project_bpm: f64) -> Result<Vec<(String, Mid
         result.push((
             track_name,
             MidiClip {
-                notes,
+                content_offset: 0.0,
+                instance_id: crate::app::shared_content::new_id(),
+                content: crate::app::shared_content::SharedContent::new(
+                    crate::app::models::MidiContent { notes: notes },
+                ),
                 start_time: 0.0,
                 length: clip_length,
-                name: String::new(), // will be set by caller
+                name: String::new(),
                 color: [100, 160, 255, 200],
             },
         ));
@@ -1247,7 +1333,11 @@ mod tests {
     #[test]
     fn test_clip_variants() {
         let midi_clip = MidiClip {
-            notes: vec![],
+            content_offset: 0.0,
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::MidiContent { notes: vec![] },
+            ),
             start_time: 0.0,
             length: 4.0,
             name: "Test".into(),
@@ -1257,15 +1347,20 @@ mod tests {
         assert!(matches!(clip, Clip::Midi(_)));
 
         let audio_clip = AudioClip {
-            source_file: "test.wav".into(),
+            instance_id: crate::app::shared_content::new_id(),
+            content: crate::app::shared_content::SharedContent::new(
+                crate::app::models::AudioContent {
+                    source_file: "test.wav".into(),
+                    gain: 1.0,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                },
+            ),
             start_time: 0.0,
             offset: 0.0,
             length: 4.0,
-            gain: 1.0,
             name: "Audio".into(),
             color: [100, 200, 100, 255],
-            fade_in: 0.0,
-            fade_out: 0.0,
         };
         let clip2 = Clip::Audio(audio_clip);
         assert!(matches!(clip2, Clip::Audio(_)));
@@ -1315,5 +1410,233 @@ mod tests {
     fn test_track_new_audio() {
         let track = Track::new(2, "Audio", TrackType::Audio);
         assert!(track.rack.is_empty()); // audio tracks start with no effects
+    }
+}
+
+impl std::ops::Deref for MidiClip {
+    type Target = MidiContent;
+    fn deref(&self) -> &Self::Target {
+        &self.content
+    }
+}
+impl std::ops::DerefMut for MidiClip {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.content
+    }
+}
+
+impl std::ops::Deref for AudioClip {
+    type Target = AudioContent;
+    fn deref(&self) -> &Self::Target {
+        &self.content
+    }
+}
+impl std::ops::DerefMut for AudioClip {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.content
+    }
+}
+
+impl std::ops::Deref for AutomationClip {
+    type Target = AutomationContent;
+    fn deref(&self) -> &Self::Target {
+        &self.content
+    }
+}
+impl std::ops::DerefMut for AutomationClip {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.content
+    }
+}
+
+impl Clip {
+    pub fn instance_id(&self) -> u64 {
+        match self {
+            Self::Midi(c) => c.instance_id,
+            Self::Audio(c) => c.instance_id,
+            Self::Automation(c) => c.instance_id,
+        }
+    }
+    pub fn content_id(&self) -> u64 {
+        match self {
+            Self::Midi(c) => c.content.content_id,
+            Self::Audio(c) => c.content.content_id,
+            Self::Automation(c) => c.content.content_id,
+        }
+    }
+    pub fn set_instance_id(&mut self, id: u64) {
+        match self {
+            Self::Midi(c) => c.instance_id = id,
+            Self::Audio(c) => c.instance_id = id,
+            Self::Automation(c) => c.instance_id = id,
+        }
+    }
+    pub fn make_unique(&mut self) {
+        match self {
+            Self::Midi(c) => c.content.detach(),
+            Self::Audio(c) => c.content.detach(),
+            Self::Automation(c) => c.content.detach(),
+        }
+    }
+    pub fn linked_clone(&self) -> Self {
+        let mut clip = self.clone();
+        clip.set_instance_id(new_id());
+        clip
+    }
+}
+
+impl Project {
+    /// Publish copy-on-write edits to linked instances. Call before snapshots,
+    /// serialization and playback publication; never from the audio callback.
+    pub fn reconcile_clip_content(&mut self) {
+        use std::collections::{HashMap, HashSet};
+        // The engine already processes category passes in this order. Stable
+        // sorting repairs legacy visual order without changing order within a pass.
+        for track in &mut self.tracks {
+            if track
+                .rack
+                .windows(2)
+                .any(|pair| pair[0].stage() > pair[1].stage())
+            {
+                track.rack.sort_by_key(RackSlot::stage);
+            }
+        }
+        for clip in self
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .chain(self.shelf_clips.iter().map(|(_, c)| c))
+        {
+            reserve_ids_through(clip.instance_id().max(clip.content_id()));
+            let revision = match clip {
+                Clip::Midi(c) => c.content.revision,
+                Clip::Audio(c) => c.content.revision,
+                Clip::Automation(c) => c.content.revision,
+            };
+            reserve_ids_through(revision);
+        }
+        let mut instances = HashSet::new();
+        let mut legacy_audio: HashMap<(String, u32, u64, u64), SharedContent<AudioContent>> =
+            HashMap::new();
+        for clip in self
+            .tracks
+            .iter_mut()
+            .flat_map(|t| &mut t.clips)
+            .chain(self.shelf_clips.iter_mut().map(|(_, c)| c))
+        {
+            if clip.instance_id() == 0 {
+                clip.set_instance_id(new_id());
+            }
+            if !instances.insert(clip.instance_id()) {
+                // Ordinary clone/duplicate is independent; linked_clone explicitly
+                // assigns a fresh instance identity while retaining content identity.
+                clip.set_instance_id(new_id());
+                clip.make_unique();
+                instances.insert(clip.instance_id());
+            }
+            match clip {
+                Clip::Midi(c) if c.content.content_id == 0 => c.content.detach(),
+                Clip::Automation(c) if c.content.content_id == 0 => c.content.detach(),
+                Clip::Audio(c) if c.content.content_id == 0 => {
+                    // Preserve legacy audio links only where all editable settings
+                    // match; unequal gains/fades must retain their original sound.
+                    let key = (
+                        c.source_file.clone(),
+                        c.gain.to_bits(),
+                        c.fade_in.to_bits(),
+                        c.fade_out.to_bits(),
+                    );
+                    if let Some(content) = legacy_audio.get(&key) {
+                        c.content = content.clone();
+                    } else {
+                        c.content.detach();
+                        legacy_audio.insert(key, c.content.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        macro_rules! publish {
+            ($variant:ident) => {{
+                let mut latest = HashMap::new();
+                for clip in self
+                    .tracks
+                    .iter()
+                    .flat_map(|t| &t.clips)
+                    .chain(self.shelf_clips.iter().map(|(_, c)| c))
+                {
+                    if let Clip::$variant(c) = clip {
+                        let entry = latest
+                            .entry(c.content.content_id)
+                            .or_insert_with(|| c.content.clone());
+                        if c.content.revision > entry.revision {
+                            *entry = c.content.clone();
+                        }
+                    }
+                }
+                for clip in self
+                    .tracks
+                    .iter_mut()
+                    .flat_map(|t| &mut t.clips)
+                    .chain(self.shelf_clips.iter_mut().map(|(_, c)| c))
+                {
+                    if let Clip::$variant(c) = clip {
+                        c.content = latest[&c.content.content_id].clone();
+                    }
+                }
+            }};
+        }
+        publish!(Midi);
+        publish!(Audio);
+        publish!(Automation);
+    }
+}
+
+impl Project {
+    /// Reject contradictory linked payloads instead of silently discarding data.
+    pub fn validate_content_links(&self) -> Result<(), String> {
+        if self.format_version > 2 {
+            return Err(format!(
+                "Project format {} is newer than supported format 2",
+                self.format_version
+            ));
+        }
+        let mut payloads = std::collections::HashMap::new();
+        for clip in self
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .chain(self.shelf_clips.iter().map(|(_, c)| c))
+        {
+            if clip.content_id() == 0 {
+                continue;
+            }
+            let value = match clip {
+                Clip::Midi(c) => serde_json::to_value(&c.content),
+                Clip::Audio(c) => serde_json::to_value(&c.content),
+                Clip::Automation(c) => serde_json::to_value(&c.content),
+            }
+            .map_err(|e| e.to_string())?;
+            if let Some(previous) = payloads.insert(clip.content_id(), value.clone()) {
+                if previous != value {
+                    return Err(format!(
+                        "Conflicting data for linked content {}",
+                        clip.content_id()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Project {
+    pub fn content_link_count(&self, id: u64) -> usize {
+        self.tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .chain(self.shelf_clips.iter().map(|(_, c)| c))
+            .filter(|clip| clip.content_id() == id)
+            .count()
     }
 }

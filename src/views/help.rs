@@ -183,6 +183,8 @@ pub fn draw_help_screen(canvas: &mut Canvas<Window>, input: &mut InputState, sta
             ("Ctrl+A", "Select all clips", false),
             ("Ctrl+C / Ctrl+V", "Copy / Paste at playhead", false),
             ("Ctrl+D", "Duplicate selected clips", false),
+            ("Ctrl+Shift+D", "Duplicate linked clip content", false),
+            ("Ctrl+Shift+U", "Make active clip unique", false),
             ("Delete / Backspace", "Delete selected clips", false),
             ("", "", false),
             ("── Clip Editing ──", "", true),

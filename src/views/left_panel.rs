@@ -24,6 +24,9 @@ pub(super) fn draw_left_panel(
     // Start the left panel below the rulers so tabs are not covered by re-drawn rulers
     let panel_y = state.track_area_top();
     let panel_h = wh - panel_y - bottom_h;
+    if panel_h <= 0 {
+        return;
+    }
 
     // ── Consume all mouse presses inside the left panel so they don't bleed through
     //    to the arrangement track area drawn underneath.
@@ -628,15 +631,20 @@ fn draw_left_panel_files(
                     let file_name = row.name.clone();
                     // Create an AudioClip for the clip library
                     let new_clip = crate::app::models::Clip::Audio(crate::app::models::AudioClip {
-                        source_file: file_path.clone(),
+                        instance_id: crate::app::shared_content::new_id(),
+                        content: crate::app::shared_content::SharedContent::new(
+                            crate::app::models::AudioContent {
+                                source_file: file_path.clone(),
+                                gain: 1.0,
+                                fade_in: 0.0,
+                                fade_out: 0.0,
+                            },
+                        ),
                         start_time: 0.0,
                         offset: 0.0,
-                        length: 4.0, // default 4 beats; will be recalculated from waveform
-                        gain: 1.0,
+                        length: 4.0,
                         name: file_name.clone(),
                         color: [100, 220, 130, 200],
-                        fade_in: 0.0,
-                        fade_out: 0.0,
                     });
                     // Add to clip library if not already there
                     let already = state.clip_library.iter().any(|(_, lc)| {
@@ -647,7 +655,13 @@ fn draw_left_panel_files(
                         }
                     });
                     if !already {
-                        state.clip_library.push((0, new_clip));
+                        let snapshot = state.project.clone();
+                        state.project.shelf_clips.push((0, new_clip));
+                        state
+                            .commands
+                            .push_undo_snapshot(snapshot, "Import Clip to Shelf");
+                        state.sync_clip_library();
+                        state.dirty = true;
                     }
                     // Switch to Clips tab
                     state.left_panel_tab = LeftPanelTab::Clips;
@@ -918,7 +932,7 @@ fn draw_left_panel_files(
                                             &mut state.project,
                                         );
                                         // Select the new track
-                                        state.selected_clip = Some((new_id, 0));
+                                        state.select_clip(Some((new_id, 0)));
                                         state.selected_clips.clear();
                                         state.selected_clips.insert((new_id, 0));
                                         state.selected_track = Some(new_id);
@@ -1006,15 +1020,20 @@ fn draw_left_panel_files(
                                 };
                                 let mut audio_clip = crate::app::models::Clip::Audio(
                                     crate::app::models::AudioClip {
-                                        source_file: file_str,
+                                        instance_id: crate::app::shared_content::new_id(),
+                                        content: crate::app::shared_content::SharedContent::new(
+                                            crate::app::models::AudioContent {
+                                                source_file: file_str,
+                                                gain: 1.0,
+                                                fade_in: 0.0,
+                                                fade_out: 0.0,
+                                            },
+                                        ),
                                         start_time: beat,
                                         offset: 0.0,
                                         length: clip_len_beats,
-                                        gain: 1.0,
                                         name: stem.clone(),
                                         color: [100, 160, 255, 255],
-                                        fade_in: 0.0,
-                                        fade_out: 0.0,
                                     },
                                 );
 
@@ -1036,7 +1055,7 @@ fn draw_left_panel_files(
                                         &mut state.project,
                                     );
                                     // Auto-select the newly placed clip
-                                    state.selected_clip = Some((track_id, new_ci));
+                                    state.select_clip(Some((track_id, new_ci)));
                                     state.selected_clips.clear();
                                     state.selected_clips.insert((track_id, new_ci));
                                     state.selected_track = Some(track_id);
@@ -1071,7 +1090,7 @@ fn draw_left_panel_files(
                                         &mut state.project,
                                     );
                                     // Auto-select the new clip on the new track
-                                    state.selected_clip = Some((new_id, 0));
+                                    state.select_clip(Some((new_id, 0)));
                                     state.selected_clips.clear();
                                     state.selected_clips.insert((new_id, 0));
                                     state.selected_track = Some(new_id);

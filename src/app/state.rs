@@ -373,7 +373,8 @@ pub struct AppState {
     pub arrangement: ArrangementView,
     pub selected_track: Option<u32>,
     pub selected_tracks: std::collections::HashSet<u32>,
-    pub selected_clip: Option<(u32, usize)>, // (track_id, clip_index)
+    pub selected_clip: Option<(u32, usize)>,
+    pub(crate) selected_clip_identity: Option<u64>, // (track_id, clip_index)
     pub window_width: u32,
     pub window_height: u32,
     pub running: bool,
@@ -450,7 +451,7 @@ pub struct AppState {
     /// Whether the current clip drag is a copy (Ctrl+drag)
     pub clip_drag_is_copy: bool,
     pub(crate) clip_drag_moved: bool,
-    pub(crate) editor_clip_context: Option<(u32, usize, String)>,
+    pub(crate) editor_clip_context: Option<(u64, u64, String)>,
     pub(crate) clip_drag_baseline: Vec<super::clip_edit::ClipBaseline>,
     /// Ghost positions for clone drag visual feedback: (display_track_id, source_track_id, clip_idx, new_start)
     pub clip_drag_ghost_positions: Vec<(u32, u32, usize, f64)>,
@@ -619,6 +620,7 @@ pub struct AppState {
     pub mixer_channel_scroll: std::collections::HashMap<u32, i32>,
     /// Index of rack slot being dragged for reordering (source index)
     pub rack_reorder_drag: Option<usize>,
+    pub(crate) selected_rack_device: Option<(Option<u32>, u32)>,
     /// Target insertion index while dragging
     pub rack_reorder_target: Option<usize>,
     // ── Focus / Context ──────────────────────────────────────────────
@@ -710,7 +712,6 @@ pub struct AppState {
     /// Snapshot for multi-track volume/pan undo
     pub multi_slider_snapshot: Option<Project>,
     /// Snapshot captured before the first CStrip2 knob change in a drag session
-    pub cstrip2_knob_snapshot: Option<Project>,
     /// Raw mouse X at start of multi-track volume drag (pixel-accurate delta)
     pub multi_vol_drag_start_x: i32,
     pub multi_vol_slider_w: i32,
@@ -727,6 +728,8 @@ pub struct AppState {
     // ── Audio editor fade ─────────────────────────────────────────────
     /// Fade-in duration in seconds (0.0 = no fade)
     pub audio_editor_fade_in: f64,
+    pub(crate) audio_parameter_snapshot: Option<super::parameter_edit::ParameterGesture>,
+    pub(crate) project_parameter_snapshot: Option<super::parameter_edit::ParameterGesture>,
     /// Fade-out duration in seconds (0.0 = no fade)
     pub audio_editor_fade_out: f64,
     // ── Module drag state ─────────────────────────────────────────────
@@ -762,7 +765,10 @@ pub struct AppState {
     pub waveform_stereo_cache: std::collections::HashMap<String, StereoWaveformPeaks>,
     /// Raw stereo waveform data for high-res audio editor rendering.
     /// Key = source_file string, Value = (left_samples, right_samples, sample_rate).
-    pub waveform_raw_cache: std::collections::HashMap<String, (Vec<f32>, Vec<f32>, u32)>,
+    pub waveform_raw_cache: std::collections::HashMap<
+        String,
+        (std::sync::Arc<Vec<f32>>, std::sync::Arc<Vec<f32>>, u32),
+    >,
     // ── Audio editor state ───────────────────────────────────────────
     /// Audio editor horizontal scroll (in samples fraction 0.0-1.0)
     pub audio_editor_scroll: f64,
@@ -784,17 +790,11 @@ pub struct AppState {
     /// Loop region end in seconds (within the audio file)
     pub audio_editor_loop_end: f64,
     // ── Audio editor clipboard (for cut/paste) ───────────────────────
-    /// Clipboard buffer for audio samples (mono f32, cut from source file)
+    /// Interleaved clipboard samples; preserve the source channel layout.
     pub audio_clipboard: Option<Vec<f32>>,
     /// Sample rate of the audio clipboard samples
     pub audio_clipboard_sr: u32,
-    // ── Audio editor undo stack ──────────────────────────────────────
-    /// Stack of undo snapshots: (source_file_path, backup_file_path, description, project_snapshot).
-    /// Each destructive operation saves a backup of the file before modifying it.
-    /// The optional project snapshot restores clip metadata (offset, length) changed alongside the file.
-    pub audio_undo_stack: Vec<(String, String, String, Option<crate::app::models::Project>)>,
-    /// Redo stack (same format as undo). Cleared on new destructive operation.
-    pub audio_redo_stack: Vec<(String, String, String, Option<crate::app::models::Project>)>,
+    pub audio_clipboard_channels: usize,
     // ── Audio editor effects ────────────────────────────────────────
     /// Currently selected effect index in the audio editor effects dropdown
     pub audio_editor_effect_idx: usize,
@@ -847,6 +847,7 @@ impl AppState {
             selected_track: None,
             selected_tracks: std::collections::HashSet::new(),
             selected_clip: None,
+            selected_clip_identity: None,
             window_width: 1280,
             window_height: 800,
             running: true,
@@ -966,6 +967,7 @@ impl AppState {
             mixer_expanded_tracks: std::collections::HashSet::new(),
             mixer_channel_scroll: std::collections::HashMap::new(),
             rack_reorder_drag: None,
+            selected_rack_device: None,
             rack_reorder_target: None,
             focused_panel: FocusedPanel::Arrangement,
             audio_sample_invalidate: Vec::new(),
@@ -1006,7 +1008,6 @@ impl AppState {
             multi_vol_drag_origins: Vec::new(),
             multi_pan_drag_origins: Vec::new(),
             multi_slider_snapshot: None,
-            cstrip2_knob_snapshot: None,
             multi_vol_drag_start_x: 0,
             multi_vol_slider_w: 1,
             multi_pan_drag_start_x: 0,
@@ -1014,6 +1015,8 @@ impl AppState {
             audio_editor_snap_enabled: true,
             audio_editor_snap_idx: 2, // default 1/4 note
             audio_editor_fade_in: 0.0,
+            audio_parameter_snapshot: None,
+            project_parameter_snapshot: None,
             audio_editor_fade_out: 0.0,
             audio_device_names: Vec::new(),
             audio_device_idx: 0,
@@ -1036,8 +1039,7 @@ impl AppState {
             audio_editor_loop_end: 0.0,
             audio_clipboard: None,
             audio_clipboard_sr: 44100,
-            audio_undo_stack: Vec::new(),
-            audio_redo_stack: Vec::new(),
+            audio_clipboard_channels: 1,
             audio_editor_effect_idx: 0,
             audio_export_popup_open: false,
             audio_export_name: String::new(),
@@ -1071,27 +1073,19 @@ impl AppState {
     /// Adds any clips not already present (by name+type match).
     /// Should be called after clip creation or project load.
     pub fn sync_clip_library(&mut self) {
-        // Remove entries whose track no longer exists in the project
-        let track_ids: Vec<u32> = self.project.tracks.iter().map(|t| t.id).collect();
-        self.clip_library.retain(|(tid, _)| track_ids.contains(tid));
-
-        // Add any new clips that aren't already in the library
-        for track in &self.project.tracks {
-            for clip in &track.clips {
-                let already = self.clip_library.iter().any(|(tid, lc)| {
-                    *tid == track.id
-                        && lc.name() == clip.name()
-                        && std::mem::discriminant(lc) == std::mem::discriminant(clip)
-                });
-                if !already {
-                    self.clip_library.push((track.id, clip.clone()));
-                }
-            }
-        }
+        self.project.reconcile_clip_content();
+        self.clip_library = self
+            .project
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter().map(move |clip| (track.id, clip.clone())))
+            .chain(self.project.shelf_clips.iter().cloned())
+            .collect();
     }
 
     /// Save project to JSON file.
     pub fn save_project(&mut self, path: &str) -> Result<(), String> {
+        self.project.reconcile_clip_content();
         let json = serde_json::to_string_pretty(&self.project)
             .map_err(|e| format!("Serialize error: {}", e))?;
         std::fs::write(path, json).map_err(|e| format!("Write error: {}", e))?;
@@ -1106,6 +1100,7 @@ impl AppState {
     /// clearing the dirty flag. This prevents autosave from hijacking
     /// the user's manual save path.
     pub fn autosave_project(&mut self, path: &str) -> Result<(), String> {
+        self.project.reconcile_clip_content();
         let json = serde_json::to_string_pretty(&self.project)
             .map_err(|e| format!("Serialize error: {}", e))?;
         std::fs::write(path, json).map_err(|e| format!("Write error: {}", e))?;
@@ -1117,11 +1112,14 @@ impl AppState {
         let data = std::fs::read_to_string(path).map_err(|e| format!("Read error: {}", e))?;
         let project: Project =
             serde_json::from_str(&data).map_err(|e| format!("Deserialize error: {}", e))?;
+        project.validate_content_links()?;
         self.project = project;
+        self.project.reconcile_clip_content();
+        self.project.format_version = 2;
         self.last_save_path = Some(path.to_string());
         self.dirty = false;
         self.selected_track = None;
-        self.selected_clip = None;
+        self.select_clip(None);
         self.clip_library.clear();
         self.push_recent_project(path.to_string());
         self.push_status(format!("Loaded {}", path));
@@ -1409,8 +1407,18 @@ impl AppState {
         if !self.bottom_panel_open {
             self.bottom_panel_handle_h()
         } else {
-            let min_h = (self.bottom_panel_handle_h() + Self::BOTTOM_PANEL_MIN_CONTENT_H).min(self.bottom_panel_max_h());
-            let max_h = self.bottom_panel_max_h();
+            let full = self.bottom_panel_max_h();
+            if self.bottom_panel_height == full {
+                return full;
+            }
+            // Preserve a usable arranger/browser in normal split view. Explicit
+            // handle maximization still uses the full available detail area.
+            const MIN_ARRANGER_VIEWPORT_PX: i32 = 180;
+            let max_h =
+                (self.window_height as i32 - self.track_area_top() - MIN_ARRANGER_VIEWPORT_PX)
+                    .clamp((self.bottom_panel_handle_h() + 96).min(full), full);
+            let min_h =
+                (self.bottom_panel_handle_h() + Self::BOTTOM_PANEL_MIN_CONTENT_H).min(max_h);
             self.bottom_panel_height.clamp(min_h, max_h)
         }
     }
@@ -1450,6 +1458,48 @@ impl AppState {
     /// Load waveform peaks for any audio clips that aren't cached yet.
     /// Call this once per frame to lazily populate the cache.
     pub fn load_pending_waveforms(&mut self) {
+        let selected_source = self
+            .selected_clip
+            .and_then(|(tid, ci)| {
+                self.project
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .and_then(|t| t.clips.get(ci))
+            })
+            .and_then(|clip| {
+                if let Clip::Audio(c) = clip {
+                    Some(c.source_file.clone())
+                } else {
+                    None
+                }
+            });
+        // Raw editor samples are transient view data, not history or an asset store.
+        self.waveform_raw_cache
+            .retain(|path, _| Some(path) == selected_source.as_ref());
+        let active: std::collections::HashSet<_> = self
+            .project
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .chain(self.clip_library.iter().map(|(_, c)| c))
+            .filter_map(|clip| {
+                if let Clip::Audio(c) = clip {
+                    Some(c.source_file.clone())
+                } else {
+                    None
+                }
+            })
+            .chain(
+                self.project
+                    .tracks
+                    .iter()
+                    .filter_map(|t| t.sampler_file.clone()),
+            )
+            .collect();
+        self.waveform_cache.retain(|path, _| active.contains(path));
+        self.waveform_stereo_cache
+            .retain(|path, _| active.contains(path));
         // Collect source files that need loading
         let mut needed: Vec<String> = Vec::new();
         let mut needed_stereo: Vec<String> = Vec::new();
@@ -1475,6 +1525,16 @@ impl AppState {
             if let Some(ref sf) = track.sampler_file {
                 if !sf.is_empty() && !self.waveform_cache.contains_key(sf) && !needed.contains(sf) {
                     needed.push(sf.clone());
+                }
+            }
+        }
+        for (_, clip) in &self.clip_library {
+            if let Clip::Audio(audio) = clip {
+                if !audio.source_file.is_empty()
+                    && !self.waveform_cache.contains_key(&audio.source_file)
+                    && !needed.contains(&audio.source_file)
+                {
+                    needed.push(audio.source_file.clone());
                 }
             }
         }
@@ -1521,11 +1581,29 @@ impl AppState {
                             .chunks(channels)
                             .map(|ch| ch[1.min(channels - 1)])
                             .collect();
-                        (l, r)
+                        (std::sync::Arc::new(l), std::sync::Arc::new(r))
                     } else {
-                        (raw.clone(), raw)
+                        let samples = std::sync::Arc::new(raw);
+                        (samples.clone(), samples)
                     };
-                    e.insert((left, right, sr));
+                    const RAW_EDITOR_CACHE_BYTES: usize = 64 * 1024 * 1024;
+                    let sample_count = left.len()
+                        + if std::sync::Arc::ptr_eq(&left, &right) {
+                            0
+                        } else {
+                            right.len()
+                        };
+                    if sample_count * std::mem::size_of::<f32>() <= RAW_EDITOR_CACHE_BYTES {
+                        e.insert((left, right, sr));
+                    } else {
+                        // Remember that this file uses peak rendering; do not decode
+                        // an oversized file again on every frame.
+                        e.insert((
+                            std::sync::Arc::new(Vec::new()),
+                            std::sync::Arc::new(Vec::new()),
+                            sr,
+                        ));
+                    }
                 }
             }
         }

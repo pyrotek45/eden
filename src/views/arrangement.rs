@@ -585,11 +585,18 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                             // Drop as an audio clip on this audio track
                             let clip =
                                 crate::app::models::Clip::Audio(crate::app::models::AudioClip {
-                                    source_file: state.audio_drag_source.clone(),
+                                    instance_id: crate::app::shared_content::new_id(),
+                                    content: crate::app::shared_content::SharedContent::new(
+                                        crate::app::models::AudioContent {
+                                            source_file: state.audio_drag_source.clone(),
+                                            gain: 1.0,
+                                            fade_in: 0.0,
+                                            fade_out: 0.0,
+                                        },
+                                    ),
                                     start_time: snapped,
                                     offset: state.audio_drag_offset,
                                     length: drag_len_beats,
-                                    gain: 1.0,
                                     name: {
                                         let p = std::path::Path::new(&state.audio_drag_source);
                                         p.file_stem()
@@ -598,8 +605,6 @@ pub fn draw_arrangement(canvas: &mut Canvas<Window>, input: &mut InputState, sta
                                             .to_string()
                                     },
                                     color: [100, 200, 140, 255],
-                                    fade_in: 0.0,
-                                    fade_out: 0.0,
                                 });
                             state.commands.execute(
                                 Box::new(crate::app::commands::AddClips {

@@ -39,7 +39,7 @@ use std::sync::Arc;
 /// A single MIDI note event flowing through the MIDI effect chain.
 /// pitch: 0–127, velocity: 0.0–1.0 (normalised), original_pitch: the
 /// pitch before any prior effects (used for note-off tracking).
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct MidiEvent {
     pub pitch: u8,
     pub velocity: f32, // 0.0–1.0
@@ -57,12 +57,74 @@ impl MidiEvent {
     }
 }
 
+/// Bounded MIDI work buffer: chord/octave expansion cannot allocate on the audio thread.
+/// Excess events are dropped deterministically after 512 simultaneous events.
+pub const MAX_MIDI_EVENTS: usize = 512;
+/// Fixed velocity used by computer-keyboard and mouse-key auditions.
+pub const KEYBOARD_NOTE_VELOCITY: u8 = 100;
+#[derive(Clone)]
+pub struct MidiEvents {
+    events: [MidiEvent; MAX_MIDI_EVENTS],
+    len: usize,
+}
+impl MidiEvents {
+    pub fn new() -> Self {
+        Self {
+            events: [MidiEvent::new(0, 0.0); MAX_MIDI_EVENTS],
+            len: 0,
+        }
+    }
+    pub fn push(&mut self, event: MidiEvent) {
+        if self.len < self.events.len() {
+            self.events[self.len] = event;
+            self.len += 1;
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn iter(&self) -> std::slice::Iter<'_, MidiEvent> {
+        self.events[..self.len].iter()
+    }
+    pub fn as_slice(&self) -> &[MidiEvent] {
+        &self.events[..self.len]
+    }
+    pub fn as_mut_slice(&mut self) -> &mut [MidiEvent] {
+        &mut self.events[..self.len]
+    }
+}
+impl FromIterator<MidiEvent> for MidiEvents {
+    fn from_iter<T: IntoIterator<Item = MidiEvent>>(events: T) -> Self {
+        let mut result = Self::new();
+        for event in events.into_iter().take(MAX_MIDI_EVENTS) {
+            result.push(event);
+        }
+        result
+    }
+}
+impl IntoIterator for MidiEvents {
+    type Item = MidiEvent;
+    type IntoIter = std::iter::Take<std::array::IntoIter<MidiEvent, MAX_MIDI_EVENTS>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.events.into_iter().take(self.len)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // MIDI Context
 // ═══════════════════════════════════════════════════════════════════
 
 /// Read-only context passed to every MIDI effect process call.
 pub struct MidiContext<'a> {
+    /// A preceding timed stage still holds its most recent output batch.
+    pub upstream_clocked: bool,
+    pub module_name: &'static str,
     /// Current playback position in beats.
     pub pos_beats: f64,
     /// Previous position in beats (for edge detection).
@@ -76,13 +138,22 @@ pub struct MidiContext<'a> {
 }
 
 impl MidiContext<'_> {
-    /// Helper: look up a param by id, returning `default` if not found.
+    /// Resolve omitted legacy parameters to the same defaults as a new device.
     pub fn get(&self, key: &str) -> f32 {
-        self.params
+        let descriptor = get_param_descs(self.module_name)
+            .iter()
+            .find(|d| d.id == key);
+        let value = self
+            .params
             .iter()
             .find(|(id, _)| id == key)
-            .map(|(_, v)| *v)
-            .unwrap_or(0.0)
+            .map(|(_, value)| *value)
+            .unwrap_or_else(|| descriptor.map(|d| d.default).unwrap_or(0.0));
+        if let Some(descriptor) = descriptor {
+            value.clamp(descriptor.min, descriptor.max)
+        } else {
+            value
+        }
     }
 }
 
@@ -93,9 +164,13 @@ impl MidiContext<'_> {
 pub trait MidiEffect: Send + Sync {
     fn name(&self) -> &'static str;
     /// Process one batch of events.  `ctx` supplies position/BPM/params.
-    fn process(&mut self, events: Vec<MidiEvent>, ctx: &MidiContext<'_>) -> Vec<MidiEvent>;
+    fn process(&mut self, events: MidiEvents, ctx: &MidiContext<'_>) -> MidiEvents;
     /// Reset internal state (called on seek / loop boundary).
     fn reset(&mut self) {}
+    /// Whether a timed effect's current gate is still open.
+    fn gate_open(&self, _pos_beats: f64) -> bool {
+        true
+    }
     /// True if this effect manages its own voice lifetime (like Arpeggiator).
     fn manages_voices(&self) -> bool {
         false
@@ -306,6 +381,10 @@ pub trait EffectModule: Send + Sync {
         0.0
     }
     fn reset(&mut self) {}
+    /// Whether a timed effect's current gate is still open.
+    fn gate_open(&self, _pos_beats: f64) -> bool {
+        true
+    }
     fn has_tail(&self) -> bool {
         false
     }
@@ -406,6 +485,10 @@ pub fn has_vis_panel(name: &str) -> bool {
 
 pub fn get_param_descs(name: &str) -> &'static [ParamDesc] {
     match name {
+        "Arpeggiator" => midi_effects::ARPEGGIATOR_PARAMS,
+        "Chord" => midi_effects::CHORD_PARAMS,
+        "Transpose" => midi_effects::TRANSPOSE_PARAMS,
+        "Velocity" => midi_effects::VELOCITY_PARAMS,
         "Analog" => instruments::SUBTRACTIVE_PARAMS,
         "HyperSaw" => instruments::SUPERSAW_PARAMS,
         "Sampler" => instruments::SAMPLER_PARAMS,
