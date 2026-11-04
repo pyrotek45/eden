@@ -25,3 +25,8 @@ boundaries, stereo decoding/interpolation and preview frame looping.
 Final local checks: `cargo build --locked`, `cargo test --locked` (621 unit +
 1 graphics + 2 SDL event tests; 624 passed), and `cargo rustc --locked -- -D warnings`
 all passed. GitHub Actions status is reported separately in the pull request.
+
+Rack styling follow-up: actual SDL captures checked the flat track/master cards,
+Dark/Light/Midnight colors and larger-font/narrow-window layouts. Mouse checks
+exercised header right-drag reorder/undo, bypass and the expanded Add Device
+browser action. Existing device-grid and stage-order tests remain in the full suite.

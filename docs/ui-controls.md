@@ -61,3 +61,20 @@ explicitly maximized detail panel can still cover it. Large workspace fonts rais
 the minimum logical window height so controls and a usable split view fit. The
 clip browser scales its row heights, uses theme backgrounds, and truncates long
 names with a full-name tooltip instead of overlapping its type/beat readouts.
+
+## Rack visual refinement
+
+Track and master device chains now share a flat card surface: neutral headers,
+a narrow theme-accent selection rail, a full-card selected outline, aligned
+parameter bays and a divider beside device graphs. Only occupied parameter cells
+receive a bay. Wider gaps keep left-to-right signal arrows separate from controls.
+Knobs use a neutral flat face, an outer theme-colored value arc and a contrasting
+position marker; decorative shadows, center dots and glow rings were removed.
+Selector captions use the readable secondary text color rather than disabled text.
+
+The end-of-chain action is labeled `+ DEVICE` and opens the existing module
+browser. Both rack scroll ranges include its full width. Device parameters,
+header hit regions, bypass/delete actions, drag ordering, undo and DSP are unchanged.
+The visual direction takes cues from compact Ableton/Bitwig device chains while
+retaining Eden's bitmap typography and custom themes; no third-party UI assets
+or implementation were copied.

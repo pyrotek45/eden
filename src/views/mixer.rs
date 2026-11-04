@@ -33,6 +33,8 @@ fn rack_cell_width(slot: &crate::app::models::RackSlot, font_scale: i32) -> i32 
 }
 
 const DEVICE_HEADER_HEIGHT: i32 = 40;
+const ADD_DEVICE_WIDTH: i32 = 132;
+const DEVICE_END_PADDING: i32 = ADD_DEVICE_WIDTH + 16;
 
 /// Width of the display column beside a device's knobs. Wide enough that a
 /// frequency or transfer curve reads as a graph rather than a thumbnail; a log
@@ -78,6 +80,7 @@ fn device_header(
             .into(),
         );
     }
+    let selected = state.selected_rack_device == Some((owner, slot_id));
     canvas.set_draw_color(Theme::c(if hover {
         state.theme.button_hover
     } else {
@@ -89,10 +92,20 @@ fn device_header(
         (width - 2) as u32,
         (DEVICE_HEADER_HEIGHT - 1) as u32,
     ));
-    if state.selected_rack_device == Some((owner, slot_id)) {
-        canvas.set_draw_color(Theme::c(state.theme.accent));
-        let _ = canvas.fill_rect(Rect::new(x + 1, y + 1, (width - 2) as u32, 2));
-    }
+    // A narrow accent rail and full-card outline identify selection without
+    // flooding every device with the theme's accent color.
+    canvas.set_draw_color(Theme::c(if selected {
+        state.theme.accent
+    } else {
+        state.theme.panel_border
+    }));
+    let _ = canvas.draw_rect(Rect::new(x, y, width as u32, DEVICE_HEADER_HEIGHT as u32));
+    let _ = canvas.fill_rect(Rect::new(
+        x + 1,
+        y + 1,
+        3,
+        (DEVICE_HEADER_HEIGHT - 2) as u32,
+    ));
     let category = if crate::modules::is_midi_effect(name) {
         "MIDI FX"
     } else if crate::modules::is_instrument(name) {
@@ -110,6 +123,69 @@ fn device_header(
         Theme::c(state.theme.text_secondary),
         1,
     );
+}
+
+/// Flat device surface shared by track and master racks. Parameter bays use the
+/// same measured grid as the controls, so larger fonts retain their spacing.
+#[allow(clippy::too_many_arguments)]
+fn device_surface(
+    canvas: &mut Canvas<Window>,
+    theme: &Theme,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    columns: usize,
+    cell_width: i32,
+    parameter_count: usize,
+    first_center: i32,
+    row_height: i32,
+    selected: bool,
+    enabled: bool,
+) {
+    canvas.set_draw_color(Theme::c(if enabled {
+        theme.panel_bg
+    } else {
+        theme.bg_medium
+    }));
+    let _ = canvas.fill_rect(Rect::new(x, y, width as u32, height as u32));
+    // 16px knob radius plus 6px breathing room above each control.
+    const BAY_TOP_PADDING: i32 = 22;
+    for row in 0..parameter_count.div_ceil(columns) {
+        let bay_y = y + first_center + row as i32 * row_height - BAY_TOP_PADDING;
+        let bay_h = (row_height - 8).min(y + height - 8 - bay_y);
+        if bay_h < 20 {
+            continue;
+        }
+        for col in 0..columns {
+            if row * columns + col >= parameter_count {
+                break;
+            }
+            let bay_x = x + col as i32 * cell_width + 6;
+            canvas.set_draw_color(Theme::c(theme.bg_medium));
+            let _ = canvas.fill_rect(Rect::new(
+                bay_x,
+                bay_y,
+                (cell_width - 8).max(1) as u32,
+                bay_h as u32,
+            ));
+        }
+    }
+    // Separate the live display from the controls with a quiet divider.
+    let display_x = x + columns as i32 * cell_width + 20;
+    if display_x < x + width - 10 {
+        canvas.set_draw_color(Theme::c(theme.panel_border));
+        let _ = canvas.draw_line(
+            (display_x, y + DEVICE_HEADER_HEIGHT + 8),
+            (display_x, y + height - 8),
+        );
+    }
+    canvas.set_draw_color(Theme::c(if selected {
+        theme.accent
+    } else {
+        theme.panel_border
+    }));
+    let _ = canvas.draw_rect(Rect::new(x, y, width as u32, height as u32));
 }
 
 fn rack_reorder_index(
@@ -1755,7 +1831,7 @@ pub(super) fn draw_instrument_rack(
                              // rather than squishing when the panel is short
     let natural_h = (h - 40 - scrollbar_h).max(60);
     let slot_h = natural_h.max(96); // Short panels use more columns, not hidden knob rows.
-    let slot_gap = 8i32;
+    let slot_gap = 16i32;
     let scroll_offset = state.rack_scroll_x as i32;
     let mut sx = 10i32 - scroll_offset;
 
@@ -1816,20 +1892,10 @@ pub(super) fn draw_instrument_rack(
 
         // Slot background
         let slot_enabled = state.project.tracks[ti].rack[slot_idx].enabled;
-        let bg = if slot_enabled {
-            Theme::c(state.theme.panel_bg)
-        } else {
-            sdl2::pixels::Color::RGBA(
-                state.theme.panel_bg[0].saturating_sub(20),
-                state.theme.panel_bg[1].saturating_sub(20),
-                state.theme.panel_bg[2].saturating_sub(20),
-                200,
-            )
-        };
-        canvas.set_draw_color(bg);
-        let _ = canvas.fill_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
-        canvas.set_draw_color(Theme::c(state.theme.panel_border));
-        let _ = canvas.draw_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
+        device_surface(canvas, &state.theme, sx, sy, slot_w, slot_h, cols, knob_cell_w,
+            param_count, first_center, row_height,
+            state.selected_rack_device == Some((Some(state.project.tracks[ti].id),
+                state.project.tracks[ti].rack[slot_idx].slot_id)), slot_enabled);
 
         let header_name = plugin_name_ref.clone();
         let device_owner = Some(state.project.tracks[ti].id);
@@ -2129,7 +2195,7 @@ pub(super) fn draw_instrument_rack(
                     sel_x,
                     ky + 16 + 6 + 5 * state.font_scale,
                     sel_w,
-                    Theme::c(state.theme.text_dim),
+                    Theme::c(state.theme.text_secondary),
                 );
                 // Draw current value
                 draw_pixel_label(
@@ -2682,9 +2748,9 @@ pub(super) fn draw_instrument_rack(
             id: __auto_id_27,
             x: add_btn_x,
             y: add_btn_y,
-            width: 24,
-            height: 24,
-            label: "+".into(),
+            width: ADD_DEVICE_WIDTH,
+            height: 28,
+            label: "+ DEVICE".into(),
             toggled: false,
             icon: ButtonIcon::None,
             hint: Some("Open modules panel to drag modules here".into()),
@@ -3026,7 +3092,7 @@ pub(super) fn draw_instrument_rack(
 
     // ── Chunky horizontal scrollbar at bottom of rack ──
     // Add extra padding so the "+" button at the end of the last slot is always scrollable-to
-    let total_content_w = sx + scroll_offset + 80; // +80px so the "+" button is reachable when rack is full
+    let total_content_w = sx + scroll_offset + DEVICE_END_PADDING; // Include the add-device action in horizontal scrolling
     let sb_y = top + h - scrollbar_h;
     if total_content_w > w {
         let visible_ratio = (w as f32 / total_content_w as f32).clamp(0.02, 1.0);
@@ -3236,7 +3302,7 @@ pub(super) fn draw_master_rack(
     let scrollbar_h = 18i32;
     let natural_h = (h - 40 - scrollbar_h).max(60);
     let slot_h = natural_h.max(96); // Short panels use more columns, not hidden knob rows.
-    let slot_gap = 8i32;
+    let slot_gap = 16i32;
     let scroll_offset = state.rack_scroll_x as i32;
     let mut sx = 10i32 - scroll_offset;
     canvas.set_clip_rect(Rect::new(0, top + 20, rack_w as u32, (slot_h + 24) as u32));
@@ -3280,20 +3346,10 @@ pub(super) fn draw_master_rack(
         let slot_w = (knob_cols_w + vis_col_w).max(160);
 
         let slot_enabled = state.project.master_rack[slot_idx].enabled;
-        let bg = if slot_enabled {
-            Theme::c(state.theme.panel_bg)
-        } else {
-            sdl2::pixels::Color::RGBA(
-                state.theme.panel_bg[0].saturating_sub(20),
-                state.theme.panel_bg[1].saturating_sub(20),
-                state.theme.panel_bg[2].saturating_sub(20),
-                200,
-            )
-        };
-        canvas.set_draw_color(bg);
-        let _ = canvas.fill_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
-        canvas.set_draw_color(Theme::c(state.theme.panel_border));
-        let _ = canvas.draw_rect(Rect::new(sx, sy, slot_w as u32, slot_h as u32));
+        device_surface(canvas, &state.theme, sx, sy, slot_w, slot_h, cols, knob_cell_w,
+            param_count, first_center, row_height,
+            state.selected_rack_device == Some((None,state.project.master_rack[slot_idx].slot_id)),
+            slot_enabled);
 
         let device_slot = state.project.master_rack[slot_idx].slot_id;
         device_header(
@@ -3481,7 +3537,7 @@ pub(super) fn draw_master_rack(
                     sel_x,
                     ky + 16 + 6 + 5 * state.font_scale,
                     sel_w,
-                    Theme::c(state.theme.text_dim),
+                    Theme::c(state.theme.text_secondary),
                 );
                 draw_pixel_label(
                     canvas,
@@ -3634,9 +3690,9 @@ pub(super) fn draw_master_rack(
             id: add_btn_id,
             x: add_btn_x,
             y: top + 24 + slot_h / 2 - 12,
-            width: 24,
-            height: 24,
-            label: "+".into(),
+            width: ADD_DEVICE_WIDTH,
+            height: 28,
+            label: "+ DEVICE".into(),
             toggled: false,
             icon: ButtonIcon::None,
             hint: Some("Add effect to master output chain".into()),
@@ -3718,7 +3774,7 @@ pub(super) fn draw_master_rack(
     state.module_drag_replace_idx = None;
 
     // ── Scrollbar ──
-    let total_content_w = sx + scroll_offset;
+    let total_content_w = sx + scroll_offset + DEVICE_END_PADDING;
     let sb_y = top + h - scrollbar_h;
     if total_content_w > rack_w {
         let visible_ratio = (rack_w as f32 / total_content_w as f32).clamp(0.02, 1.0);

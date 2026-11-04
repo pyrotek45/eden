@@ -155,46 +155,27 @@ pub fn knob(
         }
     }
 
-    // Shadow
-    let _ = canvas.gfx_filled_circle(cx, cy + 1, r + 1, sdl2::pixels::Color::RGBA(0, 0, 0, 50));
-
-    // Outer ring
-    let outer_color = if is_active {
-        Theme::c(theme.accent)
+    // Flat dial: neutral face, outer value track, one clear position marker.
+    // Theme colors keep Light/custom themes as readable as the dark palette.
+    let outer_color = Theme::c(if is_active {
+        theme.accent
     } else if is_hot {
-        Theme::c(theme.accent_hover)
+        theme.accent_hover
     } else {
-        Theme::c(theme.panel_border)
-    };
+        theme.panel_border
+    });
     let _ = canvas.gfx_filled_circle(cx, cy, r, outer_color);
-
-    // Main body
     let body_r = r - 2;
-    let body_color = if is_active {
-        sdl2::pixels::Color::RGBA(
-            theme.knob_bg[0].saturating_add(20),
-            theme.knob_bg[1].saturating_add(20),
-            theme.knob_bg[2].saturating_add(20),
-            255,
-        )
-    } else {
-        Theme::c(theme.knob_bg)
-    };
-    let _ = canvas.gfx_filled_circle(cx, cy, body_r, body_color);
+    let _ = canvas.gfx_filled_circle(cx, cy, body_r, Theme::c(theme.knob_bg));
 
     // Value arc
     let t = inv_lerp(params.min, params.max, *value);
     let start_deg = 135.0_f64;
     let total_sweep = 270.0_f64;
-    let arc_r = (body_r as f64) - 1.0;
+    let arc_r = r as f64 - 1.0;
 
     // Background track
-    let track_col = sdl2::pixels::Color::RGBA(
-        theme.knob_bg[0].saturating_sub(12),
-        theme.knob_bg[1].saturating_sub(12),
-        theme.knob_bg[2].saturating_sub(12),
-        255,
-    );
+    let track_col = Theme::c(theme.panel_border);
     draw_thick_arc(
         canvas,
         cx as f64,
@@ -236,33 +217,14 @@ pub fn knob(
 
     // Pointer line
     let ptr_a = (start_deg + t as f64 * total_sweep).to_radians();
-    let r_start = body_r as f64 * 0.3;
-    let r_end = body_r as f64 * 0.85;
+    let r_start = body_r as f64 * 0.45;
+    let r_end = body_r as f64 * 0.8;
     let px1 = cx as f64 + ptr_a.cos() * r_start;
     let py1 = cy as f64 + ptr_a.sin() * r_start;
     let px2 = cx as f64 + ptr_a.cos() * r_end;
     let py2 = cy as f64 + ptr_a.sin() * r_end;
-    let ptr_col = if is_active {
-        sdl2::pixels::Color::RGBA(255, 255, 255, 255)
-    } else {
-        Theme::c(theme.knob_indicator)
-    };
+    let ptr_col = Theme::c(theme.text_primary);
     let _ = canvas.gfx_thick_line(px1 as i16, py1 as i16, px2 as i16, py2 as i16, 2, ptr_col);
-
-    // Center dot
-    let dot_col = if is_active {
-        Theme::c(theme.accent)
-    } else {
-        Theme::c(theme.knob_fg)
-    };
-    let _ = canvas.gfx_filled_circle(cx, cy, 2, dot_col);
-
-    // Active glow
-    if is_active {
-        let glow = sdl2::pixels::Color::RGBA(theme.accent[0], theme.accent[1], theme.accent[2], 35);
-        let _ = canvas.gfx_aa_circle(cx, cy, r + 3, glow);
-        let _ = canvas.gfx_aa_circle(cx, cy, r + 4, glow);
-    }
 
     // Value display below knob
     let below_y = params.y + params.radius + 3;
